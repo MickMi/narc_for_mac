@@ -1,0 +1,27 @@
+# Build artifacts
+.build/
+Build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Swift Package Manager
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store
+*.dSYM
+*.dSYM.zip
+
+# IDE
+.harness/
+.harness
+.cursorrules
+.vscode/
+*.swp
+*~
+
+# Misc
+MEMORY.md
+TODO.md

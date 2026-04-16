@@ -1,0 +1,347 @@
+import Cocoa
+import Combine
+
+/// Service that monitors running applications for Dock badge changes.
+/// Uses NSWorkspace notifications + periodic polling of Dock badge via Accessibility API.
+class AppMonitorService: ObservableObject {
+
+    // MARK: - Published State
+
+    @Published var notificationStates: [NotificationState] = []
+    @Published var totalBadgeCount: Int = 0
+    @Published var filters: [NotificationFilter] = []
+
+    /// Filtered notification states based on active filter rules.
+    var filteredStates: [NotificationState] {
+        notificationStates.filter { state in
+            guard state.app.isEnabled else { return false }
+            let action = resolveFilterAction(for: state)
+            return action != .hide
+        }
+    }
+
+    // MARK: - Private
+
+    private var timer: Timer?
+    private var cancellables = Set<AnyCancellable>()
+    private let pollingInterval: TimeInterval = 2.0
+
+    /// Default apps to monitor (can be customized via preferences).
+    private let defaultMonitoredApps: [MonitoredApp] = [
+        MonitoredApp(id: "com.tencent.xinWeChat", displayName: "WeChat", category: .im, isEnabled: true),
+        MonitoredApp(id: "com.tencent.WeWorkMac", displayName: "WeCom", category: .im, isEnabled: true),
+        MonitoredApp(id: "com.electron.lark", displayName: "Lark", category: .im, isEnabled: true),
+        MonitoredApp(id: "com.microsoft.VSCode", displayName: "VS Code", category: .ide, isEnabled: false),
+    ]
+
+    // MARK: - Init
+
+    init() {
+        notificationStates = defaultMonitoredApps.map { NotificationState(app: $0) }
+        loadFilters()
+    }
+
+    // MARK: - Filter Rules
+
+    /// Resolve the filter action for a given notification state.
+    func resolveFilterAction(for state: NotificationState) -> NotificationFilter.FilterAction {
+        let activeFilters = filters.filter { $0.isEnabled }
+
+        // Check app-specific filters first, then wildcard filters
+        let appFilters = activeFilters.filter { $0.appBundleID == state.app.bundleID }
+        let wildcardFilters = activeFilters.filter { $0.appBundleID == "*" }
+
+        let applicableFilters = appFilters.isEmpty ? wildcardFilters : appFilters
+
+        for filter in applicableFilters {
+            switch filter.filterType {
+            case .mute:
+                return .hide
+            case .alwaysNotify:
+                return filter.action
+            case .badgeThreshold:
+                let threshold = Int(filter.pattern) ?? 1
+                if state.badgeCount >= threshold {
+                    return filter.action
+                } else {
+                    return .silent
+                }
+            case .keyword:
+                // Future: match against notification content
+                return filter.action
+            }
+        }
+
+        // Default: show normally
+        return .normal
+    }
+
+    /// Add a new filter rule.
+    func addFilter(_ filter: NotificationFilter) {
+        filters.append(filter)
+        saveFilters()
+    }
+
+    /// Remove a filter rule.
+    func removeFilter(id: UUID) {
+        filters.removeAll { $0.id == id }
+        saveFilters()
+    }
+
+    /// Update a filter rule.
+    func updateFilter(_ filter: NotificationFilter) {
+        if let index = filters.firstIndex(where: { $0.id == filter.id }) {
+            filters[index] = filter
+            saveFilters()
+        }
+    }
+
+    private func saveFilters() {
+        if let data = try? JSONEncoder().encode(filters) {
+            UserDefaults.standard.set(data, forKey: "narc.filters")
+        }
+    }
+
+    private func loadFilters() {
+        if let data = UserDefaults.standard.data(forKey: "narc.filters"),
+           let saved = try? JSONDecoder().decode([NotificationFilter].self, from: data) {
+            filters = saved
+        }
+    }
+
+    // MARK: - Monitoring
+
+    func startMonitoring() {
+        // Listen for app launch/termination
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didLaunchApplicationNotification)
+            .sink { [weak self] _ in self?.pollAppStates() }
+            .store(in: &cancellables)
+
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didTerminateApplicationNotification)
+            .sink { [weak self] _ in self?.pollAppStates() }
+            .store(in: &cancellables)
+
+        // Periodic polling for badge changes
+        timer = Timer.scheduledTimer(withTimeInterval: pollingInterval, repeats: true) { [weak self] _ in
+            self?.pollAppStates()
+        }
+
+        // Initial poll
+        pollAppStates()
+    }
+
+    func stopMonitoring() {
+        timer?.invalidate()
+        timer = nil
+        cancellables.removeAll()
+    }
+
+    // MARK: - Polling
+
+    private func pollAppStates() {
+        let runningApps = NSWorkspace.shared.runningApplications
+
+        // Collect bundle IDs of enabled, running apps
+        let enabledBundleIDs = self.notificationStates
+            .filter { $0.app.isEnabled }
+            .map { $0.app.bundleID }
+
+        let runningBundleIDs = Set(runningApps.compactMap { $0.bundleIdentifier })
+
+        // Read all badges in one batch on a background thread
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+
+            // Batch-read badges for all running monitored apps
+            let badgeMap = self.readAllDockBadges(
+                for: enabledBundleIDs.filter { runningBundleIDs.contains($0) }
+            )
+
+            DispatchQueue.main.async {
+                for state in self.notificationStates {
+                    guard state.app.isEnabled else { continue }
+
+                    let isRunning = runningBundleIDs.contains(state.app.bundleID)
+
+                    // Log state changes
+                    if state.isRunning != isRunning {
+                        print("[NARC] \(state.app.displayName): \(isRunning ? "▶️ now running" : "⏹ stopped")")
+                    }
+
+                    state.isRunning = isRunning
+
+                    if isRunning {
+                        let badge = badgeMap[state.app.bundleID] ?? 0
+                        if badge != state.badgeCount {
+                            print("[NARC] \(state.app.displayName): badge changed \(state.badgeCount) → \(badge)")
+                        }
+                        state.badgeCount = badge
+                    } else {
+                        state.badgeCount = 0
+                    }
+
+                    state.lastUpdated = Date()
+                }
+
+                self.totalBadgeCount = self.notificationStates
+                    .filter { $0.app.isEnabled }
+                    .reduce(0) { $0 + $1.badgeCount }
+            }
+        }
+    }
+
+    /// Batch-read Dock badge counts for multiple apps using `lsappinfo`.
+    /// Returns a dictionary of [bundleID: badgeCount].
+    private func readAllDockBadges(for bundleIDs: [String]) -> [String: Int] {
+        var result: [String: Int] = [:]
+        for bundleID in bundleIDs {
+            result[bundleID] = readDockBadge(for: bundleID)
+        }
+        return result
+    }
+
+    /// Read the Dock badge count for a given app using `lsappinfo`.
+    /// This is more reliable than Accessibility API on macOS 14+/15+ where
+    /// AXStatusLabel on Dock items is no longer populated.
+    private func readDockBadge(for bundleID: String) -> Int {
+        let task = Process()
+        task.launchPath = "/usr/bin/lsappinfo"
+        task.arguments = ["info", "-only", "StatusLabel", bundleID]
+
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            return 0
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8) else { return 0 }
+
+        // Output format: "StatusLabel"={ "label"="3" }
+        // or:            "StatusLabel"={ "label"="" }
+        // or:            "StatusLabel"={ "label"=kCFNULL }
+        // Extract the value between the last pair of quotes after "label"=
+        guard let labelRange = output.range(of: "\"label\"=") else { return 0 }
+        let afterLabel = String(output[labelRange.upperBound...])
+
+        // Check for quoted value: "label"="123"
+        if afterLabel.hasPrefix("\"") {
+            let inner = afterLabel.dropFirst() // remove leading "
+            if let endQuote = inner.firstIndex(of: "\"") {
+                let value = String(inner[inner.startIndex..<endQuote])
+                if value.isEmpty { return 0 }
+                return Int(value) ?? (value.isEmpty ? 0 : 1)
+            }
+        }
+
+        return 0
+    }
+
+    // MARK: - App Activation
+
+    /// Activate (bring to front) the app with the given bundle ID,
+    /// and move its window to the specified screen (NARC's screen).
+    ///
+    /// Handles three difficult cases:
+    /// 1. Window is minimized (in Dock) → unminimize via AX API
+    /// 2. Window is on another desktop/Space → use NSRunningApplication.activate with proper options
+    /// 3. Window is hidden → unhide first
+    func activateApp(bundleID: String, summonToScreen targetScreen: NSScreen? = nil) {
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else {
+            print("[NARC] ⚠️ App not running: \(bundleID)")
+            return
+        }
+
+        print("[NARC] 🔄 Activating \(app.localizedName ?? bundleID)...")
+
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+
+        // Step 1: If the app is hidden, unhide it first
+        if app.isHidden {
+            app.unhide()
+            print("[NARC] 👁 Unhid \(bundleID)")
+        }
+
+        // Step 2: Unminimize any minimized windows via AX API
+        var windowsRef: CFTypeRef?
+        var hasMinimizedWindows = false
+        if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+           let windows = windowsRef as? [AXUIElement] {
+            for window in windows {
+                var minimizedRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimizedRef) == .success,
+                   let isMinimized = minimizedRef as? Bool, isMinimized {
+                    AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+                    hasMinimizedWindows = true
+                    print("[NARC] 📤 Unminimized window for \(bundleID)")
+                }
+            }
+        }
+
+        // Step 3: Activate the app — use multiple strategies for reliability
+        // On macOS 14+, activate() alone may not cross Spaces, so we combine with AX raise
+        app.activate()
+
+        // Step 3b: Also open the app via NSWorkspace — this is the most reliable way
+        // to bring an app from another Space to the current one on macOS 14+/15+
+        if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            let config = NSWorkspace.OpenConfiguration()
+            config.activates = true
+            NSWorkspace.shared.openApplication(at: appURL, configuration: config)
+            print("[NARC] 🚀 Opened \(bundleID) via NSWorkspace for cross-Space activation")
+        }
+
+        // Step 4: Use AX API to raise the main window (ensures it comes to current Space)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            self.raiseMainWindow(appElement: appElement, bundleID: bundleID)
+        }
+
+        // Step 5: If a target screen is specified, move the app's window there
+        // IMPORTANT: preserve the window's original size — only change its position
+        if let screen = targetScreen {
+            // Use a longer delay if windows were minimized (they need time to restore)
+            let delay: Double = hasMinimizedWindows ? 0.6 : 0.4
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                WindowManagerService.summonAppWindow(bundleID: bundleID, toScreen: screen)
+                print("[NARC] ✅ Summoned \(app.localizedName ?? bundleID) to NARC screen")
+            }
+        }
+    }
+
+    /// Raise the main window of an app using AX API.
+    /// This is critical for bringing windows from other Spaces to the current one.
+    private func raiseMainWindow(appElement: AXUIElement, bundleID: String) {
+        // Try to get the main window first
+        var mainWindowRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &mainWindowRef) == .success,
+           let mainWindow = mainWindowRef {
+            let windowElement = mainWindow as! AXUIElement
+            AXUIElementPerformAction(windowElement, kAXRaiseAction as CFString)
+            print("[NARC] 🔝 Raised main window for \(bundleID)")
+            return
+        }
+
+        // Fallback: raise the first window from the windows list
+        var windowsRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+           let windows = windowsRef as? [AXUIElement], let firstWindow = windows.first {
+            AXUIElementPerformAction(firstWindow, kAXRaiseAction as CFString)
+            print("[NARC] 🔝 Raised first window for \(bundleID)")
+            return
+        }
+
+        // Last resort: try to get focused window
+        var focusedRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedRef) == .success,
+           let focusedWindow = focusedRef {
+            let windowElement = focusedWindow as! AXUIElement
+            AXUIElementPerformAction(windowElement, kAXRaiseAction as CFString)
+            print("[NARC] 🔝 Raised focused window for \(bundleID)")
+        }
+    }
+}
