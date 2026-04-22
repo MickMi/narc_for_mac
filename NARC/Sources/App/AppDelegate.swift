@@ -9,9 +9,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var floatingWindow: FloatingWidgetWindow?
     private var statusBarItem: NSStatusItem?
     private var panelWindow: NSPanel?
+    private var keyEventMonitor: Any?
 
     private let appMonitor = AppMonitorService()
     private let windowManager = WindowManagerService()
+    private let pinnedWindowService = PinnedWindowService()
+    private let hotkeyService = HotkeyService()
 
     // MARK: - App Lifecycle
 
@@ -31,13 +34,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         appMonitor.startMonitoring()
 
         print("[NARC] Registering global hotkeys...")
-        windowManager.registerGlobalHotkeys()
+        hotkeyService.onPinHotkeyPressed = { [weak self] in
+            guard let self = self else { return }
+            let success = self.pinnedWindowService.pinCurrentWindow()
+            if success {
+                self.showPinFeedback()
+            }
+        }
+        hotkeyService.onTogglePanelHotkeyPressed = { [weak self] in
+            self?.togglePanel()
+        }
+        hotkeyService.onLayoutHotkeyPressed = { layout in
+            WindowManagerService.moveActiveWindow(to: layout)
+        }
+        hotkeyService.registerGlobalHotkeys()
 
         print("[NARC] ✅ App launch complete. Look for the floating widget (bottom-right) and menu bar icon.")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         appMonitor.stopMonitoring()
+    }
+
+    /// Show a brief visual feedback on the floating widget when a window is pinned.
+    private func showPinFeedback() {
+        guard let window = floatingWindow else { return }
+        let originalAlpha = window.alphaValue
+
+        // Quick flash animation
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.1
+            window.animator().alphaValue = 0.3
+        }, completionHandler: {
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.1
+                window.animator().alphaValue = originalAlpha
+            })
+        })
     }
 
     // MARK: - Menu Bar
@@ -68,7 +101,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupFloatingWidget() {
         let widgetView = FloatingWidgetView(
             appMonitor: appMonitor,
-            onTap: { [weak self] in self?.togglePanel() }
+            onTap: { /* Handled at AppKit level via onWidgetTapped */ }
         )
 
         let hostingView = NSHostingView(rootView: widgetView)
@@ -96,6 +129,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.isMovableByWindowBackground = true
         window.collectionBehavior = [.canJoinAllSpaces, .stationary]
         window.orderFrontRegardless()
+
+        // Handle tap at AppKit level — this fires reliably even on the first click
+        // when NARC is not the frontmost application (bypasses SwiftUI gesture issues)
+        window.onWidgetTapped = { [weak self] in
+            self?.togglePanel()
+        }
 
         // When the widget is dragged, reposition the panel
         window.onWindowMoved = { [weak self] in
@@ -142,6 +181,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return NSRect(x: panelX, y: panelY, width: panelWidth, height: panelHeight)
     }
 
+    /// Shared keyboard selection state for the panel.
+    /// Tracks which item is selected via ↑↓ keys.
+    private let keyboardSelection = KeyboardSelectionState()
+
     private func showPanel() {
         guard let widgetFrame = floatingWindow?.frame else { return }
 
@@ -150,12 +193,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Determine which screen the NARC widget is on
         let narcScreen = NSScreen.screens.first(where: { $0.frame.contains(widgetFrame.origin) }) ?? NSScreen.main
 
+        // Reset keyboard selection when opening panel
+        keyboardSelection.selectedIndex = -1
+
         let panelContentView = PanelView(
             appMonitor: appMonitor,
             windowManager: windowManager,
+            pinnedWindowService: pinnedWindowService,
             onClose: { [weak self] in self?.hidePanel() },
             onOpenPreferences: { [weak self] in self?.openPreferences() },
-            narcScreen: narcScreen
+            narcScreen: narcScreen,
+            keyboardSelection: keyboardSelection
         )
 
         let hostingView = NSHostingView(rootView: panelContentView)
@@ -179,6 +227,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         panel.orderFrontRegardless()
         self.panelWindow = panel
+
+        // Install local key event monitor for panel keyboard navigation
+        installKeyEventMonitor(narcScreen: narcScreen)
     }
 
     /// Update the panel position to follow the floating widget.
@@ -189,8 +240,128 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func hidePanel() {
+        removeKeyEventMonitor()
         panelWindow?.orderOut(nil)
         panelWindow = nil
+    }
+
+    // MARK: - Keyboard Navigation
+
+    /// Install a local key event monitor for panel keyboard navigation.
+    /// Handles: ↑↓ to select items, ↩ to activate, Esc to close, number keys for quick access.
+    private func installKeyEventMonitor(narcScreen: NSScreen?) {
+        removeKeyEventMonitor()
+
+        keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self,
+                  let panel = self.panelWindow, panel.isVisible else {
+                return event
+            }
+
+            let keyCode = event.keyCode
+
+            switch keyCode {
+            case 53: // Esc — close panel
+                self.hidePanel()
+                return nil
+
+            case 126: // ↑ — select previous item
+                self.selectPreviousItem()
+                return nil
+
+            case 125: // ↓ — select next item
+                self.selectNextItem()
+                return nil
+
+            case 36: // ↩ — activate selected item
+                self.activateSelectedItem(narcScreen: narcScreen)
+                return nil
+
+            case 18...29: // Number keys 1-0 (keyCodes 18=1, 19=2, ..., 29=0)
+                let numberMap: [UInt16: Int] = [
+                    18: 0, 19: 1, 20: 2, 21: 3, 23: 4,
+                    22: 5, 26: 6, 28: 7, 25: 8, 29: 9
+                ]
+                if let index = numberMap[keyCode] {
+                    self.activateItemAtIndex(index, narcScreen: narcScreen)
+                }
+                return nil
+
+            default:
+                return event
+            }
+        }
+    }
+
+    /// Remove the local key event monitor.
+    private func removeKeyEventMonitor() {
+        if let monitor = keyEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyEventMonitor = nil
+        }
+    }
+
+    /// Build the flat list of all activatable items in the panel.
+    private func allPanelItems() -> [PanelItem] {
+        var items: [PanelItem] = []
+
+        // Monitoring section
+        for state in appMonitor.filteredStates {
+            if state.isRunning {
+                items.append(.monitoring(state))
+            }
+        }
+
+        // Pinned section
+        for pinned in pinnedWindowService.pinnedWindows {
+            items.append(.pinned(pinned))
+        }
+
+        return items
+    }
+
+    private func selectNextItem() {
+        let items = allPanelItems()
+        guard !items.isEmpty else { return }
+        let current = keyboardSelection.selectedIndex
+        keyboardSelection.selectedIndex = min(current + 1, items.count - 1)
+    }
+
+    private func selectPreviousItem() {
+        let items = allPanelItems()
+        guard !items.isEmpty else { return }
+        let current = keyboardSelection.selectedIndex
+        keyboardSelection.selectedIndex = max(current - 1, 0)
+    }
+
+    private func activateSelectedItem(narcScreen: NSScreen?) {
+        let items = allPanelItems()
+        let index = keyboardSelection.selectedIndex
+        guard index >= 0 && index < items.count else { return }
+        activatePanelItem(items[index], narcScreen: narcScreen)
+    }
+
+    private func activateItemAtIndex(_ index: Int, narcScreen: NSScreen?) {
+        let items = allPanelItems()
+        guard index >= 0 && index < items.count else { return }
+        keyboardSelection.selectedIndex = index
+        activatePanelItem(items[index], narcScreen: narcScreen)
+    }
+
+    private func activatePanelItem(_ item: PanelItem, narcScreen: NSScreen?) {
+        switch item {
+        case .monitoring(let state):
+            appMonitor.activateApp(
+                bundleID: state.app.bundleID,
+                summonToScreen: narcScreen
+            )
+        case .pinned(let pinned):
+            pinnedWindowService.activatePinnedWindow(
+                pinned,
+                summonToScreen: narcScreen
+            )
+        }
+        hidePanel()
     }
 
     // MARK: - Actions

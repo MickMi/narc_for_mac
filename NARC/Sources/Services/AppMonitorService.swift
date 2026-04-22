@@ -262,50 +262,86 @@ class AppMonitorService: ObservableObject {
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
 
         // Step 1: If the app is hidden, unhide it first
+        var wasHidden = false
         if app.isHidden {
             app.unhide()
+            wasHidden = true
             print("[NARC] 👁 Unhid \(bundleID)")
         }
 
-        // Step 2: Unminimize any minimized windows via AX API
-        var windowsRef: CFTypeRef?
+        // Step 2: Unminimize the main window via AX API (only the main one, not all)
+        // Track whether AX API can see any windows at all — some apps (e.g., WeChat)
+        // return no windows when hidden, requiring NSWorkspace.openApplication as fallback.
         var hasMinimizedWindows = false
-        if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-           let windows = windowsRef as? [AXUIElement] {
-            for window in windows {
-                var minimizedRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &minimizedRef) == .success,
-                   let isMinimized = minimizedRef as? Bool, isMinimized {
-                    AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
-                    hasMinimizedWindows = true
-                    print("[NARC] 📤 Unminimized window for \(bundleID)")
-                }
+        var hasAnyWindow = false
+
+        if let mainWindow = AXWindowHelper.getMainWindow(appElement) {
+            hasAnyWindow = true
+            if AXWindowHelper.isMinimized(mainWindow) {
+                AXWindowHelper.unminimize(mainWindow)
+                hasMinimizedWindows = true
+                print("[NARC] 📤 Unminimized main window for \(bundleID)")
+            }
+        } else if let windows = AXWindowHelper.getWindows(appElement), let firstWindow = windows.first {
+            hasAnyWindow = true
+            if AXWindowHelper.isMinimized(firstWindow) {
+                AXWindowHelper.unminimize(firstWindow)
+                hasMinimizedWindows = true
+                print("[NARC] 📤 Unminimized first window for \(bundleID)")
             }
         }
 
-        // Step 3: Activate the app — use multiple strategies for reliability
-        // On macOS 14+, activate() alone may not cross Spaces, so we combine with AX raise
-        app.activate()
-
-        // Step 3b: Also open the app via NSWorkspace — this is the most reliable way
-        // to bring an app from another Space to the current one on macOS 14+/15+
-        if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
-            let config = NSWorkspace.OpenConfiguration()
-            config.activates = true
-            NSWorkspace.shared.openApplication(at: appURL, configuration: config)
-            print("[NARC] 🚀 Opened \(bundleID) via NSWorkspace for cross-Space activation")
+        // Step 3: Pre-position the window BEFORE activating the app.
+        // This eliminates the visible "flash" where the window appears at its old position
+        // and then jumps to the target screen. By moving it first (while still in the
+        // background), the window will already be at the correct position when it becomes visible.
+        if let screen = targetScreen, hasAnyWindow {
+            // We can see the window via AX — move it to the target screen now,
+            // before the app is activated and the window becomes visible.
+            WindowManagerService.summonAppWindow(bundleID: bundleID, toScreen: screen)
+            print("[NARC] 📍 Pre-positioned \(bundleID) to target screen before activation")
         }
 
-        // Step 4: Use AX API to raise the main window (ensures it comes to current Space)
+        // Step 4: Activate the app
+        // For apps where AX API can see windows, use app.activate() only — this avoids
+        // NSWorkspace.openApplication which restores windows to their original screen positions.
+        // For apps where AX API returns NO windows (e.g., WeChat after ⌘H), we MUST use
+        // NSWorkspace.openApplication as a fallback to force the app to restore its windows.
+        app.activate()
+
+        if !hasAnyWindow {
+            // AX API found no windows — the app is likely fully hidden (e.g., WeChat ⌘H).
+            // Use NSWorkspace.openApplication to force window restoration.
+            // This will restore windows to their original screen, but our summonAppWindow
+            // (Step 6) will move them to the correct screen afterwards.
+            if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                let config = NSWorkspace.OpenConfiguration()
+                config.activates = true
+                NSWorkspace.shared.openApplication(at: appURL, configuration: config)
+                print("[NARC] 🚀 No AX windows found — using NSWorkspace.openApplication for \(bundleID)")
+            }
+        }
+
+        // Step 5: Use AX API to raise the main window (ensures it comes to current Space)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             self.raiseMainWindow(appElement: appElement, bundleID: bundleID)
         }
 
-        // Step 5: If a target screen is specified, move the app's window there
-        // IMPORTANT: preserve the window's original size — only change its position
+        // Step 6: Post-activation position correction.
+        // For apps where we could pre-position (Step 3), do a quick follow-up to ensure
+        // the position wasn't reset by the activation process.
+        // For apps where AX found no windows, we need a longer delay for window restoration.
         if let screen = targetScreen {
-            // Use a longer delay if windows were minimized (they need time to restore)
-            let delay: Double = hasMinimizedWindows ? 0.6 : 0.4
+            let delay: Double
+            if !hasAnyWindow {
+                delay = 1.0  // NSWorkspace.openApplication needs the most time
+            } else if wasHidden {
+                delay = 0.3  // Shorter delay — we already pre-positioned in Step 3
+            } else if hasMinimizedWindows {
+                delay = 0.3
+            } else {
+                delay = 0.2  // Quick follow-up to confirm position
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 WindowManagerService.summonAppWindow(bundleID: bundleID, toScreen: screen)
                 print("[NARC] ✅ Summoned \(app.localizedName ?? bundleID) to NARC screen")
@@ -316,31 +352,20 @@ class AppMonitorService: ObservableObject {
     /// Raise the main window of an app using AX API.
     /// This is critical for bringing windows from other Spaces to the current one.
     private func raiseMainWindow(appElement: AXUIElement, bundleID: String) {
-        // Try to get the main window first
-        var mainWindowRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &mainWindowRef) == .success,
-           let mainWindow = mainWindowRef {
-            let windowElement = mainWindow as! AXUIElement
-            AXUIElementPerformAction(windowElement, kAXRaiseAction as CFString)
+        if let mainWindow = AXWindowHelper.getMainWindow(appElement) {
+            AXWindowHelper.raise(mainWindow)
             print("[NARC] 🔝 Raised main window for \(bundleID)")
             return
         }
 
-        // Fallback: raise the first window from the windows list
-        var windowsRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-           let windows = windowsRef as? [AXUIElement], let firstWindow = windows.first {
-            AXUIElementPerformAction(firstWindow, kAXRaiseAction as CFString)
+        if let windows = AXWindowHelper.getWindows(appElement), let firstWindow = windows.first {
+            AXWindowHelper.raise(firstWindow)
             print("[NARC] 🔝 Raised first window for \(bundleID)")
             return
         }
 
-        // Last resort: try to get focused window
-        var focusedRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedRef) == .success,
-           let focusedWindow = focusedRef {
-            let windowElement = focusedWindow as! AXUIElement
-            AXUIElementPerformAction(windowElement, kAXRaiseAction as CFString)
+        if let focusedWindow = AXWindowHelper.getFocusedWindow(appElement) {
+            AXWindowHelper.raise(focusedWindow)
             print("[NARC] 🔝 Raised focused window for \(bundleID)")
         }
     }

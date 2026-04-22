@@ -137,3 +137,25 @@ enum WindowLayout: String, CaseIterable, Identifiable {
         }
     }
 }
+
+// MARK: - Pinned Window
+
+/// Represents a window that the user has pinned to the NARC panel for quick access.
+/// Pinned windows can be temporary (cleared on restart) or persistent (saved to disk).
+struct PinnedWindow: Identifiable, Codable, Equatable {
+    let id: UUID
+    var bundleID: String          // The app's Bundle ID
+    var windowTitle: String       // Window title at pin time (used for matching)
+    var appDisplayName: String    // Human-readable app name
+    var isPersistent: Bool        // false = temporary (📌), true = fixed (🔒)
+    var pinnedAt: Date            // When the window was pinned
+
+    init(bundleID: String, windowTitle: String, appDisplayName: String, isPersistent: Bool = false) {
+        self.id = UUID()
+        self.bundleID = bundleID
+        self.windowTitle = windowTitle
+        self.appDisplayName = appDisplayName
+        self.isPersistent = isPersistent
+        self.pinnedAt = Date()
+    }
+}

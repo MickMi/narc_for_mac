@@ -5,10 +5,13 @@ import SwiftUI
 struct PanelView: View {
     @ObservedObject var appMonitor: AppMonitorService
     @ObservedObject var windowManager: WindowManagerService
+    @ObservedObject var pinnedWindowService: PinnedWindowService
     var onClose: () -> Void
     var onOpenPreferences: () -> Void
     /// The screen where NARC's floating widget is located.
     var narcScreen: NSScreen?
+    /// Keyboard selection state for ↑↓ navigation.
+    @ObservedObject var keyboardSelection: KeyboardSelectionState
 
     @State private var selectedTab: PanelTab = .notifications
 
@@ -36,7 +39,13 @@ struct PanelView: View {
             Group {
                 switch selectedTab {
                 case .notifications:
-                    NotificationListView(appMonitor: appMonitor, onClose: onClose, narcScreen: narcScreen)
+                    NotificationListView(
+                        appMonitor: appMonitor,
+                        pinnedWindowService: pinnedWindowService,
+                        onClose: onClose,
+                        narcScreen: narcScreen,
+                        keyboardSelection: keyboardSelection
+                    )
                 case .windows:
                     WindowGridView(windowManager: windowManager)
                 }
@@ -116,7 +125,40 @@ struct PanelView: View {
     // MARK: - Footer
 
     private var footerBar: some View {
-        HStack {
+        HStack(spacing: 4) {
+            // Keyboard hints
+            Group {
+                Text("↑↓")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .padding(.horizontal, 3)
+                    .padding(.vertical, 1)
+                    .background(Color.primary.opacity(0.08))
+                    .cornerRadius(2)
+                Text("select")
+                    .font(.system(size: 9))
+
+                Text("↩")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .padding(.horizontal, 3)
+                    .padding(.vertical, 1)
+                    .background(Color.primary.opacity(0.08))
+                    .cornerRadius(2)
+                Text("open")
+                    .font(.system(size: 9))
+
+                Text("esc")
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .padding(.horizontal, 3)
+                    .padding(.vertical, 1)
+                    .background(Color.primary.opacity(0.08))
+                    .cornerRadius(2)
+                Text("close")
+                    .font(.system(size: 9))
+            }
+            .foregroundColor(.secondary)
+
+            Spacer()
+
             Circle()
                 .fill(Color.green)
                 .frame(width: 6, height: 6)
@@ -124,12 +166,6 @@ struct PanelView: View {
             Text("Live")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.green)
-
-            Spacer()
-
-            Text("Last updated: \(formattedTime)")
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
