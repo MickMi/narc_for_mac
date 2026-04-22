@@ -100,16 +100,17 @@ class PinnedWindowService: ObservableObject {
     // MARK: - Window Activation
 
     /// Activate (bring to front) a pinned window.
-    /// Pinned windows are "workspace" windows — they must keep their original position and size.
-    /// We only: unminimize the target window → raise it → give the app focus.
     ///
-    /// IMPORTANT: We must NOT bring ALL windows of the app to the front.
+    /// Cross-Space behavior: macOS does not allow AX API to move windows across Spaces
+    /// directly via setPosition. Instead, we activate the app first — macOS will switch
+    /// to the Space where the target window lives. Then we raise the specific window
+    /// and move it to the target screen while preserving its relative position.
+    ///
     /// For multi-window apps (e.g., VS Code with 3 windows), only the pinned window
     /// should be raised. Other windows must remain in their current state.
     func activatePinnedWindow(_ pinned: PinnedWindow, summonToScreen targetScreen: NSScreen? = nil) {
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: pinned.bundleID).first else {
             print("[NARC] 📌 App not running: \(pinned.bundleID), attempting to launch...")
-            // Try to launch the app
             if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: pinned.bundleID) {
                 let config = NSWorkspace.OpenConfiguration()
                 config.activates = true
@@ -120,33 +121,28 @@ class PinnedWindowService: ObservableObject {
 
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
 
-        // Step 1: If the app is hidden, we must unhide it (this is app-level, unavoidable).
-        // But we'll minimize non-target windows afterwards to keep only the target visible.
+        // Step 1: If the app is hidden, unhide it first.
         let wasHidden = app.isHidden
         if wasHidden {
             app.unhide()
             print("[NARC] 👁 Unhid \(pinned.bundleID)")
         }
 
-        // Step 2: Find the matching window by title (only unminimizes that specific window)
+        // Step 2: Find the matching window by title (unminimizes if needed)
         let matchedWindow = WindowManagerService.findAppWindow(
             bundleID: pinned.bundleID,
             matchingTitle: pinned.windowTitle
         )
 
-        // Step 3: Raise the matched window FIRST, before activating the app.
+        // Step 3: Raise the matched window before activation
         if let window = matchedWindow {
             AXWindowHelper.raise(window)
         }
 
-        // Step 4: Activate the app to give it keyboard focus.
-        // On macOS, this brings all non-minimized windows to the front.
-        // We'll handle that in Step 5.
+        // Step 4: Activate the app — macOS will switch to the window's Space
         app.activate()
 
-        // Step 5: If the app was hidden (all windows were restored by unhide),
-        // re-minimize all windows EXCEPT the target one.
-        // This prevents "all 3 VS Code windows appearing" when only 1 was requested.
+        // Step 5: If the app was hidden, re-minimize non-target windows
         if wasHidden, let window = matchedWindow {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 if let windows = AXWindowHelper.getWindows(appElement) {
@@ -159,13 +155,67 @@ class PinnedWindowService: ObservableObject {
             }
         }
 
-        // Step 6: Raise the matched window again after activation to ensure it's on top.
-        if let window = matchedWindow {
+        // Step 6: After activation, move the window to the target screen
+        // preserving its relative position from the source screen.
+        // We delay slightly to let macOS finish the Space switch and activation.
+        if let window = matchedWindow, let screen = targetScreen {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                Self.moveWindowPreservingRelativePosition(window, toScreen: screen)
+                AXWindowHelper.raise(window)
+                print("[NARC] 📌 Activated pinned window '\(pinned.windowTitle)' on \(screen.localizedName)")
+            }
+        } else if let window = matchedWindow {
+            // No target screen — just raise in place
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                 AXWindowHelper.raise(window)
-                print("[NARC] 📌 Raised pinned window '\(pinned.windowTitle)' in place (no move/resize)")
+                print("[NARC] 📌 Raised pinned window '\(pinned.windowTitle)' in place")
             }
         }
+    }
+
+    /// Move a window to the target screen using layout-aware positioning.
+    ///
+    /// Strategy:
+    /// 1. If the window is already on the target screen, do nothing.
+    /// 2. Detect if the window matches a known layout on its source screen.
+    ///    If yes, apply the SAME layout on the target screen.
+    /// 3. If no known layout matches, preserve original size and center on target screen.
+    private static func moveWindowPreservingRelativePosition(_ window: AXUIElement, toScreen targetScreen: NSScreen) {
+        let sourceScreen = AXWindowHelper.screenForWindow(window)
+
+        // If window is already on the target screen, just raise it — don't move
+        if let source = sourceScreen, source == targetScreen {
+            print("[NARC] 📌 Window already on target screen, no move needed")
+            return
+        }
+
+        // Try to detect if the window matches a known layout on its source screen
+        if let source = sourceScreen {
+            let detectedLayout = WindowManagerService.detectWindowLayout(window, onScreen: source)
+            if let layout = detectedLayout {
+                // Apply the same layout on the target screen
+                let (axPos, axSize) = AXWindowHelper.calculateLayoutFrame(layout: layout, on: targetScreen)
+                AXWindowHelper.setFrame(window, position: axPos, size: axSize)
+                print("[NARC] 📌 Moved window to \(targetScreen.localizedName), applied layout=\(layout.rawValue)")
+                return
+            }
+        }
+
+        // No known layout detected — preserve original size, center on target screen
+        let currentSize = AXWindowHelper.getSize(window) ?? CGSize(width: 800, height: 600)
+        let targetVisible = targetScreen.visibleFrame
+
+        // Clamp size to fit within target screen
+        let clampedWidth = min(currentSize.width, targetVisible.width)
+        let clampedHeight = min(currentSize.height, targetVisible.height)
+        let finalSize = CGSize(width: clampedWidth, height: clampedHeight)
+
+        let nsX = targetVisible.origin.x + (targetVisible.width - finalSize.width) / 2
+        let nsY = targetVisible.origin.y + (targetVisible.height - finalSize.height) / 2
+        let axPos = AXWindowHelper.nsToAX(x: nsX, y: nsY, height: finalSize.height)
+        AXWindowHelper.setFrame(window, position: axPos, size: finalSize)
+
+        print("[NARC] 📌 Moved window to \(targetScreen.localizedName) centered (no matching layout)")
     }
 
     // MARK: - Polling (Alive Status + Title Update)
@@ -208,12 +258,16 @@ class PinnedWindowService: ObservableObject {
                         }
                     }
 
-                    // If no exact title match but app has windows, still consider it alive
+                    // If no exact title match but app has windows, still consider it alive.
+                    // IMPORTANT: Do NOT replace currentTitle with windows[0]'s title.
+                    // When the user switches desktops/spaces, the pinned window may not appear
+                    // in the AX window list, but the app is still running. Using windows[0]'s
+                    // title would incorrectly show a different window's name in the panel
+                    // (e.g., showing "browser_tab_extractor.py" instead of "UML — narc_for_mac").
+                    // Keep the original pinned title so the UI remains stable.
                     if !isAlive && !windows.isEmpty {
                         isAlive = true
-                        if let title = AXWindowHelper.getTitle(windows[0]) {
-                            currentTitle = title
-                        }
+                        // Keep currentTitle = pinned.windowTitle (already set above)
                     }
                 }
 

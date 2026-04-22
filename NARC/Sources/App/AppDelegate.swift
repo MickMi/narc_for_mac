@@ -10,6 +10,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBarItem: NSStatusItem?
     private var panelWindow: NSPanel?
     private var keyEventMonitor: Any?
+    private var globalKeyEventMonitor: Any?
 
     private let appMonitor = AppMonitorService()
     private let windowManager = WindowManagerService()
@@ -42,7 +43,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         hotkeyService.onTogglePanelHotkeyPressed = { [weak self] in
-            self?.togglePanel()
+            self?.togglePanelAtMouseScreen()
         }
         hotkeyService.onLayoutHotkeyPressed = { layout in
             WindowManagerService.moveActiveWindow(to: layout)
@@ -149,11 +150,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let panelWidth: CGFloat = 320
     private let panelHeight: CGFloat = 420
 
+    /// Toggle panel from widget click — panel appears near the widget.
     private func togglePanel() {
         if let panel = panelWindow, panel.isVisible {
             hidePanel()
         } else {
             showPanel()
+        }
+    }
+
+    /// Toggle panel from hotkey (⌃⌥N) — panel appears on the screen where the mouse cursor is.
+    private func togglePanelAtMouseScreen() {
+        if let panel = panelWindow, panel.isVisible {
+            hidePanel()
+        } else {
+            showPanelAtMouseScreen()
         }
     }
 
@@ -181,10 +192,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return NSRect(x: panelX, y: panelY, width: panelWidth, height: panelHeight)
     }
 
+    /// Calculate the panel frame at the bottom-right of the given screen.
+    private func panelFrameOnScreen(_ screen: NSScreen) -> NSRect {
+        let screenFrame = screen.visibleFrame
+
+        // Position at bottom-right corner with some padding
+        let panelX = screenFrame.maxX - panelWidth - 20
+        let panelY = screenFrame.minY + 20
+
+        return NSRect(x: panelX, y: panelY, width: panelWidth, height: panelHeight)
+    }
+
     /// Shared keyboard selection state for the panel.
     /// Tracks which item is selected via ↑↓ keys.
     private let keyboardSelection = KeyboardSelectionState()
 
+    /// Show panel near the floating widget (triggered by widget click).
     private func showPanel() {
         guard let widgetFrame = floatingWindow?.frame else { return }
 
@@ -193,6 +216,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Determine which screen the NARC widget is on
         let narcScreen = NSScreen.screens.first(where: { $0.frame.contains(widgetFrame.origin) }) ?? NSScreen.main
 
+        presentPanel(frame: frame, narcScreen: narcScreen)
+    }
+
+    /// Show panel on the screen where the mouse cursor is (triggered by ⌃⌥N hotkey).
+    private func showPanelAtMouseScreen() {
+        let mouseLocation = NSEvent.mouseLocation
+        let mouseScreen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main
+
+        let frame = panelFrameOnScreen(mouseScreen!)
+
+        presentPanel(frame: frame, narcScreen: mouseScreen)
+    }
+
+    /// Shared panel creation logic.
+    private func presentPanel(frame: NSRect, narcScreen: NSScreen?) {
         // Reset keyboard selection when opening panel
         keyboardSelection.selectedIndex = -1
 
@@ -228,7 +266,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel.orderFrontRegardless()
         self.panelWindow = panel
 
-        // Install local key event monitor for panel keyboard navigation
+        // CRITICAL: Make NARC the active app so the LOCAL key event monitor can
+        // intercept and CONSUME keyboard events (return nil). Without this,
+        // when another app (e.g., VS Code) is active, the global monitor can
+        // only observe events but cannot prevent them from reaching the active app.
+        // This means Enter/Tab would both trigger NARC's action AND be sent to
+        // the editor, causing unwanted edits.
+        NSApp.activate(ignoringOtherApps: true)
+
+        // Install key event monitor for panel keyboard navigation
         installKeyEventMonitor(narcScreen: narcScreen)
     }
 
@@ -247,15 +293,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Keyboard Navigation
 
-    /// Install a local key event monitor for panel keyboard navigation.
+    /// Install key event monitors for panel keyboard navigation.
+    /// Uses BOTH local + global monitors to handle all scenarios:
+    /// - Local monitor: catches events when NARC is the active app (returns nil to consume)
+    /// - Global monitor: catches events when another app is active (panel is floating/non-activating)
     /// Handles: ↑↓ to select items, ↩ to activate, Esc to close, number keys for quick access.
     private func installKeyEventMonitor(narcScreen: NSScreen?) {
         removeKeyEventMonitor()
 
-        keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        // Handler logic shared by both monitors
+        let handleKeyEvent: (NSEvent) -> Bool = { [weak self] event in
             guard let self = self,
                   let panel = self.panelWindow, panel.isVisible else {
-                return event
+                return false
             }
 
             let keyCode = event.keyCode
@@ -263,19 +313,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             switch keyCode {
             case 53: // Esc — close panel
                 self.hidePanel()
-                return nil
+                return true
 
             case 126: // ↑ — select previous item
                 self.selectPreviousItem()
-                return nil
+                return true
 
             case 125: // ↓ — select next item
                 self.selectNextItem()
-                return nil
+                return true
 
             case 36: // ↩ — activate selected item
                 self.activateSelectedItem(narcScreen: narcScreen)
-                return nil
+                return true
+
+            case 48: // Tab — select next item (same as ↓)
+                if event.modifierFlags.contains(.shift) {
+                    self.selectPreviousItem() // Shift+Tab = select previous
+                } else {
+                    self.selectNextItem()
+                }
+                return true
 
             case 18...29: // Number keys 1-0 (keyCodes 18=1, 19=2, ..., 29=0)
                 let numberMap: [UInt16: Int] = [
@@ -285,19 +343,38 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if let index = numberMap[keyCode] {
                     self.activateItemAtIndex(index, narcScreen: narcScreen)
                 }
-                return nil
+                return true
 
             default:
-                return event
+                return false
             }
+        }
+
+        // Local monitor: when NARC is the active app, consume the event (return nil)
+        keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if handleKeyEvent(event) {
+                return nil // consume the event
+            }
+            return event
+        }
+
+        // Global monitor: when another app is active, the panel is still visible
+        // (floating non-activating panel). We need this to handle keyboard input
+        // after the user has activated another window and then re-opened the panel.
+        globalKeyEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
+            _ = handleKeyEvent(event)
         }
     }
 
-    /// Remove the local key event monitor.
+    /// Remove both local and global key event monitors.
     private func removeKeyEventMonitor() {
         if let monitor = keyEventMonitor {
             NSEvent.removeMonitor(monitor)
             keyEventMonitor = nil
+        }
+        if let monitor = globalKeyEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalKeyEventMonitor = nil
         }
     }
 

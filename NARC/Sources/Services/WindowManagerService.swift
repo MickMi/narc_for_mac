@@ -30,6 +30,22 @@ class WindowManagerService: ObservableObject {
             return
         }
 
+        // Handle macOS native fullscreen (green button fullscreen).
+        // The window is in a separate Space — we must exit fullscreen first,
+        // wait for the animation to complete, then apply the requested layout.
+        if AXWindowHelper.isNativeFullScreen(window) {
+            print("[NARC] 🔲 Window is in native fullscreen, exiting first before applying \(layout.rawValue)")
+            AXWindowHelper.exitNativeFullScreen(window)
+            // Native fullscreen exit animation takes ~700ms. Schedule the layout
+            // application after the animation completes. We capture the layout
+            // and let the delayed block re-invoke moveActiveWindow which will
+            // then proceed with normal logic (window will no longer be fullscreen).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                moveActiveWindow(to: layout)
+            }
+            return
+        }
+
         let currentScreen = AXWindowHelper.screenForWindow(window) ?? NSScreen.main ?? NSScreen.screens.first!
 
         // Log current window state for debugging
@@ -100,32 +116,73 @@ class WindowManagerService: ObservableObject {
         }
     }
 
-    /// Summon a specific window to the target screen with proportional scaling.
-    /// Preserves the window's screen-percentage (e.g., 80% width stays 80% width).
+    /// Summon a specific window to the target screen using layout-aware positioning.
+    ///
+    /// Strategy:
+    /// 1. If the window is already on the target screen, just raise it — don't move.
+    /// 2. Detect if the window matches a known layout (leftHalf, rightHalf, etc.) on its source screen.
+    ///    If yes, apply the SAME layout on the target screen. This ensures consistent behavior:
+    ///    e.g., a left-half window on the secondary screen becomes a left-half window on the primary screen.
+    /// 3. If the window doesn't match any known layout (custom size/position), preserve its original
+    ///    size and center it on the target screen. This avoids weird proportional mapping artifacts
+    ///    when screens have different resolutions.
     static func summonWindow(_ window: AXUIElement, toScreen targetScreen: NSScreen) {
         AXWindowHelper.raise(window)
 
-        let currentSize = AXWindowHelper.getSize(window) ?? CGSize(width: 800, height: 600)
-
         let sourceScreen = AXWindowHelper.screenForWindow(window)
-        let sourceVisible = sourceScreen?.visibleFrame ?? targetScreen.visibleFrame
+
+        // If already on target screen, just raise — don't move
+        if let source = sourceScreen, source == targetScreen {
+            print("[NARC] ✅ summonWindow: already on target screen, raised in place")
+            return
+        }
+
+        // Try to detect if the window matches a known layout on its source screen
+        if let source = sourceScreen {
+            let detectedLayout = detectWindowLayout(window, onScreen: source)
+            if let layout = detectedLayout {
+                // Apply the same layout on the target screen
+                let (axPos, axSize) = AXWindowHelper.calculateLayoutFrame(layout: layout, on: targetScreen)
+                AXWindowHelper.setFrame(window, position: axPos, size: axSize)
+                print("[NARC] ✅ summonWindow: moved to \(targetScreen.localizedName), applied layout=\(layout.rawValue)")
+                return
+            }
+        }
+
+        // No known layout detected — preserve original size, center on target screen
+        let currentSize = AXWindowHelper.getSize(window) ?? CGSize(width: 800, height: 600)
         let targetVisible = targetScreen.visibleFrame
 
-        // Proportional scaling
-        let widthRatio = currentSize.width / sourceVisible.width
-        let heightRatio = currentSize.height / sourceVisible.height
+        // Clamp size to fit within target screen
+        let clampedWidth = min(currentSize.width, targetVisible.width)
+        let clampedHeight = min(currentSize.height, targetVisible.height)
+        let finalSize = CGSize(width: clampedWidth, height: clampedHeight)
 
-        let newWidth = min(targetVisible.width * widthRatio, targetVisible.width)
-        let newHeight = min(targetVisible.height * heightRatio, targetVisible.height)
+        let nsX = targetVisible.origin.x + (targetVisible.width - finalSize.width) / 2
+        let nsY = targetVisible.origin.y + (targetVisible.height - finalSize.height) / 2
+        let axPos = AXWindowHelper.nsToAX(x: nsX, y: nsY, height: finalSize.height)
+        AXWindowHelper.setFrame(window, position: axPos, size: finalSize)
 
-        // Center on target screen
-        let nsX = targetVisible.origin.x + (targetVisible.width - newWidth) / 2
-        let nsY = targetVisible.origin.y + (targetVisible.height - newHeight) / 2
+        print("[NARC] ✅ summonWindow: moved to \(targetScreen.localizedName) centered (no matching layout)")
+    }
 
-        let axPos = AXWindowHelper.nsToAX(x: nsX, y: nsY, height: newHeight)
-        AXWindowHelper.setFrame(window, position: axPos, size: CGSize(width: newWidth, height: newHeight))
+    /// Detect if a window matches a known layout on the given screen.
+    /// Returns the matching WindowLayout, or nil if no match.
+    static func detectWindowLayout(_ window: AXUIElement, onScreen screen: NSScreen) -> WindowLayout? {
+        // Check common layouts in order of likelihood
+        let layoutsToCheck: [WindowLayout] = [
+            .leftHalf, .rightHalf, .topHalf, .bottomHalf,
+            .fullScreen,
+            .topLeft, .topRight, .bottomLeft, .bottomRight,
+        ]
 
-        print("[NARC] ✅ summonWindow: moved to \(targetScreen.localizedName), scaled \(Int(currentSize.width))x\(Int(currentSize.height)) → \(Int(newWidth))x\(Int(newHeight)) (ratio: \(String(format: "%.0f%%", widthRatio * 100))x\(String(format: "%.0f%%", heightRatio * 100)))")
+        for layout in layoutsToCheck {
+            if ScreenNavigator.isWindowAtLayout(window, layout: layout, onScreen: screen) {
+                return layout
+            }
+        }
+
+        return nil
     }
 
     // MARK: - Window Finding

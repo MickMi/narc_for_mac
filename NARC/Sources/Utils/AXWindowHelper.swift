@@ -60,6 +60,26 @@ enum AXWindowHelper {
         return value
     }
 
+    /// Check if the window is in macOS native fullscreen (green button fullscreen).
+    /// This is different from our "fullScreen" layout which just maximizes the window
+    /// within the visible frame. Native fullscreen puts the window in a separate Space.
+    static func isNativeFullScreen(_ window: AXUIElement) -> Bool {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, "AXFullScreen" as CFString, &ref) == .success,
+              let value = ref as? Bool else { return false }
+        return value
+    }
+
+    /// Exit macOS native fullscreen mode for a window.
+    /// Returns true if the window was in native fullscreen and we initiated the exit.
+    @discardableResult
+    static func exitNativeFullScreen(_ window: AXUIElement) -> Bool {
+        guard isNativeFullScreen(window) else { return false }
+        AXUIElementSetAttributeValue(window, "AXFullScreen" as CFString, false as CFTypeRef)
+        print("[NARC] 🔲 Exited native fullscreen")
+        return true
+    }
+
     // MARK: - Write Window Attributes
 
     /// Set the window's position in AX coordinates.
@@ -76,24 +96,109 @@ enum AXWindowHelper {
         AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value)
     }
 
-    /// Set the window's size and position with double-apply for resistant apps.
+    /// Set the window's size and position with multi-pass retry for resistant apps.
     ///
     /// Sets size FIRST, then position (avoids macOS auto-correction when a large window
-    /// is repositioned before being shrunk). Then re-applies both to handle apps
-    /// (especially Electron-based) that don't fully respond to the first AX call.
+    /// is repositioned before being shrunk). Then re-applies with verification to handle
+    /// apps (especially Electron-based like VS Code) that ignore or defer AX size changes.
     ///
-    /// AXUIElementSetAttributeValue is synchronous — it returns after the window server
-    /// has processed the change. We only need a minimal delay between passes to let
-    /// the app's own layout engine settle (some Electron apps defer their response).
+    /// Some apps (Electron, etc.) have their own layout engine that constrains window
+    /// sizes (e.g., minimum height for editor panels). When we detect the size has
+    /// stabilized (same value on consecutive reads), we accept it as the app's best
+    /// effort and stop retrying — avoiding unnecessary delays.
     static func setFrame(_ window: AXUIElement, position: CGPoint, size: CGSize) {
-        // First pass: size then position
+        let tolerance: CGFloat = 5.0
+        let maxRetries = 4
+        let retryDelays: [UInt32] = [8_000, 15_000, 30_000, 50_000] // 8ms, 15ms, 30ms, 50ms
+
+        var previousSize: CGSize? = nil
+        // Track the best (closest to target) size we've ever seen during retries.
+        // Electron apps may oscillate during resize — if we've seen the target width
+        // or height at least once, we know the app CAN reach it.
+        var bestWidthDelta: CGFloat = .greatestFiniteMagnitude
+        var bestHeightDelta: CGFloat = .greatestFiniteMagnitude
+
+        for attempt in 0..<maxRetries {
+            // Each pass: size first, then position
+            setSize(window, size)
+            setPosition(window, position)
+
+            // Wait for the app's layout engine to process
+            usleep(retryDelays[attempt])
+
+            // Verify the size actually took effect
+            if let currentSize = getSize(window) {
+                let widthDelta = abs(currentSize.width - size.width)
+                let heightDelta = abs(currentSize.height - size.height)
+                let widthOK = widthDelta <= tolerance
+                let heightOK = heightDelta <= tolerance
+
+                bestWidthDelta = min(bestWidthDelta, widthDelta)
+                bestHeightDelta = min(bestHeightDelta, heightDelta)
+
+                if widthOK && heightOK {
+                    if attempt > 0 {
+                        print("[NARC] ✅ setFrame: size verified after \(attempt + 1) attempts")
+                    }
+                    // Final position correction (some apps shift position after size change)
+                    setPosition(window, position)
+                    return
+                }
+
+                // Check if size has stabilized (same as last attempt).
+                // Only accept "stabilized = app constraint" if at least ONE dimension
+                // is already close to the target. This prevents false early-exit when
+                // the app simply hasn't processed the resize yet (e.g., Electron going
+                // from 735px to 1470px width — both reads return 735 but that's not
+                // a constraint, it's just slow processing).
+                if let prev = previousSize,
+                   abs(currentSize.width - prev.width) <= tolerance &&
+                   abs(currentSize.height - prev.height) <= tolerance {
+                    // Size stabilized — but is it because the app is constraining,
+                    // or because it hasn't processed the change yet?
+                    let atLeastOneDimensionClose = widthOK || heightOK
+                    if atLeastOneDimensionClose {
+                        print("[NARC] 📌 setFrame: app constrains size to \(Int(currentSize.width))x\(Int(currentSize.height)) "
+                              + "(requested \(Int(size.width))x\(Int(size.height))), accepting")
+                        setPosition(window, position)
+                        return
+                    }
+                    // Neither dimension is close — keep retrying, the app may be slow
+                    print("[NARC] ⚠️ setFrame: attempt \(attempt + 1)/\(maxRetries) — "
+                          + "size stable at \(Int(currentSize.width))x\(Int(currentSize.height)) "
+                          + "but far from target \(Int(size.width))x\(Int(size.height)), retrying")
+                } else {
+                    print("[NARC] ⚠️ setFrame: attempt \(attempt + 1)/\(maxRetries) — "
+                          + "expected \(Int(size.width))x\(Int(size.height)), "
+                          + "got \(Int(currentSize.width))x\(Int(currentSize.height))")
+                }
+                previousSize = currentSize
+
+                // Early accept for oscillating apps: if at least one dimension has
+                // reached the target at some point during retries AND currently matches,
+                // accept it. This handles Electron apps that bounce between sizes during
+                // layout recalculation.
+                // - For horizontal layouts (leftHalf/rightHalf/fullScreen): width is primary
+                // - For vertical layouts (topHalf/bottomHalf): height is primary
+                if attempt >= 2 {
+                    let widthReachedAndHolds = bestWidthDelta <= tolerance && widthOK
+                    let heightReachedAndHolds = bestHeightDelta <= tolerance && heightOK
+                    if widthReachedAndHolds || heightReachedAndHolds {
+                        let constrainedDim = widthReachedAndHolds
+                            ? "height constrained at \(Int(currentSize.height))"
+                            : "width constrained at \(Int(currentSize.width))"
+                        print("[NARC] 📌 setFrame: primary dimension reached target (\(constrainedDim)), accepting after \(attempt + 1) attempts")
+                        setPosition(window, position)
+                        return
+                    }
+                }
+            }
+        }
+
+        // Final attempt: force one more size→position pass
         setSize(window, size)
         setPosition(window, position)
-        // Brief pause to let resistant apps process the first pass
-        usleep(5_000) // 5ms
-        // Second pass: re-apply for resistant apps (Electron, etc.)
-        setSize(window, size)
-        setPosition(window, position)
+        print("[NARC] ⚠️ setFrame: exhausted \(maxRetries) retries, applied final pass")
     }
 
     /// Unminimize the window.

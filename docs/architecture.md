@@ -10,50 +10,68 @@
 ## 🧩 核心模块划分
 | 模块名 | 职责描述 | 对外暴露接口 | 依赖的其他模块 |
 |--------|---------|-------------|---------------|
-| **FloatingWidget** | 桌面悬浮窗 UI，常驻显示，支持拖拽移动，展示聚合状态（红点/badge） | `show()`, `hide()`, `updateBadge()` | NotificationEngine |
-| **PanelView** | 展开面板 UI，展示被监控 App 的状态列表，支持点击跳转 | `expand()`, `collapse()` | FloatingWidget, AppMonitor |
-| **AppMonitor** | 应用监控引擎，监控目标 App 的 Dock badge 变化，检测新消息 | `startMonitoring()`, `stopMonitoring()`, `onStateChange` callback | — |
-| **WindowManager** | 窗口管理模块，注册全局快捷键，通过 Accessibility API 操控窗口位置/大小 | `registerHotkeys()`, `moveWindow()`, `snapToEdge()` | — |
-| **PreferenceStore** | 用户偏好管理，存储/读取监控配置、快捷键绑定、UI 偏好 | `get()`, `set()`, `reset()` | — |
-| **MenuBarAgent** | 菜单栏常驻图标，作为悬浮窗的备用入口（全屏模式下可用） | `showMenu()`, `updateIcon()` | NotificationEngine |
-| **NotificationEngine** | 通知聚合引擎，汇总各监控源的状态变化，统一推送给 UI 层 | `subscribe()`, `publish()` | AppMonitor |
+| **FloatingWidget** | 桌面悬浮窗 UI，常驻显示，支持拖拽移动，展示聚合状态（红点/badge） | `show()`, `hide()`, `updateBadge()` | AppMonitor |
+| **PanelView** | 展开面板 UI，展示 Monitoring 区（IM App 状态）和 Pinned 区（固定窗口），支持键盘导航和点击跳转 | `expand()`, `collapse()`, keyboard nav | FloatingWidget, AppMonitor, PinnedWindowService |
+| **AppMonitorService** | 应用监控引擎，监控目标 App 的 Dock badge 变化（lsappinfo），检测新消息，支持过滤规则 | `startMonitoring()`, `stopMonitoring()`, `activateApp()` | WindowManagerService |
+| **PinnedWindowService** | 窗口固定服务，管理用户 Pin 的窗口，支持跨桌面呼出、存活状态轮询、持久化存储 | `pinCurrentWindow()`, `unpin()`, `activatePinnedWindow()` | WindowManagerService |
+| **WindowManagerService** | 窗口管理核心，意图式布局（Magnet 风格），支持 10 种布局 + 多显示器跨屏切换 + 窗口召唤 | `moveActiveWindow()`, `summonAppWindow()`, `findAppWindow()` | AXWindowHelper, ScreenNavigator |
+| **ScreenNavigator** | 多显示器导航，检测窗口所在屏幕、判断窗口是否已在目标布局（硬/软维度策略）、计算跨屏入口布局 | `isWindowAtLayout()`, `adjacentScreen()`, `crossScreenEntryLayout()` | AXWindowHelper |
+| **HotkeyService** | 全局快捷键注册（Carbon Event API），管理布局快捷键 + Pin 快捷键 + 面板呼出快捷键 | `registerGlobalHotkeys()`, `onLayoutHotkeyPressed` | — |
+| **AXWindowHelper** | Accessibility API 底层工具，窗口属性读写、坐标转换（NS↔AX）、布局帧计算、原生全屏检测 | `setFrame()`, `calculateLayoutFrame()`, `screenForWindow()` | — |
+| **PreferenceStore** | 用户偏好管理，存储/读取监控配置、过滤规则、Pin 窗口持久化 | `get()`, `set()`, `reset()` | — |
+| **MenuBarAgent** | 菜单栏常驻图标，作为悬浮窗的备用入口（全屏模式下可用） | `showMenu()`, `updateIcon()` | AppMonitorService |
 
 ## 🗄️ 核心数据模型
 
 ```mermaid
 erDiagram
     MonitoredApp ||--o{ NotificationState : "has current"
-    UserPreference ||--o{ MonitoredApp : "configures"
+    MonitoredApp ||--o{ NotificationFilter : "filtered by"
     WindowLayout ||--o{ HotkeyBinding : "bound to"
+    PinnedWindow ||--o{ PinnedWindowRuntimeState : "has runtime"
 
     MonitoredApp {
         string bundleID PK "e.g. com.tencent.xinWeChat"
         string displayName "e.g. WeChat"
-        string iconName "SF Symbol or asset name"
+        string category "im / ide / other"
         bool isEnabled "user toggle"
-        string appCategory "im / ide / other"
     }
     NotificationState {
         string bundleID FK
         int badgeCount "0 = no new message"
-        bool hasNewNotification
+        bool isRunning
         datetime lastUpdated
     }
+    NotificationFilter {
+        uuid id PK
+        string appBundleID FK "* = all apps"
+        string filterType "badgeThreshold / keyword / alwaysNotify / mute"
+        string pattern
+        string action "highlight / normal / silent / hide"
+        bool isEnabled
+    }
     WindowLayout {
-        string layoutID PK "e.g. left-half"
-        string displayName "Left Half"
-        float x "0.0"
-        float y "0.0"
-        float width "0.5"
-        float height "1.0"
+        string rawValue PK "e.g. Left Half"
+        CGRect fractionalFrame "(x, y, w, h) as fraction of screen"
+        string hotkeyLabel "e.g. ctrl+opt+left"
     }
     HotkeyBinding {
         string layoutID FK
-        string keyCombo "e.g. ctrl+opt+left"
+        uint32 keyCode
+        uint32 modifiers
     }
-    UserPreference {
-        string key PK
-        string value
+    PinnedWindow {
+        uuid id PK
+        string bundleID "app bundle ID"
+        string windowTitle "title at pin time"
+        string appDisplayName
+        bool isPersistent "false=temporary, true=fixed"
+        datetime pinnedAt
+    }
+    PinnedWindowRuntimeState {
+        uuid pinnedWindowID FK
+        bool isAlive "app/window still running"
+        string currentTitle "real-time title"
     }
 ```
 
@@ -62,35 +80,40 @@ erDiagram
 ```mermaid
 flowchart TB
     subgraph Monitoring ["Monitoring Layer"]
-        AM[AppMonitor<br/>Dock Badge Polling]
+        AM[AppMonitorService<br/>Dock Badge Polling<br/>lsappinfo]
+        PWS[PinnedWindowService<br/>Window Alive Polling<br/>AX API]
         NL[Notification Listener<br/>Future: UNNotification]
-    end
-
-    subgraph Engine ["Aggregation Layer"]
-        NE[NotificationEngine<br/>State Aggregation]
     end
 
     subgraph UI ["UI Layer"]
         FW[FloatingWidget<br/>Badge / Red Dot]
-        PV[PanelView<br/>App Status List]
+        PV[PanelView<br/>Two-Zone: Monitoring + Pinned]
+        KB[Keyboard Navigation<br/>↑↓ / Tab / Enter / 1-0]
         MB[MenuBarAgent<br/>Fallback Entry]
     end
 
     subgraph WindowMgmt ["Window Management"]
-        WM[WindowManager<br/>Accessibility API]
-        HK[Global Hotkeys]
-        DE[Drag & Edge Snap]
+        WM[WindowManagerService<br/>Intent-based Layout]
+        SN[ScreenNavigator<br/>Hard/Soft Dimension Strategy]
+        HK[HotkeyService<br/>Carbon Event API]
+        AX[AXWindowHelper<br/>AX API + Retry]
     end
 
-    AM -->|state change| NE
-    NL -.->|future| NE
-    NE -->|publish| FW
-    NE -->|publish| MB
-    FW -->|click expand| PV
-    PV -->|click app| ActivateApp[NSWorkspace.activate]
-    HK --> WM
-    DE --> WM
-    WM --> AXUIElement[AXUIElement API]
+    AM -->|badge change| FW
+    PWS -->|alive status| PV
+    NL -.->|future| FW
+    FW -->|click / ⌃⌥N| PV
+    PV -->|click IM app| AM
+    AM -->|activateApp| WM
+    PV -->|click pinned| PWS
+    PWS -->|activatePinnedWindow| WM
+    KB -->|select + enter| PV
+    MB -->|click| PV
+    HK -->|layout hotkey| WM
+    HK -->|⌃⌥P| PWS
+    WM --> SN
+    WM --> AX
+    SN --> AX
 ```
 
 ## ⚡ 非功能性需求 (NFR)
@@ -126,3 +149,7 @@ flowchart TB
 | 11 | 2026-04-15 | MVP 阶段 IM 监控采用 Dock Badge 方案 | 最轻量，无需 hack IM App 内部；架构预留通知中心拦截扩展点 | ✅ 生效 |
 | 12 | 2026-04-15 | IDE 任务状态监控延后至 P2 | MVP 聚焦核心三大功能，IDE 桥接方案待 MVP 验证后再定 | ✅ 生效 |
 | 13 | 2026-04-15 | 插件/扩展机制延后，但架构预留扩展点 | MVP 先跑通核心功能，避免过早抽象 | ✅ 生效 |
+| 14 | 2026-04-22 | 窗口布局采用「意图形态」策略（Magnet 风格） | 布局快捷键表达空间意图而非精确像素；硬维度（布局控制的轴）严格匹配，软维度（应用可能约束的轴）宽容匹配 | ✅ 生效 |
+| 15 | 2026-04-22 | macOS 原生全屏（绿色按钮）自动退出后再应用布局 | 原生全屏窗口在独立 Space 中，AX API 无法直接操控；先退出全屏等动画完成再 apply | ✅ 生效 |
+| 16 | 2026-04-22 | AXWindowHelper.setFrame 采用验证+重试+波动检测机制 | Electron 等应用异步处理 resize，需要多次重试并检测尺寸稳定/波动状态 | ✅ 生效 |
+| 17 | 2026-04-22 | 面板呼出跟随鼠标所在屏幕（右下角） | 用户按 ⌃⌥N 时面板出现在当前工作屏幕的右下角，而非浮窗所在屏幕 | ✅ 生效 |
