@@ -189,19 +189,7 @@ class PinnedWindowService: ObservableObject {
             return
         }
 
-        // Try to detect if the window matches a known layout on its source screen
-        if let source = sourceScreen {
-            let detectedLayout = WindowManagerService.detectWindowLayout(window, onScreen: source)
-            if let layout = detectedLayout {
-                // Apply the same layout on the target screen
-                let (axPos, axSize) = AXWindowHelper.calculateLayoutFrame(layout: layout, on: targetScreen)
-                AXWindowHelper.setFrame(window, position: axPos, size: axSize)
-                print("[NARC] 📌 Moved window to \(targetScreen.localizedName), applied layout=\(layout.rawValue)")
-                return
-            }
-        }
-
-        // No known layout detected — preserve original size, center on target screen
+        // Preserve original size, center on target screen
         let currentSize = AXWindowHelper.getSize(window) ?? CGSize(width: 800, height: 600)
         let targetVisible = targetScreen.visibleFrame
 

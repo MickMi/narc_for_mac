@@ -1,5 +1,9 @@
 import Cocoa
 
+// Private Accessibility API for getting the CGWindowID of an AXUIElement.
+@_silgen_name("_AXUIElementGetWindow")
+func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
+
 /// Pure utility struct for Accessibility API window operations.
 /// Eliminates boilerplate code for reading/writing AX attributes and coordinate conversion.
 ///
@@ -13,6 +17,17 @@ enum AXWindowHelper {
     /// NSScreen coordinate system: origin at bottom-left of primary screen, Y increases upward.
     static var primaryScreenHeight: CGFloat {
         NSScreen.screens.first?.frame.height ?? 0
+    }
+
+    // MARK: - Window Identification
+
+    /// Get the stable CGWindowID for an AXUIElement window.
+    /// Uses the private _AXUIElementGetWindow API (declared below).
+    /// Returns 0 as fallback if the API is unavailable.
+    static func windowID(for window: AXUIElement) -> CGWindowID {
+        var wid: CGWindowID = 0
+        let err = _AXUIElementGetWindow(window, &wid)
+        return err == .success ? wid : 0
     }
 
     // MARK: - Read Window Attributes
@@ -83,122 +98,73 @@ enum AXWindowHelper {
     // MARK: - Write Window Attributes
 
     /// Set the window's position in AX coordinates.
-    static func setPosition(_ window: AXUIElement, _ point: CGPoint) {
+    @discardableResult
+    static func setPosition(_ window: AXUIElement, _ point: CGPoint) -> AXError {
         var p = point
         let value = AXValueCreate(.cgPoint, &p)!
-        AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)
+        return AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)
     }
 
     /// Set the window's size.
-    static func setSize(_ window: AXUIElement, _ size: CGSize) {
+    @discardableResult
+    static func setSize(_ window: AXUIElement, _ size: CGSize) -> AXError {
         var s = size
         let value = AXValueCreate(.cgSize, &s)!
-        AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value)
+        return AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value)
     }
 
-    /// Set the window's size and position with multi-pass retry for resistant apps.
+    /// Set the window's size and position — Magnet/Rectangle-equivalent implementation.
     ///
-    /// Sets size FIRST, then position (avoids macOS auto-correction when a large window
-    /// is repositioned before being shrunk). Then re-applies with verification to handle
-    /// apps (especially Electron-based like VS Code) that ignore or defer AX size changes.
-    ///
-    /// Some apps (Electron, etc.) have their own layout engine that constrains window
-    /// sizes (e.g., minimum height for editor panels). When we detect the size has
-    /// stabilized (same value on consecutive reads), we accept it as the app's best
-    /// effort and stop retrying — avoiding unnecessary delays.
-    static func setFrame(_ window: AXUIElement, position: CGPoint, size: CGSize) {
-        let tolerance: CGFloat = 5.0
-        let maxRetries = 4
-        let retryDelays: [UInt32] = [8_000, 15_000, 30_000, 50_000] // 8ms, 15ms, 30ms, 50ms
+    /// Key techniques from Rectangle (open-source Magnet alternative):
+    /// 1. Disable AXEnhancedUserInterface before resize (some apps like WeChat block
+    ///    AX resize when this is enabled)
+    /// 2. Set size first, then position, then size again (handles cross-display moves)
+    /// 3. Re-enable enhanced UI after
+    static func setFrame(_ window: AXUIElement, position: CGPoint, size: CGSize, on targetScreen: NSScreen? = nil) {
+        let tolerance: CGFloat = 8.0
 
-        var previousSize: CGSize? = nil
-        // Track the best (closest to target) size we've ever seen during retries.
-        // Electron apps may oscillate during resize — if we've seen the target width
-        // or height at least once, we know the app CAN reach it.
-        var bestWidthDelta: CGFloat = .greatestFiniteMagnitude
-        var bestHeightDelta: CGFloat = .greatestFiniteMagnitude
+        // Get the application element for enhanced UI handling
+        var pid: pid_t = 0
+        AXUIElementGetPid(window, &pid)
+        let appElement = AXUIElementCreateApplication(pid)
 
-        for attempt in 0..<maxRetries {
-            // Each pass: size first, then position
+        // Step 1: Disable AXEnhancedUserInterface if enabled (critical for WeChat, etc.)
+        var enhancedUIWasEnabled = false
+        var enhancedUIRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, &enhancedUIRef) == .success,
+           let enabled = enhancedUIRef as? Bool, enabled {
+            enhancedUIWasEnabled = true
+            AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, false as CFTypeRef)
+            usleep(20_000)  // 20ms for the change to take effect
+        }
+
+        // Step 2: Size → Position → Size (Rectangle's proven pattern, no intermediate moves)
+        setSize(window, size)
+        setPosition(window, position)
+        setSize(window, size)
+        usleep(50_000)  // 50ms for app to process
+
+        // Step 3: Verify and retry if needed
+        if let s = getSize(window), !(abs(s.width - size.width) <= tolerance && abs(s.height - size.height) <= tolerance) {
             setSize(window, size)
             setPosition(window, position)
+            usleep(100_000)  // 100ms
 
-            // Wait for the app's layout engine to process
-            usleep(retryDelays[attempt])
+            if let s2 = getSize(window), !(abs(s2.width - size.width) <= tolerance && abs(s2.height - size.height) <= tolerance) {
+                setSize(window, size)
+                setPosition(window, position)
+                usleep(150_000)  // 150ms
 
-            // Verify the size actually took effect
-            if let currentSize = getSize(window) {
-                let widthDelta = abs(currentSize.width - size.width)
-                let heightDelta = abs(currentSize.height - size.height)
-                let widthOK = widthDelta <= tolerance
-                let heightOK = heightDelta <= tolerance
-
-                bestWidthDelta = min(bestWidthDelta, widthDelta)
-                bestHeightDelta = min(bestHeightDelta, heightDelta)
-
-                if widthOK && heightOK {
-                    if attempt > 0 {
-                        print("[NARC] ✅ setFrame: size verified after \(attempt + 1) attempts")
-                    }
-                    // Final position correction (some apps shift position after size change)
-                    setPosition(window, position)
-                    return
-                }
-
-                // Check if size has stabilized (same as last attempt).
-                // Only accept "stabilized = app constraint" if at least ONE dimension
-                // is already close to the target. This prevents false early-exit when
-                // the app simply hasn't processed the resize yet (e.g., Electron going
-                // from 735px to 1470px width — both reads return 735 but that's not
-                // a constraint, it's just slow processing).
-                if let prev = previousSize,
-                   abs(currentSize.width - prev.width) <= tolerance &&
-                   abs(currentSize.height - prev.height) <= tolerance {
-                    // Size stabilized — but is it because the app is constraining,
-                    // or because it hasn't processed the change yet?
-                    let atLeastOneDimensionClose = widthOK || heightOK
-                    if atLeastOneDimensionClose {
-                        print("[NARC] 📌 setFrame: app constrains size to \(Int(currentSize.width))x\(Int(currentSize.height)) "
-                              + "(requested \(Int(size.width))x\(Int(size.height))), accepting")
-                        setPosition(window, position)
-                        return
-                    }
-                    // Neither dimension is close — keep retrying, the app may be slow
-                    print("[NARC] ⚠️ setFrame: attempt \(attempt + 1)/\(maxRetries) — "
-                          + "size stable at \(Int(currentSize.width))x\(Int(currentSize.height)) "
-                          + "but far from target \(Int(size.width))x\(Int(size.height)), retrying")
-                } else {
-                    print("[NARC] ⚠️ setFrame: attempt \(attempt + 1)/\(maxRetries) — "
-                          + "expected \(Int(size.width))x\(Int(size.height)), "
-                          + "got \(Int(currentSize.width))x\(Int(currentSize.height))")
-                }
-                previousSize = currentSize
-
-                // Early accept for oscillating apps: if at least one dimension has
-                // reached the target at some point during retries AND currently matches,
-                // accept it. This handles Electron apps that bounce between sizes during
-                // layout recalculation.
-                // - For horizontal layouts (leftHalf/rightHalf/fullScreen): width is primary
-                // - For vertical layouts (topHalf/bottomHalf): height is primary
-                if attempt >= 2 {
-                    let widthReachedAndHolds = bestWidthDelta <= tolerance && widthOK
-                    let heightReachedAndHolds = bestHeightDelta <= tolerance && heightOK
-                    if widthReachedAndHolds || heightReachedAndHolds {
-                        let constrainedDim = widthReachedAndHolds
-                            ? "height constrained at \(Int(currentSize.height))"
-                            : "width constrained at \(Int(currentSize.width))"
-                        print("[NARC] 📌 setFrame: primary dimension reached target (\(constrainedDim)), accepting after \(attempt + 1) attempts")
-                        setPosition(window, position)
-                        return
-                    }
-                }
+                let finalSize = getSize(window)
+                print("[NARC] 📏 setFrame: final \(Int(finalSize?.width ?? -1))x\(Int(finalSize?.height ?? -1)) "
+                      + "(wanted \(Int(size.width))x\(Int(size.height)))")
             }
         }
 
-        // Final attempt: force one more size→position pass
-        setSize(window, size)
-        setPosition(window, position)
-        print("[NARC] ⚠️ setFrame: exhausted \(maxRetries) retries, applied final pass")
+        // Step 4: Re-enable AXEnhancedUserInterface if it was originally on
+        if enhancedUIWasEnabled {
+            AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, true as CFTypeRef)
+        }
     }
 
     /// Unminimize the window.

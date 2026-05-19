@@ -17,9 +17,9 @@ class WindowManagerService: ObservableObject {
     // MARK: - Window Layout (Hotkey Entry Point)
 
     /// Move the currently active (frontmost) window to the specified layout position.
-    /// Supports multi-monitor with cross-screen switching:
-    /// If the window is already at the target layout on the current screen,
-    /// pressing the same direction again moves it to the adjacent screen.
+    ///
+    /// Cross-screen logic uses a state machine instead of frame detection:
+    /// press same hotkey within 5s → cross to adjacent screen.
     static func moveActiveWindow(to layout: WindowLayout) {
         guard let frontApp = NSWorkspace.shared.frontmostApplication else { return }
 
@@ -30,54 +30,45 @@ class WindowManagerService: ObservableObject {
             return
         }
 
-        // Handle macOS native fullscreen (green button fullscreen).
-        // The window is in a separate Space — we must exit fullscreen first,
-        // wait for the animation to complete, then apply the requested layout.
+        // Handle macOS native fullscreen (green button).
         if AXWindowHelper.isNativeFullScreen(window) {
             print("[NARC] 🔲 Window is in native fullscreen, exiting first before applying \(layout.rawValue)")
             AXWindowHelper.exitNativeFullScreen(window)
-            // Native fullscreen exit animation takes ~700ms. Schedule the layout
-            // application after the animation completes. We capture the layout
-            // and let the delayed block re-invoke moveActiveWindow which will
-            // then proceed with normal logic (window will no longer be fullscreen).
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                 moveActiveWindow(to: layout)
             }
             return
         }
 
         let currentScreen = AXWindowHelper.screenForWindow(window) ?? NSScreen.main ?? NSScreen.screens.first!
+        let windowID = AXWindowHelper.windowID(for: window)
 
-        // Log current window state for debugging
-        if let frame = AXWindowHelper.getFrame(window) {
-            print("[NARC] 📐 moveActiveWindow: app=\(frontApp.localizedName ?? "?"), "
-                  + "currentPos=(\(Int(frame.position.x)),\(Int(frame.position.y))), "
-                  + "currentSize=\(Int(frame.size.width))x\(Int(frame.size.height)), "
-                  + "screen=\(currentScreen.localizedName), "
-                  + "requestedLayout=\(layout.rawValue)")
-        }
-
-        // Cross-screen switching: if already at target layout, move to adjacent screen
         var targetScreen = currentScreen
         var targetLayout = layout
 
-        let isAtLayout = ScreenNavigator.isWindowAtLayout(window, layout: layout, onScreen: currentScreen)
-
-        if isAtLayout && NSScreen.screens.count > 1 {
-            if let nextScreen = ScreenNavigator.adjacentScreen(from: currentScreen, direction: layout) {
-                targetScreen = nextScreen
-                targetLayout = ScreenNavigator.crossScreenEntryLayout(for: layout)
-                print("[NARC] ↔️ Cross-screen: \(currentScreen.localizedName) → \(nextScreen.localizedName), entry layout=\(targetLayout.rawValue)")
-            } else {
-                print("[NARC] ↔️ Cross-screen: already at \(layout.rawValue) but no adjacent screen in this direction")
-            }
+        // Cross-screen: state machine decides, not frame detection
+        if windowID != 0,
+           WindowLayoutState.shared.shouldCrossScreen(windowID: windowID, layout: layout, screen: currentScreen),
+           NSScreen.screens.count > 1,
+           let nextScreen = ScreenNavigator.adjacentScreen(from: currentScreen, direction: layout) {
+            targetScreen = nextScreen
+            targetLayout = ScreenNavigator.crossScreenEntryLayout(for: layout)
+            print("[NARC] ↔️ Cross-screen: \(currentScreen.localizedName) → \(nextScreen.localizedName), entry layout=\(targetLayout.rawValue)")
         }
 
-        print("[NARC] 🖥 moveActiveWindow: applying layout=\(targetLayout.rawValue) on screen=\(targetScreen.localizedName)")
-
+        // Apply layout
         let (axPos, axSize) = AXWindowHelper.calculateLayoutFrame(layout: targetLayout, on: targetScreen)
-        print("[NARC] 🖥 moveActiveWindow: target axPos=(\(Int(axPos.x)),\(Int(axPos.y))), size=\(Int(axSize.width))x\(Int(axSize.height))")
-        AXWindowHelper.setFrame(window, position: axPos, size: axSize)
+        print("[NARC] 🖥 moveActiveWindow: app=\(frontApp.localizedName ?? "?"), "
+              + "layout=\(targetLayout.rawValue), screen=\(targetScreen.localizedName), "
+              + "targetPos=(\(Int(axPos.x)),\(Int(axPos.y))), targetSize=\(Int(axSize.width))x\(Int(axSize.height))")
+        AXWindowHelper.setFrame(window, position: axPos, size: axSize, on: targetScreen)
+
+        // Record state for next cross-screen decision
+        if windowID != 0 {
+            WindowLayoutState.shared.record(windowID: windowID, layout: layout, screen: targetScreen)
+        }
+
+        print("[NARC] ✅ moveActiveWindow: \(layout.rawValue) on \(targetScreen.localizedName)")
     }
 
     /// Move the active window to a layout (instance method for UI binding).
@@ -94,7 +85,7 @@ class WindowManagerService: ObservableObject {
         AXWindowHelper.raise(window)
 
         let (axPos, axSize) = AXWindowHelper.calculateLayoutFrame(layout: layout, on: targetScreen)
-        AXWindowHelper.setFrame(window, position: axPos, size: axSize)
+        AXWindowHelper.setFrame(window, position: axPos, size: axSize, on: targetScreen)
 
         print("[NARC] ✅ moveAppWindow: moved \(bundleID) to \(targetScreen.localizedName) at layout=\(layout.rawValue)")
     }
@@ -116,16 +107,10 @@ class WindowManagerService: ObservableObject {
         }
     }
 
-    /// Summon a specific window to the target screen using layout-aware positioning.
+    /// Summon a specific window to the target screen.
     ///
-    /// Strategy:
-    /// 1. If the window is already on the target screen, just raise it — don't move.
-    /// 2. Detect if the window matches a known layout (leftHalf, rightHalf, etc.) on its source screen.
-    ///    If yes, apply the SAME layout on the target screen. This ensures consistent behavior:
-    ///    e.g., a left-half window on the secondary screen becomes a left-half window on the primary screen.
-    /// 3. If the window doesn't match any known layout (custom size/position), preserve its original
-    ///    size and center it on the target screen. This avoids weird proportional mapping artifacts
-    ///    when screens have different resolutions.
+    /// Strategy: preserve original size, center on target screen.
+    /// If already on target screen, just raise.
     static func summonWindow(_ window: AXUIElement, toScreen targetScreen: NSScreen) {
         AXWindowHelper.raise(window)
 
@@ -137,19 +122,7 @@ class WindowManagerService: ObservableObject {
             return
         }
 
-        // Try to detect if the window matches a known layout on its source screen
-        if let source = sourceScreen {
-            let detectedLayout = detectWindowLayout(window, onScreen: source)
-            if let layout = detectedLayout {
-                // Apply the same layout on the target screen
-                let (axPos, axSize) = AXWindowHelper.calculateLayoutFrame(layout: layout, on: targetScreen)
-                AXWindowHelper.setFrame(window, position: axPos, size: axSize)
-                print("[NARC] ✅ summonWindow: moved to \(targetScreen.localizedName), applied layout=\(layout.rawValue)")
-                return
-            }
-        }
-
-        // No known layout detected — preserve original size, center on target screen
+        // Preserve original size, center on target screen
         let currentSize = AXWindowHelper.getSize(window) ?? CGSize(width: 800, height: 600)
         let targetVisible = targetScreen.visibleFrame
 
@@ -161,28 +134,9 @@ class WindowManagerService: ObservableObject {
         let nsX = targetVisible.origin.x + (targetVisible.width - finalSize.width) / 2
         let nsY = targetVisible.origin.y + (targetVisible.height - finalSize.height) / 2
         let axPos = AXWindowHelper.nsToAX(x: nsX, y: nsY, height: finalSize.height)
-        AXWindowHelper.setFrame(window, position: axPos, size: finalSize)
+        AXWindowHelper.setFrame(window, position: axPos, size: finalSize, on: targetScreen)
 
-        print("[NARC] ✅ summonWindow: moved to \(targetScreen.localizedName) centered (no matching layout)")
-    }
-
-    /// Detect if a window matches a known layout on the given screen.
-    /// Returns the matching WindowLayout, or nil if no match.
-    static func detectWindowLayout(_ window: AXUIElement, onScreen screen: NSScreen) -> WindowLayout? {
-        // Check common layouts in order of likelihood
-        let layoutsToCheck: [WindowLayout] = [
-            .leftHalf, .rightHalf, .topHalf, .bottomHalf,
-            .fullScreen,
-            .topLeft, .topRight, .bottomLeft, .bottomRight,
-        ]
-
-        for layout in layoutsToCheck {
-            if ScreenNavigator.isWindowAtLayout(window, layout: layout, onScreen: screen) {
-                return layout
-            }
-        }
-
-        return nil
+        print("[NARC] ✅ summonWindow: moved to \(targetScreen.localizedName) centered")
     }
 
     // MARK: - Window Finding
