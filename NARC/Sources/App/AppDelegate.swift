@@ -1,5 +1,6 @@
 import Cocoa
 import SwiftUI
+import Combine
 
 /// AppDelegate handles app lifecycle, floating window, and menu bar setup.
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -16,6 +17,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let windowManager = WindowManagerService()
     private let pinnedWindowService = PinnedWindowService()
     private let hotkeyService = HotkeyService()
+    private let claudeService = ClaudeSessionService.shared
 
     // MARK: - App Lifecycle
 
@@ -50,11 +52,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         hotkeyService.registerGlobalHotkeys()
 
+        // Start Claude Code session monitoring
+        claudeService.onAttentionNeeded = { [weak self] reason in
+            switch reason {
+            case .permissionRequest:
+                self?.showApprovalPanel()
+            case .stopped, .error, .stale:
+                self?.showApprovalPanel()
+            }
+        }
+        claudeService.startListening()
+
         print("[NARC] ✅ App launch complete. Look for the floating widget (bottom-right) and menu bar icon.")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         appMonitor.stopMonitoring()
+        claudeService.stopListening()
     }
 
     /// Show a brief visual feedback on the floating widget when a window is pinned.
@@ -102,6 +116,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupFloatingWidget() {
         let widgetView = FloatingWidgetView(
             appMonitor: appMonitor,
+            claudeService: claudeService,
             onTap: { /* Handled at AppKit level via onWidgetTapped */ }
         )
 
@@ -290,6 +305,292 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panelWindow?.orderOut(nil)
         panelWindow = nil
     }
+
+    // MARK: - Claude Toast Notification
+
+    private var toastWindow: NSPanel?
+    private var toastCancellables = Set<AnyCancellable>()
+    private var currentToastEvent: ClaudeToastEvent?
+
+    /// Show a toast notification at the top-right of the focused screen.
+    /// Stays visible until the user clicks (jump) or the event resolves.
+    private func showApprovalPanel() {
+        // Build toast event from the latest pending item
+        guard let event = buildToastEvent() else { return }
+
+        // If toast is already showing the same session, just update
+        if let current = currentToastEvent, current.sessionId == event.sessionId,
+           let window = toastWindow, window.isVisible {
+            // Update in-place (the binding will handle it if we rebuild)
+            updateToast(event: event)
+            return
+        }
+
+        currentToastEvent = event
+        presentToast(event: event)
+    }
+
+    private func buildToastEvent() -> ClaudeToastEvent? {
+        // Priority: pending approvals first, then notifications
+        if let approval = claudeService.pendingApprovals.last {
+            return ClaudeToastEvent(
+                type: .permissionRequest,
+                projectName: approval.projectName,
+                detail: approval.commandDescription,
+                tty: approval.tty,
+                cwd: approval.cwd,
+                sessionId: approval.sessionId,
+                approval: approval
+            )
+        }
+
+        if let notification = claudeService.notifications.last {
+            let type: ClaudeToastEvent.EventType
+            switch notification.type {
+            case .stopped: type = .waitingForInput
+            case .error: type = .error
+            case .stale: type = .stale
+            }
+            return ClaudeToastEvent(
+                type: type,
+                projectName: notification.projectName,
+                detail: notification.message,
+                tty: notification.tty,
+                cwd: notification.cwd,
+                sessionId: notification.sessionId
+            )
+        }
+
+        return nil
+    }
+
+    private func presentToast(event: ClaudeToastEvent) {
+        // Determine the focused screen (where mouse cursor is)
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main!
+        let screenFrame = screen.visibleFrame
+
+        // Position: top-right corner with padding
+        let toastWidth: CGFloat = 380
+        let toastHeight: CGFloat = 56
+        let x = screenFrame.maxX - toastWidth - 16
+        let y = screenFrame.maxY - toastHeight - 12
+
+        let toastView = ClaudeToastView(
+            event: event,
+            onJump: { [weak self] in
+                self?.jumpToClaudeTerminal(event: event)
+            },
+            onDismiss: { [weak self] in
+                self?.hideToast()
+            },
+            onAllow: event.approval != nil ? { [weak self] in
+                guard let approval = event.approval else { return }
+                self?.claudeService.approve(approval)
+                self?.hideToast()
+            } : nil,
+            onDeny: event.approval != nil ? { [weak self] in
+                guard let approval = event.approval else { return }
+                self?.claudeService.deny(approval)
+                self?.hideToast()
+            } : nil
+        )
+
+        let hostingView = NSHostingView(rootView: toastView)
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = .clear
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: x, y: y, width: toastWidth, height: toastHeight),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.contentView = hostingView
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.level = .floating
+        panel.hasShadow = false
+        panel.isMovable = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        panel.orderFrontRegardless()
+
+        // Clean up old toast
+        toastWindow?.orderOut(nil)
+        self.toastWindow = panel
+
+        // Subscribe to approval cleanup — hide toast when resolved
+        toastCancellables.removeAll()
+        claudeService.$pendingApprovals
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] approvals in
+                guard let self = self, let current = self.currentToastEvent else { return }
+                // If this was a permission request and it's been resolved, hide
+                if current.type == .permissionRequest {
+                    if !approvals.contains(where: { $0.sessionId == current.sessionId }) {
+                        self.hideToast()
+                    }
+                }
+            }
+            .store(in: &toastCancellables)
+
+        // Play a subtle sound
+        NSSound.beep()
+        print("[NARC] 🔔 Toast notification: \(event.statusLabel) — \(event.projectName)")
+    }
+
+    private func updateToast(event: ClaudeToastEvent) {
+        currentToastEvent = event
+        // Re-present with updated content
+        hideToast()
+        presentToast(event: event)
+    }
+
+    private func hideToast() {
+        toastWindow?.orderOut(nil)
+        toastWindow = nil
+        currentToastEvent = nil
+        toastCancellables.removeAll()
+    }
+
+    /// Jump to the Claude Code terminal window.
+    /// Matching priority: TTY (exact tab) > CWD in title (directory name) > activate app
+    private func jumpToClaudeTerminal(event: ClaudeToastEvent) {
+        // Dismiss the approval if it's a permission request (user will handle in terminal)
+        if let approval = event.approval {
+            claudeService.dismissApproval(approval)
+        }
+
+        hideToast()
+
+        // Build the AppleScript with multiple matching strategies
+        let tty = event.tty ?? ""
+        // Extract directory name from CWD for title-based fallback matching
+        let cwdDirName: String
+        if let cwd = event.cwd, !cwd.isEmpty {
+            cwdDirName = (cwd as NSString).lastPathComponent
+        } else if event.projectName != "?" {
+            cwdDirName = event.projectName
+        } else {
+            cwdDirName = ""
+        }
+
+        let script: String
+        if let _ = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal").first {
+            script = buildTerminalScript(tty: tty, cwdHint: cwdDirName)
+        } else if let _ = NSRunningApplication.runningApplications(withBundleIdentifier: "com.googlecode.iterm2").first {
+            script = buildITermScript(tty: tty, cwdHint: cwdDirName)
+        } else {
+            // Last resort: activate any terminal
+            let terminalApps = ["com.apple.Terminal", "com.googlecode.iterm2", "net.kovidgoyal.kitty", "com.mitchellh.ghostty"]
+            for bundleID in terminalApps {
+                if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
+                    app.activate()
+                    return
+                }
+            }
+            return
+        }
+
+        print("[NARC] 🔌 Jumping to terminal (tty=\(tty.isEmpty ? "none" : tty), cwd=\(cwdDirName))")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", script]
+            let pipe = Pipe()
+            process.standardError = pipe
+            do {
+                try process.run()
+                process.waitUntilExit()
+                if process.terminationStatus != 0 {
+                    let err = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    print("[NARC] ⚠️ Jump script error: \(err)")
+                }
+            } catch {
+                print("[NARC] ⚠️ Jump failed: \(error)")
+            }
+        }
+    }
+
+    /// Build AppleScript for Terminal.app with TTY-first, CWD-fallback matching
+    private func buildTerminalScript(tty: String, cwdHint: String) -> String {
+        return """
+        tell application "Terminal"
+            -- Strategy 1: match by TTY (most precise)
+            \(tty.isEmpty ? "-- TTY not available, skip" : """
+            repeat with w in windows
+                repeat with t in tabs of w
+                    if tty of t is "\(tty)" then
+                        set selected of t to true
+                        set index of w to 1
+                        activate
+                        return
+                    end if
+                end repeat
+            end repeat
+            """)
+
+            -- Strategy 2: match by CWD in window title (fallback)
+            \(cwdHint.isEmpty ? "-- CWD hint not available, skip" : """
+            repeat with w in windows
+                if name of w contains "\(cwdHint)" then
+                    set index of w to 1
+                    activate
+                    return
+                end if
+            end repeat
+            """)
+
+            -- Strategy 3: just activate (last resort)
+            activate
+        end tell
+        """
+    }
+
+    /// Build AppleScript for iTerm2 with TTY-first, CWD-fallback matching
+    private func buildITermScript(tty: String, cwdHint: String) -> String {
+        return """
+        tell application "iTerm2"
+            -- Strategy 1: match by TTY
+            \(tty.isEmpty ? "-- TTY not available, skip" : """
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if tty of s is "\(tty)" then
+                            select s
+                            select t
+                            set index of w to 1
+                            activate
+                            return
+                        end if
+                    end repeat
+                end repeat
+            end repeat
+            """)
+
+            -- Strategy 2: match by CWD in window name
+            \(cwdHint.isEmpty ? "-- CWD hint not available, skip" : """
+            repeat with w in windows
+                if name of w contains "\(cwdHint)" then
+                    set index of w to 1
+                    activate
+                    return
+                end if
+            end repeat
+            """)
+
+            activate
+        end tell
+        """
+    }
+
+    // Keep old method name for compatibility but it's now unused
+    private func hideApprovalPanel() {
+        hideToast()
+    }
+
+    private var approvalCancellables = Set<AnyCancellable>()
 
     // MARK: - Keyboard Navigation
 
