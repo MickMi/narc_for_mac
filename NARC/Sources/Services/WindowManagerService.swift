@@ -63,6 +63,38 @@ class WindowManagerService: ObservableObject {
               + "targetPos=(\(Int(axPos.x)),\(Int(axPos.y))), targetSize=\(Int(axSize.width))x\(Int(axSize.height))")
         AXWindowHelper.setFrame(window, position: axPos, size: axSize, on: targetScreen)
 
+        // Edge alignment correction: if app constrains size (wider/taller than target),
+        // adjust position so the window still aligns to the layout's anchor edge.
+        // E.g., rightHalf → right edge of window must touch right edge of screen.
+        if let actualSize = AXWindowHelper.getSize(window), let actualPos = AXWindowHelper.getPosition(window) {
+            let bounds = AXWindowHelper.screenBoundsInAX(targetScreen.visibleFrame)
+            var correctedPos = actualPos
+            var needsCorrection = false
+
+            switch targetLayout {
+            case .rightHalf, .topRight, .bottomRight:
+                // Right edge must align to screen right edge
+                let actualRight = actualPos.x + actualSize.width
+                if abs(actualRight - bounds.right) > 2 {
+                    correctedPos.x = bounds.right - actualSize.width
+                    needsCorrection = true
+                }
+            case .bottomHalf, .bottomLeft:
+                // Bottom edge must align to screen bottom edge
+                let actualBottom = actualPos.y + actualSize.height
+                if abs(actualBottom - bounds.bottom) > 2 {
+                    correctedPos.y = bounds.bottom - actualSize.height
+                    needsCorrection = true
+                }
+            default:
+                break  // leftHalf, topHalf, fullScreen, center — default position is fine
+            }
+
+            if needsCorrection {
+                AXWindowHelper.setPosition(window, correctedPos)
+            }
+        }
+
         // Record state for next cross-screen decision
         if windowID != 0 {
             WindowLayoutState.shared.record(windowID: windowID, layout: layout, screen: targetScreen)
@@ -109,8 +141,8 @@ class WindowManagerService: ObservableObject {
 
     /// Summon a specific window to the target screen.
     ///
-    /// Strategy: preserve original size, center on target screen.
-    /// If already on target screen, just raise.
+    /// Strategy: preserve original size and map relative position from source screen
+    /// to target screen. If already on target screen, just raise in place.
     static func summonWindow(_ window: AXUIElement, toScreen targetScreen: NSScreen) {
         AXWindowHelper.raise(window)
 
@@ -122,8 +154,9 @@ class WindowManagerService: ObservableObject {
             return
         }
 
-        // Preserve original size, center on target screen
+        // Preserve original size, map relative position to target screen
         let currentSize = AXWindowHelper.getSize(window) ?? CGSize(width: 800, height: 600)
+        let currentPos = AXWindowHelper.getPosition(window)
         let targetVisible = targetScreen.visibleFrame
 
         // Clamp size to fit within target screen
@@ -131,12 +164,39 @@ class WindowManagerService: ObservableObject {
         let clampedHeight = min(currentSize.height, targetVisible.height)
         let finalSize = CGSize(width: clampedWidth, height: clampedHeight)
 
-        let nsX = targetVisible.origin.x + (targetVisible.width - finalSize.width) / 2
-        let nsY = targetVisible.origin.y + (targetVisible.height - finalSize.height) / 2
-        let axPos = AXWindowHelper.nsToAX(x: nsX, y: nsY, height: finalSize.height)
-        AXWindowHelper.setFrame(window, position: axPos, size: finalSize, on: targetScreen)
+        // Calculate relative position from source screen, apply to target screen
+        var nsX: CGFloat
+        var nsY: CGFloat
 
-        print("[NARC] ✅ summonWindow: moved to \(targetScreen.localizedName) centered")
+        if let source = sourceScreen, let pos = currentPos {
+            let sourceBounds = AXWindowHelper.screenBoundsInAX(source.visibleFrame)
+            let sourceWidth = source.visibleFrame.width
+            let sourceHeight = source.visibleFrame.height
+
+            // Relative position (0.0 ~ 1.0) within source screen
+            let relX = (pos.x - sourceBounds.left) / sourceWidth
+            let relY = (pos.y - sourceBounds.top) / sourceHeight
+
+            // Map to target screen
+            let targetBounds = AXWindowHelper.screenBoundsInAX(targetVisible)
+            let mappedX = targetBounds.left + relX * targetVisible.width
+            let mappedY = targetBounds.top + relY * targetVisible.height
+
+            // Clamp to keep window within target screen bounds
+            let axPos = CGPoint(
+                x: max(targetBounds.left, min(mappedX, targetBounds.right - finalSize.width)),
+                y: max(targetBounds.top, min(mappedY, targetBounds.bottom - finalSize.height))
+            )
+            AXWindowHelper.setFrame(window, position: axPos, size: finalSize, on: targetScreen)
+            print("[NARC] ✅ summonWindow: moved to \(targetScreen.localizedName) at mapped position")
+        } else {
+            // No source screen info — center on target screen
+            nsX = targetVisible.origin.x + (targetVisible.width - finalSize.width) / 2
+            nsY = targetVisible.origin.y + (targetVisible.height - finalSize.height) / 2
+            let axPos = AXWindowHelper.nsToAX(x: nsX, y: nsY, height: finalSize.height)
+            AXWindowHelper.setFrame(window, position: axPos, size: finalSize, on: targetScreen)
+            print("[NARC] ✅ summonWindow: moved to \(targetScreen.localizedName) centered (no source)")
+        }
     }
 
     // MARK: - Window Finding

@@ -24,78 +24,89 @@ struct NotificationListView: View {
             let monitoringOffset = 0
             let pinnedOffset = runningStates.count
 
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    // MARK: - Monitoring Section
-                    if !enabledStates.isEmpty {
-                        SectionHeader(title: "Monitoring", icon: "bell.fill")
-
-                        ForEach(Array(enabledStates.enumerated()), id: \.element.id) { _, state in
-                            let filterAction = appMonitor.resolveFilterAction(for: state)
-                            // Only running apps get a keyboard index
-                            let kbIndex = state.isRunning
-                                ? monitoringOffset + runningStates.firstIndex(where: { $0.id == state.id })!
-                                : -1
-                            AppItemRow(
-                                state: state,
-                                filterAction: filterAction,
-                                keyboardIndex: kbIndex,
-                                isKeyboardSelected: kbIndex >= 0 && kbIndex == keyboardSelection.selectedIndex
-                            ) {
-                                appMonitor.activateApp(
-                                    bundleID: state.app.bundleID,
-                                    summonToScreen: narcScreen
-                                )
-                                onClose()
-                            }
-
-                            if state.id != enabledStates.last?.id {
-                                Divider()
-                                    .padding(.leading, 64)
-                            }
-                        }
-                    }
-
-                    // MARK: - Pinned Section
-                    if !pinnedWindows.isEmpty {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        // MARK: - Monitoring Section
                         if !enabledStates.isEmpty {
-                            Divider()
-                                .padding(.vertical, 4)
-                        }
+                            SectionHeader(title: "Monitoring", icon: "bell.fill")
 
-                        SectionHeader(title: "Pinned", icon: "pin.fill")
-
-                        ForEach(Array(pinnedWindows.enumerated()), id: \.element.id) { index, pinned in
-                            let runtimeState = pinnedWindowService.runtimeStates[pinned.id]
-                            let kbIndex = pinnedOffset + index
-                            PinnedWindowRow(
-                                pinned: pinned,
-                                runtimeState: runtimeState,
-                                keyboardIndex: kbIndex,
-                                isKeyboardSelected: kbIndex == keyboardSelection.selectedIndex,
-                                onTap: {
-                                    pinnedWindowService.activatePinnedWindow(
-                                        pinned,
+                            ForEach(Array(enabledStates.enumerated()), id: \.element.id) { _, state in
+                                let filterAction = appMonitor.resolveFilterAction(for: state)
+                                // Only running apps get a keyboard index
+                                let kbIndex = state.isRunning
+                                    ? monitoringOffset + runningStates.firstIndex(where: { $0.id == state.id })!
+                                    : -1
+                                AppItemRow(
+                                    state: state,
+                                    filterAction: filterAction,
+                                    keyboardIndex: kbIndex,
+                                    isKeyboardSelected: kbIndex >= 0 && kbIndex == keyboardSelection.selectedIndex
+                                ) {
+                                    appMonitor.activateApp(
+                                        bundleID: state.app.bundleID,
                                         summonToScreen: narcScreen
                                     )
                                     onClose()
-                                },
-                                onTogglePersistence: {
-                                    pinnedWindowService.togglePersistence(id: pinned.id)
-                                },
-                                onRemove: {
-                                    pinnedWindowService.unpin(id: pinned.id)
                                 }
-                            )
+                                .id(kbIndex)
 
-                            if pinned.id != pinnedWindows.last?.id {
+                                if state.id != enabledStates.last?.id {
+                                    Divider()
+                                        .padding(.leading, 64)
+                                }
+                            }
+                        }
+
+                        // MARK: - Pinned Section
+                        if !pinnedWindows.isEmpty {
+                            if !enabledStates.isEmpty {
                                 Divider()
-                                    .padding(.leading, 64)
+                                    .padding(.vertical, 4)
+                            }
+
+                            SectionHeader(title: "Pinned", icon: "pin.fill")
+
+                            ForEach(Array(pinnedWindows.enumerated()), id: \.element.id) { index, pinned in
+                                let runtimeState = pinnedWindowService.runtimeStates[pinned.id]
+                                let kbIndex = pinnedOffset + index
+                                PinnedWindowRow(
+                                    pinned: pinned,
+                                    runtimeState: runtimeState,
+                                    keyboardIndex: kbIndex,
+                                    isKeyboardSelected: kbIndex == keyboardSelection.selectedIndex,
+                                    onTap: {
+                                        pinnedWindowService.activatePinnedWindow(
+                                            pinned,
+                                            summonToScreen: narcScreen
+                                        )
+                                        onClose()
+                                    },
+                                    onTogglePersistence: {
+                                        pinnedWindowService.togglePersistence(id: pinned.id)
+                                    },
+                                    onRemove: {
+                                        pinnedWindowService.unpin(id: pinned.id)
+                                    }
+                                )
+                                .id(kbIndex)
+
+                                if pinned.id != pinnedWindows.last?.id {
+                                    Divider()
+                                        .padding(.leading, 64)
+                                }
                             }
                         }
                     }
+                    .padding(.vertical, 4)
                 }
-                .padding(.vertical, 4)
+                .onChange(of: keyboardSelection.selectedIndex) { newIndex in
+                    if newIndex >= 0 {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            proxy.scrollTo(newIndex, anchor: .center)
+                        }
+                    }
+                }
             }
         }
     }
