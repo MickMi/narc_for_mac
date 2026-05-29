@@ -10,33 +10,33 @@ struct ClaudeApprovalView: View {
             // Header
             HStack {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.orange)
+                    .foregroundStyle(Color.narcWarn)
                     .font(.title3)
                 Text("Claude Code 权限确认")
-                    .font(.headline)
+                    .font(.narcSubtitle)
                 Spacer()
                 Text("\(service.pendingApprovals.count)")
-                    .font(.caption)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.red)
-                    .foregroundColor(.white)
+                    .font(.narcCaption)
+                    .padding(.horizontal, NarcSpacing.xs)
+                    .padding(.vertical, NarcSpacing.xxs)
+                    .background(Color.narcDanger)
+                    .foregroundStyle(.white)
                     .clipShape(Capsule())
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(.ultraThinMaterial)
+            .padding(.horizontal, NarcSpacing.lg)
+            .padding(.vertical, NarcSpacing.md)
+            .background(VisualEffectBackground(material: .hudWindow))
 
             Divider()
 
             // Approval list
             ScrollView {
-                LazyVStack(spacing: 8) {
+                LazyVStack(spacing: NarcSpacing.sm) {
                     ForEach(service.pendingApprovals) { approval in
                         ApprovalCard(approval: approval, service: service)
                     }
                 }
-                .padding(12)
+                .padding(NarcSpacing.md)
             }
 
             // Batch actions
@@ -48,22 +48,26 @@ struct ClaudeApprovalView: View {
                         for a in approvals { service.approve(a) }
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.green)
+                    .tint(Color.narcSuccess)
 
                     Button("全部拒绝") {
                         let approvals = service.pendingApprovals
                         for a in approvals { service.deny(a) }
                     }
                     .buttonStyle(.bordered)
-                    .tint(.red)
+                    .tint(Color.narcDanger)
                 }
-                .padding(12)
+                .padding(NarcSpacing.md)
             }
         }
-        .frame(width: 360, height: 300)
-        .background(.ultraThickMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .shadow(color: .black.opacity(0.3), radius: 10, y: 5)
+        .frame(width: NarcSize.toastWidth, height: 300)
+        .background(VisualEffectBackground(material: .hudWindow))
+        .clipShape(RoundedRectangle(cornerRadius: NarcRadius.lg))
+        .overlay(
+            RoundedRectangle(cornerRadius: NarcRadius.lg)
+                .strokeBorder(Color.narcBorder, lineWidth: 0.5)
+        )
+        .shadow(color: Color.narcAccent.opacity(0.15), radius: 14, y: 6)
     }
 }
 
@@ -76,40 +80,40 @@ struct ApprovalCard: View {
     @State private var isLoadingIntent = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: NarcSpacing.sm) {
             // Header: tool icon + type + project + time
             HStack {
                 toolIcon
                 Text(approval.tool)
-                    .font(.caption)
+                    .font(.narcCaption)
                     .fontWeight(.semibold)
-                    .foregroundColor(toolColor)
+                    .foregroundStyle(toolColor)
                 Text("·")
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(Color.narcTextMuted)
                 Text(approval.projectName)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                    .font(.narcCaption)
+                    .foregroundStyle(Color.narcTextMuted)
                 Spacer()
                 Text(timeAgo(approval.receivedAt))
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                    .font(.narcCaption)
+                    .foregroundStyle(Color.narcTextFaint)
             }
 
             // One-line summary (always visible)
             Text(approval.commandDescription)
-                .font(.system(.caption, design: .monospaced))
+                .font(.narcMonoSmall)
                 .lineLimit(1)
-                .foregroundColor(.primary)
+                .foregroundStyle(Color.narcText)
 
             // Risk indicator
             if approval.isHighRisk {
-                HStack(spacing: 4) {
+                HStack(spacing: NarcSpacing.xs) {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.caption2)
-                        .foregroundColor(.red)
+                        .font(.narcCaption)
+                        .foregroundStyle(Color.narcDanger)
                     Text("高风险操作")
-                        .font(.caption2)
-                        .foregroundColor(.red)
+                        .font(.narcCaption)
+                        .foregroundStyle(Color.narcDanger)
                 }
             }
 
@@ -119,74 +123,84 @@ struct ApprovalCard: View {
 
                 // Show conversation context from transcript (Claude's reasoning)
                 if let context = approval.context {
-                    HStack(alignment: .top, spacing: 6) {
+                    HStack(alignment: .top, spacing: NarcSpacing.xs) {
                         Image(systemName: "bubble.left.fill")
-                            .font(.caption2)
-                            .foregroundColor(.blue)
+                            .font(.narcMonoTiny)
+                            .foregroundStyle(Color.narcInfo)
                         Text(context.suffix(300))
-                            .font(.caption)
-                            .foregroundColor(.primary)
+                            .font(.narcCaption)
+                            .foregroundStyle(Color.narcText)
                             .lineLimit(6)
                     }
-                    .padding(6)
-                    .background(Color.blue.opacity(0.05))
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .padding(NarcSpacing.xs)
+                    .background(Color.narcInfo.opacity(0.05))
+                    .clipShape(RoundedRectangle(cornerRadius: NarcRadius.xs))
                 } else if let intent = intentSummary {
-                    HStack(alignment: .top, spacing: 6) {
+                    HStack(alignment: .top, spacing: NarcSpacing.xs) {
                         Image(systemName: "lightbulb.fill")
-                            .font(.caption2)
-                            .foregroundColor(.yellow)
+                            .font(.narcMonoTiny)
+                            .foregroundStyle(Color.narcWarn)
                         Text(intent)
-                            .font(.caption)
-                            .foregroundColor(.primary)
+                            .font(.narcCaption)
+                            .foregroundStyle(Color.narcText)
                     }
-                    .padding(6)
-                    .background(Color.yellow.opacity(0.1))
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .padding(NarcSpacing.xs)
+                    .background(Color.narcWarn.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: NarcRadius.xs))
                 } else if isLoadingIntent {
-                    HStack(spacing: 6) {
+                    HStack(spacing: NarcSpacing.xs) {
                         ProgressView()
                             .controlSize(.small)
                         Text("分析意图中...")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                            .font(.narcCaption)
+                            .foregroundStyle(Color.narcTextMuted)
                     }
                 }
 
                 // Full command/content
                 Text(approval.fullCommand)
-                    .font(.system(.caption2, design: .monospaced))
+                    .font(.narcMonoSmall)
                     .lineLimit(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(6)
-                    .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .padding(NarcSpacing.xs)
+                    .background(Color.narcSurfaceMuted.opacity(0.5))
+                    .clipShape(RoundedRectangle(cornerRadius: NarcRadius.xs))
             }
 
             // Actions
-            HStack(spacing: 8) {
+            HStack(spacing: NarcSpacing.sm) {
                 // Primary action: jump to the terminal to answer
                 Button(action: { jumpToSession(approval) }) {
                     Label("前往回答", systemImage: "arrow.right.circle.fill")
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.blue)
+                .tint(Color.narcInfo)
                 .controlSize(.small)
 
                 // Quick approve (for simple permission requests)
                 if approval.isPermissionRequest {
                     Button(action: { service.approve(approval) }) {
-                        Label("Allow", systemImage: "checkmark.circle.fill")
+                        HStack(spacing: NarcSpacing.xxs) {
+                            Label("Allow", systemImage: "checkmark.circle.fill")
+                            Text("⏎")
+                                .font(.narcMonoTiny)
+                                .foregroundStyle(Color.narcSuccess.opacity(0.7))
+                        }
                     }
                     .buttonStyle(.bordered)
-                    .tint(.green)
+                    .tint(Color.narcSuccess)
                     .controlSize(.small)
 
                     Button(action: { service.deny(approval) }) {
-                        Label("Deny", systemImage: "xmark.circle.fill")
+                        HStack(spacing: NarcSpacing.xxs) {
+                            Label("Deny", systemImage: "xmark.circle.fill")
+                            Text("Esc")
+                                .font(.narcMonoTiny)
+                                .foregroundStyle(Color.narcDanger.opacity(0.7))
+                        }
                     }
                     .buttonStyle(.bordered)
-                    .tint(.red)
+                    .tint(Color.narcDanger)
                     .controlSize(.small)
                 }
 
@@ -199,12 +213,12 @@ struct ApprovalCard: View {
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
-                .foregroundColor(.secondary)
+                .foregroundStyle(Color.narcTextMuted)
             }
         }
-        .padding(12)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(NarcSpacing.md)
+        .background(Color.narcSurface)
+        .clipShape(RoundedRectangle(cornerRadius: NarcRadius.sm))
     }
 
     private func timeAgo(_ date: Date) -> String {
@@ -364,27 +378,27 @@ struct ApprovalCard: View {
             switch approval.tool {
             case "Bash":
                 Image(systemName: "terminal")
-                    .foregroundColor(.orange)
+                    .foregroundStyle(Color.narcWarn)
             case "Edit":
                 Image(systemName: "pencil")
-                    .foregroundColor(.blue)
+                    .foregroundStyle(Color.narcInfo)
             case "Write":
                 Image(systemName: "doc.badge.plus")
-                    .foregroundColor(.purple)
+                    .foregroundStyle(Color.narcAccent)
             default:
                 Image(systemName: "gearshape")
-                    .foregroundColor(.gray)
+                    .foregroundStyle(Color.narcTextMuted)
             }
         }
-        .font(.caption)
+        .font(.narcCaption)
     }
 
     private var toolColor: Color {
         switch approval.tool {
-        case "Bash": return .orange
-        case "Edit": return .blue
-        case "Write": return .purple
-        default: return .secondary
+        case "Bash": return .narcWarn
+        case "Edit": return .narcInfo
+        case "Write": return .narcAccent
+        default: return .narcTextMuted
         }
     }
 }
@@ -397,19 +411,19 @@ struct ClaudeStatusView: View {
         if service.sessions.isEmpty { return AnyView(EmptyView()) }
 
         return AnyView(
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: NarcSpacing.xs) {
                 ForEach(Array(service.sessions.values), id: \.sessionId) { session in
-                    HStack(spacing: 8) {
+                    HStack(spacing: NarcSpacing.sm) {
                         Circle()
                             .fill(statusColor(session.status))
-                            .frame(width: 8, height: 8)
+                            .frame(width: NarcSize.statusDotSmall, height: NarcSize.statusDotSmall)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(session.projectName ?? "Claude Code")
-                                .font(.caption)
+                                .font(.narcCaption)
                                 .fontWeight(.medium)
                             Text(session.statusDescription)
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
+                                .font(.narcMonoTiny)
+                                .foregroundStyle(Color.narcTextMuted)
                         }
                         Spacer()
                     }
@@ -420,13 +434,13 @@ struct ClaudeStatusView: View {
 
     private func statusColor(_ status: ClaudeStatus) -> Color {
         switch status {
-        case .waitingForInput: return .green
-        case .processing: return .blue
-        case .runningTool: return .orange
-        case .waitingForApproval: return .red
-        case .compacting: return .purple
-        case .ended: return .gray
-        case .unknown: return .gray
+        case .waitingForInput: return .narcSuccess
+        case .processing: return .narcInfo
+        case .runningTool: return .narcWarn
+        case .waitingForApproval: return .narcDanger
+        case .compacting: return .narcAccent
+        case .ended: return .narcTextFaint
+        case .unknown: return .narcTextFaint
         }
     }
 }

@@ -15,33 +15,29 @@ struct FloatingWidgetView: View {
 
     var body: some View {
         ZStack {
-            // Background circle — orange tint when Claude needs attention
+            // Background circle — frosted glass material
             Circle()
-                .fill(hasClaudePending
-                    ? Color.orange.opacity(isHovering ? 1.0 : 0.85)
-                    : Color.black.opacity(isHovering ? 1.0 : 0.7))
-                .frame(width: 48, height: 48)
+                .fill(.ultraThinMaterial)
+                .frame(width: NarcSize.widgetDiameter, height: NarcSize.widgetDiameter)
                 .scaleEffect(isHovering ? 1.08 : 1.0)
-                .animation(.easeInOut(duration: 0.15), value: isHovering)
-                .animation(.easeInOut(duration: 0.3), value: hasClaudePending)
+                .animation(.narcEase, value: isHovering)
+                .breathingHalo(active: hasClaudePending || appMonitor.totalBadgeCount > 0)
 
-            // "N" logo
-            Text("N")
-                .font(.system(size: 22, weight: .bold, design: .rounded))
-                .foregroundColor(.white)
+            // Signal logo
+            NarcSignalLogo(animated: true)
 
-            // Badge (red dot + count) for IM notifications
+            // Badge (accent capsule + count) for IM notifications
             if appMonitor.totalBadgeCount > 0 {
                 BadgeView(count: appMonitor.totalBadgeCount)
                     .offset(x: 14, y: -14)
                     .transition(.scale.combined(with: .opacity))
             }
 
-            // Claude pending indicator (small orange dot, bottom-right)
+            // Claude pending indicator (small warn dot, bottom-right)
             if hasClaudePending && appMonitor.totalBadgeCount == 0 {
                 Circle()
-                    .fill(Color.orange)
-                    .frame(width: 10, height: 10)
+                    .fill(Color.narcWarn)
+                    .frame(width: NarcSize.statusDotLarge, height: NarcSize.statusDotLarge)
                     .overlay(
                         Circle()
                             .stroke(Color.black.opacity(0.3), lineWidth: 1)
@@ -50,7 +46,7 @@ struct FloatingWidgetView: View {
                     .transition(.scale.combined(with: .opacity))
             }
         }
-        .frame(width: 48, height: 48)
+        .frame(width: NarcSize.widgetDiameter, height: NarcSize.widgetDiameter)
         .onHover { hovering in
             isHovering = hovering
         }
@@ -60,18 +56,18 @@ struct FloatingWidgetView: View {
     }
 }
 
-/// Red notification badge with count.
+/// Accent notification badge with count.
 struct BadgeView: View {
     let count: Int
 
     var body: some View {
         ZStack {
-            Circle()
-                .fill(Color.red)
-                .frame(width: 20, height: 20)
+            Capsule()
+                .fill(Color.narcAccent)
+                .frame(width: NarcSize.badgeSize, height: NarcSize.badgeSize)
 
             Text(count > 99 ? "99+" : "\(count)")
-                .font(.system(size: 10, weight: .bold))
+                .font(.narcMonoSmall)
                 .foregroundColor(.white)
                 .minimumScaleFactor(0.5)
         }

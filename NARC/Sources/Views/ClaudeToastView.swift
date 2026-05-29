@@ -10,27 +10,28 @@ struct ClaudeToastView: View {
     var onDeny: (() -> Void)? = nil
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: NarcSpacing.md) {
             // Left: status icon
             statusIcon
                 .frame(width: 28, height: 28)
 
             // Middle: info
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 4) {
+                HStack(spacing: NarcSpacing.xs) {
                     Text(event.projectName)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.primary)
+                        .font(.narcBody)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.narcText)
                     Text("·")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.narcTextMuted)
                     Text(event.statusLabel)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
+                        .font(.narcCaption)
+                        .foregroundColor(.narcTextMuted)
                 }
 
                 Text(event.detail)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(.primary.opacity(0.8))
+                    .font(.narcMonoSmall)
+                    .foregroundColor(.narcText.opacity(0.8))
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
@@ -45,38 +46,42 @@ struct ClaudeToastView: View {
                         Image(systemName: "checkmark")
                             .font(.system(size: 11, weight: .bold))
                     }
-                    .buttonStyle(ToastActionButtonStyle(color: .green))
+                    .buttonStyle(ToastActionButtonStyle(color: .narcSuccess))
 
                     Button(action: onDeny) {
                         Image(systemName: "xmark")
                             .font(.system(size: 11, weight: .bold))
                     }
-                    .buttonStyle(ToastActionButtonStyle(color: .red))
+                    .buttonStyle(ToastActionButtonStyle(color: .narcDanger))
                 }
 
                 Button(action: onJump) {
                     Image(systemName: "arrow.right.circle.fill")
                         .font(.system(size: 16))
-                        .foregroundColor(.accentColor)
+                        .foregroundColor(.narcAccent)
                 }
                 .buttonStyle(.plain)
                 .help("跳转到终端")
 
                 Button(action: onDismiss) {
                     Image(systemName: "xmark.circle")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary.opacity(0.6))
+                        .font(.narcBody)
+                        .foregroundColor(.narcTextFaint)
                 }
                 .buttonStyle(.plain)
                 .help("关闭")
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .frame(width: 360)
-        .background(.ultraThickMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .shadow(color: .black.opacity(0.2), radius: 8, y: 3)
+        .padding(.horizontal, NarcSpacing.lg)
+        .padding(.vertical, NarcSpacing.sm)
+        .frame(width: NarcSize.toastWidth)
+        .background(VisualEffectBackground(material: .hudWindow))
+        .clipShape(RoundedRectangle(cornerRadius: NarcRadius.lg))
+        .overlay(
+            RoundedRectangle(cornerRadius: NarcRadius.lg)
+                .strokeBorder(event.type.toneColor.opacity(0.4), lineWidth: 1)
+        )
+        .shadow(color: event.type.toneColor.opacity(0.15), radius: 18, y: 8)
     }
 
     @ViewBuilder
@@ -84,31 +89,31 @@ struct ClaudeToastView: View {
         switch event.type {
         case .permissionRequest:
             ZStack {
-                Circle().fill(Color.orange.opacity(0.15))
+                Circle().fill(Color.narcWarn.opacity(0.15))
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 13))
-                    .foregroundColor(.orange)
+                    .foregroundColor(.narcWarn)
             }
         case .waitingForInput:
             ZStack {
-                Circle().fill(Color.blue.opacity(0.15))
+                Circle().fill(Color.narcInfo.opacity(0.15))
                 Image(systemName: "bubble.left.fill")
                     .font(.system(size: 13))
-                    .foregroundColor(.blue)
+                    .foregroundColor(.narcInfo)
             }
         case .error:
             ZStack {
-                Circle().fill(Color.red.opacity(0.15))
+                Circle().fill(Color.narcDanger.opacity(0.15))
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 13))
-                    .foregroundColor(.red)
+                    .foregroundColor(.narcDanger)
             }
         case .stale:
             ZStack {
-                Circle().fill(Color.yellow.opacity(0.15))
+                Circle().fill(Color.narcWarn.opacity(0.15))
                 Image(systemName: "clock.fill")
                     .font(.system(size: 13))
-                    .foregroundColor(.yellow)
+                    .foregroundColor(.narcWarn)
             }
         }
     }
@@ -147,6 +152,16 @@ struct ClaudeToastEvent: Identifiable {
         case waitingForInput
         case error
         case stale
+
+        /// Maps each event type to its semantic tone color from design tokens.
+        var toneColor: Color {
+            switch self {
+            case .permissionRequest: return .narcWarn
+            case .waitingForInput: return .narcInfo
+            case .error: return .narcDanger
+            case .stale: return .narcWarn
+            }
+        }
     }
 
     var statusLabel: String {
