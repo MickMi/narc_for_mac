@@ -133,8 +133,20 @@ struct TerminalPaneView: NSViewRepresentable {
         // not `LocalProcessTerminalView` — match exactly or conformance fails.
 
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
+            // SwiftTerm hands us the raw OSC 7 payload, which is shaped like
+            // `file://hostname/path/to/dir`. Extract just the local path.
+            let cleaned: String?
+            if let dir = directory, !dir.isEmpty {
+                if let url = URL(string: dir), url.scheme == "file" {
+                    cleaned = url.path
+                } else {
+                    cleaned = dir
+                }
+            } else {
+                cleaned = nil
+            }
             DispatchQueue.main.async { [weak self] in
-                self?.onCwdChange?(directory)
+                self?.onCwdChange?(cleaned)
             }
         }
 
