@@ -542,8 +542,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         static let sessionId = "narc.sessionId"
     }
 
+    /// Whether UNUserNotificationCenter is usable. False under `swift run`
+    /// (raw executable, no bundle identifier — accessing the notification
+    /// center throws an NSException). True in a proper .app bundle.
+    private var systemNotificationsAvailable = false
+
     /// Request authorization and register as the delegate so click-to-jump works.
     private func setupSystemNotifications() {
+        // UNUserNotificationCenter.current() requires a real .app bundle. When
+        // running via `swift run`, mainBundle has no bundleIdentifier and the
+        // first access throws (NSInternalInconsistencyException). Guard against
+        // that so the dev workflow doesn't crash on launch.
+        guard Bundle.main.bundleIdentifier != nil else {
+            print("[NARC] ⚠️  No bundle identifier (running from `swift run`?) — system notifications disabled.")
+            print("[NARC]    Toast notifications still work. For OS banners run as a .app bundle.")
+            return
+        }
+
+        systemNotificationsAvailable = true
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
@@ -565,6 +581,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         sessionId: String?,
         sound: UNNotificationSound? = .default
     ) {
+        guard systemNotificationsAvailable else { return }
+
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
