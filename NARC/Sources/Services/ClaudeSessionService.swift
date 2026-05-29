@@ -153,6 +153,8 @@ class ClaudeSessionService: ObservableObject {
         let cwd = json["cwd"] as? String
         let message = json["message"] as? String
         let tty = json["tty"] as? String
+        let narcSessionId = json["narc_session_id"] as? String
+        let narcSessionId = json["narc_session_id"] as? String
 
         print("[NARC] 🔌 Received: event=\(event) status=\(status) session=\(sessionId.prefix(8))")
 
@@ -177,6 +179,7 @@ class ClaudeSessionService: ObservableObject {
             toolInput: toolInput,
             cwd: cwd,
             tty: tty,
+            narcSessionId: narcSessionId,
             lastUpdated: Date(),
             recentEvents: updatedEvents
         )
@@ -369,6 +372,10 @@ struct ClaudeSession {
     var toolInput: [String: Any]?
     var cwd: String?
     var tty: String?          // TTY device path for precise window targeting
+    /// When the session was started inside a NARC workspace pane, this carries
+    /// the OwnedSession UUID (via the NARC_SESSION_ID env var + narc-hook
+    /// reading it). Lets the workspace tab UI find its claude state.
+    var narcSessionId: String?
     var lastUpdated: Date
     /// Ring buffer of recent hook events. Capped at 12 entries by the service.
     var recentEvents: [ClaudeEvent] = []

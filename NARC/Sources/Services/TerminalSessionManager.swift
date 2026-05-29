@@ -20,6 +20,10 @@ struct OwnedSession: Identifiable, Equatable {
     let creationDate: Date
     /// False after the child process terminates. UI shows a gray dot then.
     var isAlive: Bool = true
+    /// Live claude state from the most recent matching hook event, if any.
+    /// Set by TerminalSessionManager subscribing to ClaudeSessionService and
+    /// matching by NARC_SESSION_ID. nil means "no claude detected in this tab".
+    var claude: ClaudeSession?
 
     /// What to show in the tab. User rename wins, otherwise auto title.
     var displayTitle: String { userTitle ?? autoTitle }
@@ -35,6 +39,33 @@ final class TerminalSessionManager: ObservableObject {
     @Published var sessions: [OwnedSession] = []
     /// Monotonically increasing label counter. Reset only on app launch.
     private var nextSequenceNumber = 1
+    /// Subscription to ClaudeSessionService, used to enrich tabs with claude state.
+    private var claudeSubscription: AnyCancellable?
+
+    init(claudeService: ClaudeSessionService = .shared) {
+        // Watch the shared claude state and project it onto our tabs by
+        // matching NARC_SESSION_ID. Whenever a hook event arrives we re-fan
+        // out to whichever OwnedSession owns that ID.
+        claudeSubscription = claudeService.$sessions
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] claudeMap in
+                self?.applyClaudeUpdates(claudeMap)
+            }
+    }
+
+    private func applyClaudeUpdates(_ claudeMap: [String: ClaudeSession]) {
+        // Index by narcSessionId for O(N) merge.
+        var byNarcId: [String: ClaudeSession] = [:]
+        for (_, claude) in claudeMap {
+            if let narcId = claude.narcSessionId {
+                byNarcId[narcId] = claude
+            }
+        }
+        for idx in sessions.indices {
+            let key = sessions[idx].id.uuidString
+            sessions[idx].claude = byNarcId[key]
+        }
+    }
 
     /// Spawn a new session running `executable args` (defaults: login zsh).
     /// Default title is `Terminal N` — shell-pushed titles or user renames

@@ -105,6 +105,7 @@ struct DashboardView: View {
                         executable: session.executable,
                         args: session.args,
                         cwd: session.cwd,
+                        narcSessionId: session.id.uuidString,
                         isSelected: session.id == selectedSessionId,
                         onExit: { _ in terminals.markDead(session.id) },
                         onTitleChange: { title in terminals.updateAutoTitle(id: session.id, title: title) },
@@ -114,7 +115,7 @@ struct DashboardView: View {
                     .allowsHitTesting(session.id == selectedSessionId)
                 }
             }
-            .background(Color.black)
+            .background(Color.narcBackground)
         }
     }
 
@@ -180,15 +181,18 @@ struct TerminalTabRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: NarcSpacing.sm) {
-            // Status dot
+            // Status dot — claude state if known, else alive/dead.
             Circle()
-                .fill(session.isAlive ? Color.narcSuccess : Color.narcTextFaint)
+                .fill(statusDotColor)
                 .frame(width: 8, height: 8)
                 .padding(.top, 5)
 
             VStack(alignment: .leading, spacing: 2) {
                 titleLine
                 metaLine
+                if let claudeBadge = claudeBadge {
+                    claudeBadge
+                }
             }
 
             Spacer(minLength: 0)
@@ -274,13 +278,93 @@ struct TerminalTabRow: View {
 
     @ViewBuilder
     private var rowBackground: some View {
-        if isSelected {
+        if needsAttention {
+            // Pulse-ish red tint when claude needs the user (approval/error).
+            Color.narcDanger.opacity(isSelected ? 0.22 : 0.12)
+        } else if isSelected {
             Color.narcAccent.opacity(0.18)
         } else if isHovering {
             Color.narcSurfaceMuted
         } else {
             Color.clear
         }
+    }
+
+    /// True when the tab should grab the user's attention (waiting for approval,
+    /// recently errored, idle waiting for input). Drives the red row tint.
+    private var needsAttention: Bool {
+        guard let claude = session.claude else { return false }
+        switch claude.status {
+        case .waitingForApproval: return true
+        default: return false
+        }
+    }
+
+    /// Optional row showing the live claude state (icon + short label).
+    @ViewBuilder
+    private var claudeBadge: some View {
+        if let claude = session.claude {
+            HStack(spacing: NarcSpacing.xs) {
+                Text(claudeBadgeIcon(claude.status))
+                    .font(.system(size: 10))
+                Text(claudeBadgeText(claude))
+                    .font(.system(size: 10))
+                    .foregroundStyle(claudeBadgeColor(claude.status))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .padding(.top, 1)
+        }
+    }
+
+    private func claudeBadgeIcon(_ status: ClaudeStatus) -> String {
+        switch status {
+        case .processing:           return "⏳"
+        case .runningTool:          return "→"
+        case .waitingForApproval:   return "⚠️"
+        case .waitingForInput:      return "💬"
+        case .compacting:           return "🗜"
+        case .ended:                return "■"
+        case .unknown:              return "·"
+        }
+    }
+
+    private func claudeBadgeText(_ claude: ClaudeSession) -> String {
+        switch claude.status {
+        case .processing:
+            return "思考中"
+        case .runningTool:
+            if let tool = claude.currentTool { return tool }
+            return "运行工具"
+        case .waitingForApproval:
+            if let tool = claude.currentTool { return "待审批: \(tool)" }
+            return "待审批"
+        case .waitingForInput:
+            return "等待输入"
+        case .compacting:
+            return "压缩上下文"
+        case .ended:
+            return "已结束"
+        case .unknown:
+            return "—"
+        }
+    }
+
+    private func claudeBadgeColor(_ status: ClaudeStatus) -> Color {
+        switch status {
+        case .waitingForApproval:           return .narcDanger
+        case .processing, .runningTool:     return .narcAccent
+        case .waitingForInput:              return .narcSuccess
+        case .compacting:                   return .narcWarn
+        case .ended, .unknown:              return .narcTextFaint
+        }
+    }
+
+    private var statusDotColor: Color {
+        if let claude = session.claude {
+            return claudeBadgeColor(claude.status)
+        }
+        return session.isAlive ? .narcSuccess : .narcTextFaint
     }
 
     // MARK: - Edit lifecycle
