@@ -102,7 +102,7 @@ struct NotificationListView: View {
                 }
                 .onChange(of: keyboardSelection.selectedIndex) { newIndex in
                     if newIndex >= 0 {
-                        withAnimation(.easeInOut(duration: 0.15)) {
+                        withAnimation(.narcEase) {
                             proxy.scrollTo(newIndex, anchor: .center)
                         }
                     }
@@ -112,19 +112,20 @@ struct NotificationListView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: NarcSpacing.md) {
             Spacer()
-            Text("😴")
-                .font(.system(size: 40))
+            Image(systemName: "moon.zzz")
+                .font(.system(size: 36))
+                .foregroundStyle(Color.narcTextMuted)
             Text("No monitored apps")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundColor(.primary)
+                .font(.narcSubtitle)
+                .foregroundStyle(Color.narcText)
             Text("Go to Settings to add apps →")
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
+                .font(.narcCaption)
+                .foregroundStyle(Color.narcTextMuted)
             Text("or press ⌃⌥P to pin a window")
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
+                .font(.narcCaption)
+                .foregroundStyle(Color.narcTextMuted)
             Spacer()
         }
         .frame(maxWidth: .infinity)
@@ -139,19 +140,18 @@ struct SectionHeader: View {
     let icon: String
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: NarcSpacing.xs) {
             Image(systemName: icon)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(.secondary)
+                .font(.narcCaption)
+                .foregroundStyle(Color.narcTextMuted)
             Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.secondary)
-                .textCase(.uppercase)
+                .font(.narcCaption)
+                .foregroundStyle(Color.narcTextMuted)
             Spacer()
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
-        .padding(.bottom, 4)
+        .padding(.horizontal, NarcSpacing.lg)
+        .padding(.top, NarcSpacing.sm)
+        .padding(.bottom, NarcSpacing.xs)
     }
 }
 
@@ -172,16 +172,16 @@ struct PinnedWindowRow: View {
     @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: NarcSpacing.md) {
             // Keyboard shortcut number badge
             if keyboardIndex >= 0 && keyboardIndex < 10 {
                 Text("\(keyboardIndex + 1 < 10 ? keyboardIndex + 1 : 0)")
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .foregroundColor(isKeyboardSelected ? .white : .secondary)
-                    .frame(width: 16, height: 16)
+                    .font(.narcMonoTiny)
+                    .foregroundColor(isKeyboardSelected ? .white : Color.narcTextMuted)
+                    .frame(width: NarcSize.keyBadgeSize, height: NarcSize.keyBadgeSize)
                     .background(
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(isKeyboardSelected ? Color.accentColor : Color.primary.opacity(0.08))
+                        RoundedRectangle(cornerRadius: NarcRadius.xs)
+                            .fill(isKeyboardSelected ? Color.narcAccent : Color.narcSurfaceMuted)
                     )
             }
 
@@ -189,16 +189,16 @@ struct PinnedWindowRow: View {
             appIcon
 
             // Window info
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: NarcSpacing.xxs) {
                 Text(displayTitle)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(isAlive ? .primary : .secondary)
+                    .font(.narcBody)
+                    .foregroundStyle(isAlive ? Color.narcText : Color.narcTextMuted)
                     .lineLimit(1)
                     .truncationMode(.tail)
 
                 Text(pinned.appDisplayName)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                    .font(.narcCaption)
+                    .foregroundStyle(Color.narcTextMuted)
                     .lineLimit(1)
             }
 
@@ -206,12 +206,12 @@ struct PinnedWindowRow: View {
 
             // Action buttons (visible on hover)
             if isHovering {
-                HStack(spacing: 4) {
-                    // Toggle persistence: 📌 ↔ 🔒
+                HStack(spacing: NarcSpacing.xs) {
+                    // Toggle persistence: pin ↔ pin.fill
                     Button(action: onTogglePersistence) {
-                        Image(systemName: pinned.isPersistent ? "lock.fill" : "pin.fill")
-                            .font(.system(size: 11))
-                            .foregroundColor(pinned.isPersistent ? .orange : .secondary)
+                        Image(systemName: pinned.isPersistent ? "pin.fill" : "pin")
+                            .font(.narcCaption)
+                            .foregroundStyle(pinned.isPersistent ? Color.narcAccent : Color.narcTextMuted)
                     }
                     .buttonStyle(.plain)
                     .help(pinned.isPersistent ? "Unlock (temporary)" : "Lock (persistent)")
@@ -219,8 +219,8 @@ struct PinnedWindowRow: View {
                     // Remove
                     Button(action: onRemove) {
                         Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
+                            .font(.narcCaption)
+                            .foregroundStyle(Color.narcTextMuted)
                     }
                     .buttonStyle(.plain)
                     .help("Remove")
@@ -230,21 +230,21 @@ struct PinnedWindowRow: View {
                 if !isAlive {
                     // Gray dot — window/app not running
                     Circle()
-                        .fill(Color.gray.opacity(0.4))
-                        .frame(width: 8, height: 8)
+                        .fill(Color.narcTextFaint)
+                        .frame(width: NarcSize.statusDotSmall, height: NarcSize.statusDotSmall)
                 } else {
                     // Persistence indicator
-                    Image(systemName: pinned.isPersistent ? "lock.fill" : "pin.fill")
+                    Image(systemName: pinned.isPersistent ? "pin.fill" : "pin")
                         .font(.system(size: 10))
-                        .foregroundColor(pinned.isPersistent ? .orange : .secondary.opacity(0.5))
+                        .foregroundStyle(pinned.isPersistent ? Color.narcAccent : Color.narcTextFaint)
                 }
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.horizontal, NarcSpacing.lg)
+        .padding(.vertical, NarcSpacing.sm)
         .background(
-            isKeyboardSelected ? Color.accentColor.opacity(0.15) :
-            (isHovering ? Color.primary.opacity(0.06) : Color.clear)
+            isKeyboardSelected ? Color.narcAccent.opacity(0.14) :
+            (isHovering ? Color.narcSurfaceMuted : Color.clear)
         )
         .contentShape(Rectangle())
         .onHover { hovering in
@@ -270,17 +270,17 @@ struct PinnedWindowRow: View {
             if let icon = getAppIcon(bundleID: pinned.bundleID) {
                 Image(nsImage: icon)
                     .resizable()
-                    .frame(width: 28, height: 28)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .frame(width: NarcSize.windowIconSize, height: NarcSize.windowIconSize)
+                    .clipShape(RoundedRectangle(cornerRadius: NarcRadius.xs))
                     .opacity(isAlive ? 1.0 : 0.5)
             } else {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.gray.opacity(0.3))
-                    .frame(width: 28, height: 28)
+                RoundedRectangle(cornerRadius: NarcRadius.xs)
+                    .fill(Color.narcSurfaceMuted)
+                    .frame(width: NarcSize.windowIconSize, height: NarcSize.windowIconSize)
                     .overlay {
                         Image(systemName: "macwindow")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
+                            .font(.narcCaption)
+                            .foregroundStyle(Color.narcTextMuted)
                     }
             }
         }
@@ -309,16 +309,16 @@ struct AppItemRow: View {
     @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: NarcSpacing.md) {
             // Keyboard shortcut number badge
             if keyboardIndex >= 0 && keyboardIndex < 10 {
                 Text("\(keyboardIndex + 1 < 10 ? keyboardIndex + 1 : 0)")
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .foregroundColor(isKeyboardSelected ? .white : .secondary)
-                    .frame(width: 16, height: 16)
+                    .font(.narcMonoTiny)
+                    .foregroundColor(isKeyboardSelected ? .white : Color.narcTextMuted)
+                    .frame(width: NarcSize.keyBadgeSize, height: NarcSize.keyBadgeSize)
                     .background(
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(isKeyboardSelected ? Color.accentColor : Color.primary.opacity(0.08))
+                        RoundedRectangle(cornerRadius: NarcRadius.xs)
+                            .fill(isKeyboardSelected ? Color.narcAccent : Color.narcSurfaceMuted)
                     )
             }
 
@@ -326,23 +326,24 @@ struct AppItemRow: View {
             appIcon
 
             // App info
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 4) {
+            VStack(alignment: .leading, spacing: NarcSpacing.xxs) {
+                HStack(spacing: NarcSpacing.xs) {
                     Text(state.app.displayName)
-                        .font(.system(size: 14, weight: filterAction == .highlight ? .bold : .semibold))
-                        .foregroundColor(filterAction == .silent ? .secondary : .primary)
+                        .font(.narcSubtitle)
+                        .fontWeight(filterAction == .highlight ? .bold : .medium)
+                        .foregroundStyle(filterAction == .silent ? Color.narcTextMuted : Color.narcText)
 
                     // Highlight indicator
                     if filterAction == .highlight && state.hasNewNotification {
                         Image(systemName: "exclamationmark.circle.fill")
-                            .font(.system(size: 10))
-                            .foregroundColor(.orange)
+                            .font(.narcCaption)
+                            .foregroundStyle(Color.narcWarn)
                     }
                 }
 
                 Text(state.isRunning ? state.app.category.rawValue : "Not running")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                    .font(.narcCaption)
+                    .foregroundStyle(Color.narcTextMuted)
             }
 
             Spacer()
@@ -350,12 +351,12 @@ struct AppItemRow: View {
             // Status indicator
             statusIndicator
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, NarcSpacing.lg)
+        .padding(.vertical, NarcSpacing.sm)
         .background(
-            isKeyboardSelected ? Color.accentColor.opacity(0.15) :
-            (isHovering ? Color.primary.opacity(0.06) :
-            (filterAction == .highlight && state.hasNewNotification ? Color.orange.opacity(0.06) : Color.clear))
+            isKeyboardSelected ? Color.narcAccent.opacity(0.14) :
+            (isHovering ? Color.narcSurfaceMuted :
+            (filterAction == .highlight && state.hasNewNotification ? Color.narcWarn.opacity(0.06) : Color.clear))
         )
         .opacity(filterAction == .silent ? 0.6 : 1.0)
         .contentShape(Rectangle())
@@ -376,15 +377,15 @@ struct AppItemRow: View {
             if let icon = getAppIcon(bundleID: state.app.bundleID) {
                 Image(nsImage: icon)
                     .resizable()
-                    .frame(width: 32, height: 32)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .frame(width: NarcSize.appIconSize, height: NarcSize.appIconSize)
+                    .clipShape(RoundedRectangle(cornerRadius: NarcRadius.sm))
             } else {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.gray.opacity(0.3))
-                    .frame(width: 32, height: 32)
+                RoundedRectangle(cornerRadius: NarcRadius.sm)
+                    .fill(Color.narcSurfaceMuted)
+                    .frame(width: NarcSize.appIconSize, height: NarcSize.appIconSize)
                     .overlay {
                         Image(systemName: "app.fill")
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(Color.narcTextMuted)
                     }
             }
         }
@@ -405,31 +406,31 @@ struct AppItemRow: View {
         if !state.isRunning {
             // Gray dot — not running
             Circle()
-                .fill(Color.gray.opacity(0.4))
-                .frame(width: 16, height: 16)
+                .fill(Color.narcTextFaint)
+                .frame(width: NarcSize.keyBadgeSize, height: NarcSize.keyBadgeSize)
         } else if state.hasNewNotification {
-            // Red badge with count
+            // Accent badge with count
             ZStack {
                 Capsule()
-                    .fill(Color.red)
+                    .fill(Color.narcDanger)
                     .frame(minWidth: 22, maxHeight: 22)
 
                 Text("\(state.badgeCount)")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 6)
+                    .font(.narcMonoSmall)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, NarcSpacing.xs)
             }
             .fixedSize()
         } else {
             // Green checkmark — running, no notifications
             ZStack {
                 Circle()
-                    .fill(Color.green.opacity(0.2))
+                    .fill(Color.narcSuccess.opacity(0.2))
                     .frame(width: 22, height: 22)
 
                 Image(systemName: "checkmark")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.green)
+                    .foregroundStyle(Color.narcSuccess)
             }
         }
     }

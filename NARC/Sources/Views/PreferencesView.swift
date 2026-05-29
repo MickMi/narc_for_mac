@@ -84,15 +84,15 @@ struct MonitoringPreferencesView: View {
                         } else {
                             Image(systemName: "app.fill")
                                 .frame(width: 24, height: 24)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(.narcTextMuted)
                         }
 
                         VStack(alignment: .leading) {
                             Text(app.displayName)
-                                .font(.system(size: 13, weight: .medium))
+                                .font(.narcBody)
                             Text(app.id)
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
+                                .font(.narcCaption)
+                                .foregroundColor(.narcTextMuted)
                         }
 
                         Spacer()
@@ -100,7 +100,7 @@ struct MonitoringPreferencesView: View {
                         Toggle("", isOn: $app.isEnabled)
                             .labelsHidden()
                     }
-                    .padding(.vertical, 2)
+                    .padding(.vertical, NarcSpacing.xxs)
                 }
             }
         }
@@ -118,32 +118,32 @@ struct ShortcutsPreferencesView: View {
                 ForEach(WindowLayout.allCases) { layout in
                     HStack {
                         Image(systemName: layout.iconName)
-                            .frame(width: 20)
-                            .foregroundColor(.secondary)
+                            .frame(width: NarcSpacing.xl)
+                            .foregroundColor(.narcTextMuted)
 
                         Text(layout.rawValue)
-                            .font(.system(size: 13))
+                            .font(.narcBody)
 
                         Spacer()
 
                         Text(layout.hotkeyLabel)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
+                            .font(.narcMono)
+                            .foregroundColor(.narcTextMuted)
+                            .padding(.horizontal, NarcSpacing.sm)
+                            .padding(.vertical, NarcSpacing.xs)
                             .background(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(Color.primary.opacity(0.06))
+                                RoundedRectangle(cornerRadius: NarcRadius.xs)
+                                    .fill(Color.narcSurfaceMuted)
                             )
                     }
-                    .padding(.vertical, 2)
+                    .padding(.vertical, NarcSpacing.xxs)
                 }
             }
 
             Section {
                 Text("Shortcuts require Accessibility permission. Go to System Settings → Privacy & Security → Accessibility to grant access.")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                    .font(.narcCaption)
+                    .foregroundColor(.narcTextMuted)
             }
         }
         .formStyle(.grouped)
@@ -169,16 +169,16 @@ struct FiltersPreferencesView: View {
         VStack(spacing: 0) {
             // Filter list
             if filters.isEmpty {
-                VStack(spacing: 12) {
+                VStack(spacing: NarcSpacing.md) {
                     Spacer()
                     Image(systemName: "line.3.horizontal.decrease.circle")
-                        .font(.system(size: 36))
-                        .foregroundColor(.secondary)
+                        .font(.narcDisplayXL)
+                        .foregroundColor(.narcTextMuted)
                     Text("No filter rules")
-                        .font(.system(size: 14, weight: .medium))
+                        .font(.narcSubtitle)
                     Text("Add rules to customize which notifications are highlighted, silenced, or hidden.")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
+                        .font(.narcBody)
+                        .foregroundColor(.narcTextMuted)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 300)
                     Spacer()
@@ -206,10 +206,10 @@ struct FiltersPreferencesView: View {
                 Spacer()
 
                 Text("\(filters.count) rule(s)")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                    .font(.narcCaption)
+                    .foregroundColor(.narcTextMuted)
             }
-            .padding(12)
+            .padding(NarcSpacing.md)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { loadFilters() }
@@ -246,23 +246,23 @@ struct FilterRuleRow: View {
 
     var body: some View {
         HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: NarcSpacing.xxs) {
+                HStack(spacing: NarcSpacing.sm) {
                     Text(appName)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.narcBody)
 
                     Text("•")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.narcTextMuted)
 
                     Text(filter.filterType.rawValue)
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
+                        .font(.narcBody)
+                        .foregroundColor(.narcTextMuted)
                 }
 
                 if !filter.pattern.isEmpty {
                     Text("Pattern: \(filter.pattern)")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
+                        .font(.narcCaption)
+                        .foregroundColor(.narcTextMuted)
                 }
             }
 
@@ -270,10 +270,10 @@ struct FilterRuleRow: View {
 
             // Action badge
             Text(filter.action.rawValue)
-                .font(.system(size: 10, weight: .medium))
+                .font(.narcCaption)
                 .foregroundColor(actionColor(filter.action))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
+                .padding(.horizontal, NarcSpacing.sm)
+                .padding(.vertical, NarcSpacing.xs)
                 .background(
                     Capsule()
                         .fill(actionColor(filter.action).opacity(0.12))
@@ -281,17 +281,17 @@ struct FilterRuleRow: View {
 
             // Enabled toggle
             Circle()
-                .fill(filter.isEnabled ? Color.green : Color.gray.opacity(0.3))
-                .frame(width: 8, height: 8)
+                .fill(filter.isEnabled ? Color.narcSuccess : Color.narcBorder)
+                .frame(width: NarcSize.statusDotSmall, height: NarcSize.statusDotSmall)
         }
     }
 
     private func actionColor(_ action: NotificationFilter.FilterAction) -> Color {
         switch action {
-        case .highlight: return .orange
-        case .normal: return .blue
-        case .silent: return .gray
-        case .hide: return .red
+        case .highlight: return .narcWarn
+        case .normal: return .narcInfo
+        case .silent: return .narcTextFaint
+        case .hide: return .narcDanger
         }
     }
 }
@@ -309,9 +309,9 @@ struct AddFilterSheet: View {
     @State private var action: NotificationFilter.FilterAction = .highlight
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: NarcSpacing.lg) {
             Text("Add Filter Rule")
-                .font(.system(size: 16, weight: .semibold))
+                .font(.narcTitle)
 
             Form {
                 Picker("App", selection: $selectedAppID) {
@@ -359,7 +359,7 @@ struct AddFilterSheet: View {
                 .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(20)
+        .padding(NarcSpacing.xl)
         .frame(width: 400, height: 340)
     }
 }
