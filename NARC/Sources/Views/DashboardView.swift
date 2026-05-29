@@ -81,7 +81,8 @@ struct DashboardView: View {
                         session: session,
                         isSelected: session.id == selectedSessionId,
                         onTap: { selectedSessionId = session.id },
-                        onClose: { terminals.remove(session.id) }
+                        onClose: { terminals.remove(session.id) },
+                        onRename: { newTitle in terminals.rename(id: session.id, title: newTitle) }
                     )
                     Divider().padding(.leading, 12)
                 }
@@ -106,7 +107,8 @@ struct DashboardView: View {
                         cwd: session.cwd,
                         isSelected: session.id == selectedSessionId,
                         onExit: { _ in terminals.markDead(session.id) },
-                        onTitleChange: { title in terminals.updateTitle(id: session.id, title: title) }
+                        onTitleChange: { title in terminals.updateAutoTitle(id: session.id, title: title) },
+                        onCwdChange: { cwd in terminals.updateCwd(id: session.id, cwd: cwd) }
                     )
                     .opacity(session.id == selectedSessionId ? 1 : 0)
                     .allowsHitTesting(session.id == selectedSessionId)
@@ -159,41 +161,115 @@ struct DashboardView: View {
 
 // MARK: - Tab Row
 
+/// Left-column row for one terminal session. Shows:
+/// - status dot (alive/exited)
+/// - title (rename via double-click or pencil button)
+/// - cwd (auto-tracked via OSC 7, shortened with ~)
+/// - hover-revealed pencil + ✕ buttons
 struct TerminalTabRow: View {
     let session: OwnedSession
     let isSelected: Bool
     var onTap: () -> Void
     var onClose: () -> Void
+    var onRename: (String) -> Void
 
     @State private var isHovering = false
+    @State private var isEditing = false
+    @State private var editText = ""
+    @FocusState private var titleFieldFocused: Bool
 
     var body: some View {
-        HStack(spacing: NarcSpacing.sm) {
+        HStack(alignment: .top, spacing: NarcSpacing.sm) {
+            // Status dot
             Circle()
                 .fill(session.isAlive ? Color.narcSuccess : Color.narcTextFaint)
                 .frame(width: 8, height: 8)
-            Text(session.displayTitle)
-                .font(.narcCaption)
-                .foregroundStyle(session.isAlive ? Color.narcText : Color.narcTextMuted)
-                .lineLimit(1)
-                .truncationMode(.tail)
+                .padding(.top, 5)
+
+            VStack(alignment: .leading, spacing: 2) {
+                titleLine
+                metaLine
+            }
+
             Spacer(minLength: 0)
-            if isHovering {
-                Button(action: onClose) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Color.narcTextMuted)
-                }
-                .buttonStyle(.plain)
-                .help("关闭终端")
+
+            if isHovering && !isEditing {
+                actionButtons
             }
         }
         .padding(.horizontal, NarcSpacing.md)
-        .padding(.vertical, NarcSpacing.xs + 2)
+        .padding(.vertical, NarcSpacing.sm)
         .background(rowBackground)
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
-        .onTapGesture { onTap() }
+        .onTapGesture {
+            if !isEditing { onTap() }
+        }
+    }
+
+    // MARK: - Pieces
+
+    @ViewBuilder
+    private var titleLine: some View {
+        if isEditing {
+            TextField("Title", text: $editText)
+                .textFieldStyle(.plain)
+                .font(.narcCaption)
+                .foregroundStyle(Color.narcText)
+                .focused($titleFieldFocused)
+                .onSubmit { commitEdit() }
+                .onExitCommand { cancelEdit() }
+                .padding(.vertical, 1)
+                .padding(.horizontal, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: NarcRadius.xs)
+                        .fill(Color.narcSurfaceMuted)
+                )
+        } else {
+            Text(session.displayTitle)
+                .font(.narcCaption)
+                .fontWeight(.medium)
+                .foregroundStyle(session.isAlive ? Color.narcText : Color.narcTextMuted)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .onTapGesture(count: 2) { startEdit() }
+        }
+    }
+
+    private var metaLine: some View {
+        HStack(spacing: NarcSpacing.xs) {
+            if let cwd = session.cwd, !cwd.isEmpty {
+                Text(shortCwd(cwd))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(Color.narcTextMuted)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+            }
+            Spacer(minLength: 0)
+            Text(timeAgo(session.creationDate))
+                .font(.system(size: 10))
+                .foregroundStyle(Color.narcTextFaint)
+        }
+    }
+
+    private var actionButtons: some View {
+        HStack(spacing: NarcSpacing.xs) {
+            Button(action: startEdit) {
+                Image(systemName: "pencil")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.narcTextMuted)
+            }
+            .buttonStyle(.plain)
+            .help("重命名（双击标题也可以）")
+
+            Button(action: onClose) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.narcTextMuted)
+            }
+            .buttonStyle(.plain)
+            .help("关闭终端")
+        }
     }
 
     @ViewBuilder
@@ -205,5 +281,43 @@ struct TerminalTabRow: View {
         } else {
             Color.clear
         }
+    }
+
+    // MARK: - Edit lifecycle
+
+    private func startEdit() {
+        editText = session.userTitle ?? session.displayTitle
+        isEditing = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            titleFieldFocused = true
+        }
+    }
+
+    private func commitEdit() {
+        onRename(editText)
+        isEditing = false
+        titleFieldFocused = false
+    }
+
+    private func cancelEdit() {
+        isEditing = false
+        titleFieldFocused = false
+    }
+
+    // MARK: - Formatting
+
+    private func shortCwd(_ cwd: String) -> String {
+        let home = NSHomeDirectory()
+        if cwd == home { return "~" }
+        if cwd.hasPrefix(home + "/") { return "~" + cwd.dropFirst(home.count) }
+        return cwd
+    }
+
+    private func timeAgo(_ date: Date) -> String {
+        let interval = Date().timeIntervalSince(date)
+        if interval < 60 { return "\(Int(interval))s" }
+        if interval < 3600 { return "\(Int(interval / 60))m" }
+        if interval < 86400 { return "\(Int(interval / 3600))h" }
+        return "\(Int(interval / 86400))d"
     }
 }
