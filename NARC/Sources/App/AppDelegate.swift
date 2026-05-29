@@ -1,6 +1,7 @@
 import Cocoa
 import SwiftUI
 import Combine
+import UserNotifications
 
 /// AppDelegate handles app lifecycle, floating window, and menu bar setup.
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -54,14 +55,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Start Claude Code session monitoring
         claudeService.onAttentionNeeded = { [weak self] reason in
+            guard let self = self else { return }
             switch reason {
             case .permissionRequest:
-                self?.showApprovalPanel()
-            case .stopped, .error, .stale:
-                self?.showApprovalPanel()
+                // Permission requests ALWAYS show toast — user must act
+                self.showApprovalPanel()
+                self.postPermissionRequestNotification()
+            case .error:
+                // Errors show toast — something went wrong
+                self.showApprovalPanel()
+                self.postErrorNotification()
+            case .stopped(let sessionId):
+                // Stop events (waiting for input): no toast (likely already in
+                // terminal), but post a system notification so the user can be
+                // pulled back from another app/space.
+                self.postStoppedNotification(sessionId: sessionId)
+            case .stale(let sessionId):
+                // Stale sessions (>60s no activity) show toast — might be stuck
+                self.showApprovalPanel()
+                self.postStaleNotification(sessionId: sessionId)
             }
         }
         claudeService.startListening()
+
+        // Register for macOS system notifications (for click-to-jump support)
+        setupSystemNotifications()
 
         print("[NARC] ✅ App launch complete. Look for the floating widget (bottom-right) and menu bar icon.")
     }
@@ -253,6 +271,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             appMonitor: appMonitor,
             windowManager: windowManager,
             pinnedWindowService: pinnedWindowService,
+            claudeService: claudeService,
             onClose: { [weak self] in self?.hidePanel() },
             onOpenPreferences: { [weak self] in self?.openPreferences() },
             narcScreen: narcScreen,
@@ -454,7 +473,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Jump to the Claude Code terminal window.
-    /// Matching priority: TTY (exact tab) > CWD in title (directory name) > activate app
+    /// Delegates to TerminalJumper for AppleScript orchestration.
     private func jumpToClaudeTerminal(event: ClaudeToastEvent) {
         // Dismiss the approval if it's a permission request (user will handle in terminal)
         if let approval = event.approval {
@@ -463,131 +482,122 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         hideToast()
 
-        // Build the AppleScript with multiple matching strategies
-        let tty = event.tty ?? ""
-        // Extract directory name from CWD for title-based fallback matching
-        let cwdDirName: String
-        if let cwd = event.cwd, !cwd.isEmpty {
-            cwdDirName = (cwd as NSString).lastPathComponent
-        } else if event.projectName != "?" {
-            cwdDirName = event.projectName
-        } else {
-            cwdDirName = ""
-        }
-
-        let script: String
-        if let _ = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal").first {
-            script = buildTerminalScript(tty: tty, cwdHint: cwdDirName)
-        } else if let _ = NSRunningApplication.runningApplications(withBundleIdentifier: "com.googlecode.iterm2").first {
-            script = buildITermScript(tty: tty, cwdHint: cwdDirName)
-        } else {
-            // Last resort: activate any terminal
-            let terminalApps = ["com.apple.Terminal", "com.googlecode.iterm2", "net.kovidgoyal.kitty", "com.mitchellh.ghostty"]
-            for bundleID in terminalApps {
-                if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
-                    app.activate()
-                    return
-                }
-            }
-            return
-        }
-
-        print("[NARC] 🔌 Jumping to terminal (tty=\(tty.isEmpty ? "none" : tty), cwd=\(cwdDirName))")
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            process.arguments = ["-e", script]
-            let pipe = Pipe()
-            process.standardError = pipe
-            do {
-                try process.run()
-                process.waitUntilExit()
-                if process.terminationStatus != 0 {
-                    let err = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                    print("[NARC] ⚠️ Jump script error: \(err)")
-                }
-            } catch {
-                print("[NARC] ⚠️ Jump failed: \(error)")
-            }
-        }
-    }
-
-    /// Build AppleScript for Terminal.app with TTY-first, CWD-fallback matching
-    private func buildTerminalScript(tty: String, cwdHint: String) -> String {
-        return """
-        tell application "Terminal"
-            -- Strategy 1: match by TTY (most precise)
-            \(tty.isEmpty ? "-- TTY not available, skip" : """
-            repeat with w in windows
-                repeat with t in tabs of w
-                    if tty of t is "\(tty)" then
-                        set selected of t to true
-                        set index of w to 1
-                        activate
-                        return
-                    end if
-                end repeat
-            end repeat
-            """)
-
-            -- Strategy 2: match by CWD in window title (fallback)
-            \(cwdHint.isEmpty ? "-- CWD hint not available, skip" : """
-            repeat with w in windows
-                if name of w contains "\(cwdHint)" then
-                    set index of w to 1
-                    activate
-                    return
-                end if
-            end repeat
-            """)
-
-            -- Strategy 3: just activate (last resort)
-            activate
-        end tell
-        """
-    }
-
-    /// Build AppleScript for iTerm2 with TTY-first, CWD-fallback matching
-    private func buildITermScript(tty: String, cwdHint: String) -> String {
-        return """
-        tell application "iTerm2"
-            -- Strategy 1: match by TTY
-            \(tty.isEmpty ? "-- TTY not available, skip" : """
-            repeat with w in windows
-                repeat with t in tabs of w
-                    repeat with s in sessions of t
-                        if tty of s is "\(tty)" then
-                            select s
-                            select t
-                            set index of w to 1
-                            activate
-                            return
-                        end if
-                    end repeat
-                end repeat
-            end repeat
-            """)
-
-            -- Strategy 2: match by CWD in window name
-            \(cwdHint.isEmpty ? "-- CWD hint not available, skip" : """
-            repeat with w in windows
-                if name of w contains "\(cwdHint)" then
-                    set index of w to 1
-                    activate
-                    return
-                end if
-            end repeat
-            """)
-
-            activate
-        end tell
-        """
+        TerminalJumper.jump(
+            tty: event.tty,
+            cwd: event.cwd,
+            projectName: event.projectName
+        )
     }
 
     // Keep old method name for compatibility but it's now unused
     private func hideApprovalPanel() {
         hideToast()
+    }
+
+    // MARK: - System Notifications
+
+    /// UserInfo keys carried in UNNotificationContent so the delegate can jump back
+    /// to the right terminal when the user clicks the banner.
+    private enum NotifKey {
+        static let tty = "narc.tty"
+        static let cwd = "narc.cwd"
+        static let project = "narc.project"
+        static let sessionId = "narc.sessionId"
+    }
+
+    /// Request authorization and register as the delegate so click-to-jump works.
+    private func setupSystemNotifications() {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+            if let error = error {
+                print("[NARC] ⚠️ Notification auth error: \(error)")
+            } else {
+                print("[NARC] 🔔 Notification auth granted=\(granted)")
+            }
+        }
+    }
+
+    /// Generic poster — builds a content object and submits it to the center.
+    private func postNotification(
+        title: String,
+        body: String,
+        tty: String?,
+        cwd: String?,
+        projectName: String?,
+        sessionId: String?,
+        sound: UNNotificationSound? = .default
+    ) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = sound
+        var userInfo: [String: Any] = [:]
+        if let tty = tty { userInfo[NotifKey.tty] = tty }
+        if let cwd = cwd { userInfo[NotifKey.cwd] = cwd }
+        if let projectName = projectName { userInfo[NotifKey.project] = projectName }
+        if let sessionId = sessionId { userInfo[NotifKey.sessionId] = sessionId }
+        content.userInfo = userInfo
+
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil  // deliver immediately
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error {
+                print("[NARC] ⚠️ Notification post failed: \(error)")
+            }
+        }
+    }
+
+    private func postPermissionRequestNotification() {
+        guard let approval = claudeService.pendingApprovals.last else { return }
+        postNotification(
+            title: "⚠️ Claude 需要审批 — \(approval.projectName)",
+            body: "\(approval.tool): \(approval.commandDescription)",
+            tty: approval.tty,
+            cwd: approval.cwd,
+            projectName: approval.projectName,
+            sessionId: approval.sessionId
+        )
+    }
+
+    private func postStoppedNotification(sessionId: String) {
+        guard let session = claudeService.sessions[sessionId] else { return }
+        postNotification(
+            title: "💬 Claude 等待输入 — \(session.projectName ?? "?")",
+            body: "Session idle — click to jump",
+            tty: session.tty,
+            cwd: session.cwd,
+            projectName: session.projectName,
+            sessionId: sessionId,
+            sound: nil  // quiet — user is likely already in the terminal
+        )
+    }
+
+    private func postErrorNotification() {
+        guard let notif = claudeService.notifications.last else { return }
+        postNotification(
+            title: "❌ Claude 出错 — \(notif.projectName)",
+            body: notif.message,
+            tty: notif.tty,
+            cwd: notif.cwd,
+            projectName: notif.projectName,
+            sessionId: notif.sessionId
+        )
+    }
+
+    private func postStaleNotification(sessionId: String) {
+        guard let session = claudeService.sessions[sessionId] else { return }
+        postNotification(
+            title: "⏱ Claude 长时间无响应 — \(session.projectName ?? "?")",
+            body: "Last activity: \(session.statusDescription)",
+            tty: session.tty,
+            cwd: session.cwd,
+            projectName: session.projectName,
+            sessionId: sessionId
+        )
     }
 
     private var approvalCancellables = Set<AnyCancellable>()
@@ -762,5 +772,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quitApp() {
         NSApp.terminate(nil)
+    }
+}
+
+// MARK: - UNUserNotificationCenterDelegate
+
+extension AppDelegate: UNUserNotificationCenterDelegate {
+
+    /// Allow banners to appear even while NARC is in the foreground.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+
+    /// User clicked the banner — extract carried tty/cwd/project and jump.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let userInfo = response.notification.request.content.userInfo
+        let tty = userInfo["narc.tty"] as? String
+        let cwd = userInfo["narc.cwd"] as? String
+        let projectName = userInfo["narc.project"] as? String
+        TerminalJumper.jump(tty: tty, cwd: cwd, projectName: projectName)
+        completionHandler()
     }
 }
