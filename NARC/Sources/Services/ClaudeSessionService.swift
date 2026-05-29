@@ -19,6 +19,13 @@ class ClaudeSessionService: ObservableObject {
     @Published var pendingApprovals: [PendingApproval] = []
     @Published var notifications: [ClaudeNotification] = []
 
+    /// Set briefly to a session ID when that session emits a Stop/StopFailure
+    /// event. The workspace UI reads this to flash a "task done" banner. Cleared
+    /// automatically after `completedFlashDuration` seconds.
+    @Published var completedFlash: String? = nil
+    private let completedFlashDuration: TimeInterval = 6.0
+    private var completedFlashTimer: Timer?
+
     // MARK: - Socket
 
     private let socketPath = "/tmp/narc-claude.sock"
@@ -149,7 +156,20 @@ class ClaudeSessionService: ObservableObject {
 
         print("[NARC] 🔌 Received: event=\(event) status=\(status) session=\(sessionId.prefix(8))")
 
-        // Update session state
+        // Build / update session, preserving recentEvents from the previous record
+        let previousEvents = self.sessions[sessionId]?.recentEvents ?? []
+        let newEvent = ClaudeEvent(
+            timestamp: Date(),
+            event: event,
+            tool: tool,
+            summary: Self.summarize(event: event, tool: tool, toolInput: toolInput, message: message)
+        )
+        var updatedEvents = previousEvents + [newEvent]
+        // Trim to keep only the last 12 events per session
+        if updatedEvents.count > 12 {
+            updatedEvents = Array(updatedEvents.suffix(12))
+        }
+
         let session = ClaudeSession(
             sessionId: sessionId,
             status: ClaudeStatus(rawValue: status) ?? .unknown,
@@ -157,7 +177,8 @@ class ClaudeSessionService: ObservableObject {
             toolInput: toolInput,
             cwd: cwd,
             tty: tty,
-            lastUpdated: Date()
+            lastUpdated: Date(),
+            recentEvents: updatedEvents
         )
 
         DispatchQueue.main.async { [weak self] in
@@ -203,6 +224,7 @@ class ClaudeSessionService: ObservableObject {
                 )
                 self?.notifications.append(notification)
                 self?.trimNotifications()
+                self?.flashCompleted(sessionId: sessionId)
                 self?.onAttentionNeeded?(.stopped(sessionId: sessionId))
             }
 
@@ -218,6 +240,7 @@ class ClaudeSessionService: ObservableObject {
                 )
                 self?.notifications.append(notification)
                 self?.trimNotifications()
+                self?.flashCompleted(sessionId: sessionId)
                 self?.onAttentionNeeded?(.error(sessionId: sessionId, message: message))
             }
 
@@ -226,6 +249,27 @@ class ClaudeSessionService: ObservableObject {
         }
 
         close(clientSocket)
+    }
+
+    // MARK: - Completed Flash
+
+    /// Briefly highlight a session as "just completed" so the workspace banner can show
+    /// a "Jump to terminal X" prompt. Auto-clears after `completedFlashDuration`.
+    private func flashCompleted(sessionId: String) {
+        completedFlash = sessionId
+        completedFlashTimer?.invalidate()
+        completedFlashTimer = Timer.scheduledTimer(withTimeInterval: completedFlashDuration, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.completedFlash = nil
+            }
+        }
+    }
+
+    /// Manually dismiss the completed-flash banner (e.g. user clicked "X" or "Jump").
+    func dismissCompletedFlash() {
+        completedFlashTimer?.invalidate()
+        completedFlashTimer = nil
+        completedFlash = nil
     }
 
     // MARK: - Stale Detection
@@ -326,6 +370,8 @@ struct ClaudeSession {
     var cwd: String?
     var tty: String?          // TTY device path for precise window targeting
     var lastUpdated: Date
+    /// Ring buffer of recent hook events. Capped at 12 entries by the service.
+    var recentEvents: [ClaudeEvent] = []
 
     var statusDescription: String {
         switch status {
@@ -442,5 +488,67 @@ struct ClaudeNotification: Identifiable {
     var projectName: String {
         guard let cwd = cwd else { return "?" }
         return (cwd as NSString).lastPathComponent
+    }
+}
+
+// MARK: - Event Buffer
+
+/// One row in a session's recent-events ring buffer. Used by the workspace
+/// detail view to show "what just happened" timeline.
+struct ClaudeEvent: Identifiable {
+    let id = UUID()
+    let timestamp: Date
+    let event: String       // raw hook event name (PreToolUse, Stop, ...)
+    let tool: String?       // tool name if applicable
+    let summary: String     // human-friendly one-line summary
+}
+
+extension ClaudeSessionService {
+
+    /// Build a short, human-friendly description of an incoming hook event for
+    /// display in the timeline.
+    static func summarize(
+        event: String,
+        tool: String?,
+        toolInput: [String: Any]?,
+        message: String?
+    ) -> String {
+        switch event {
+        case "PreToolUse":
+            return shortToolDescription(tool: tool, input: toolInput, prefix: "→ ")
+        case "PostToolUse":
+            return shortToolDescription(tool: tool, input: toolInput, prefix: "✓ ")
+        case "PermissionRequest":
+            return "⚠️ approval: \(shortToolDescription(tool: tool, input: toolInput, prefix: ""))"
+        case "UserPromptSubmit":
+            return "💬 user prompt"
+        case "Stop", "SubagentStop":
+            return "⏸ idle / waiting for input"
+        case "StopFailure":
+            return "❌ \(message ?? "error")"
+        case "PreCompact":
+            return "🗜 compacting context"
+        case "Notification":
+            return "🔔 \(message ?? "notification")"
+        case "SessionStart":
+            return "▶︎ session start"
+        case "SessionEnd":
+            return "■ session end"
+        default:
+            return event
+        }
+    }
+
+    private static func shortToolDescription(tool: String?, input: [String: Any]?, prefix: String) -> String {
+        guard let tool = tool else { return prefix + "tool" }
+        if tool == "Bash", let cmd = input?["command"] as? String {
+            let trimmed = cmd.count > 60 ? String(cmd.prefix(60)) + "…" : cmd
+            return "\(prefix)Bash: \(trimmed)"
+        }
+        if (tool == "Edit" || tool == "Write" || tool == "Read"),
+           let path = input?["file_path"] as? String {
+            return "\(prefix)\(tool): \((path as NSString).lastPathComponent)"
+        }
+        return prefix + tool
     }
 }
