@@ -43,19 +43,6 @@ final class TerminalSessionManager: ObservableObject {
         return id
     }
 
-    /// Convenience: spawn a login shell that runs `claude`, then drops back to a
-    /// shell prompt when claude exits (so the tab doesn't disappear instantly).
-    @discardableResult
-    func newClaudeSession(cwd: String? = nil) -> UUID {
-        let title = cwd.map { ($0 as NSString).lastPathComponent } ?? "Claude"
-        return newSession(
-            title: title,
-            executable: "/bin/zsh",
-            args: ["-l", "-c", "claude; echo; echo '[claude exited — type exit to close tab]'; exec zsh -l"],
-            cwd: cwd
-        )
-    }
-
     /// Remove a session from the list. The pane view's `onExit` should already
     /// have fired (or will fire when SwiftUI unmounts the pane and SIGHUP propagates).
     func remove(_ id: UUID) {

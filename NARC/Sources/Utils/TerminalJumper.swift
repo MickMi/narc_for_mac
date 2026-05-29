@@ -132,37 +132,7 @@ enum TerminalJumper {
         """
     }
 
-    // MARK: - Spawn / Close (Dashboard support)
-
-    /// Open a new iTerm2 window, cd to `cwd` if provided, and run `claude`.
-    /// Falls back to Terminal.app if iTerm2 is not running.
-    static func spawnClaude(cwd: String? = nil) {
-        let cdLine = (cwd?.isEmpty == false) ? "cd \(shellEscape(cwd!)) && " : ""
-        let claudeCommand = "\(cdLine)claude"
-
-        let script: String
-        if NSRunningApplication.runningApplications(withBundleIdentifier: "com.googlecode.iterm2").first != nil {
-            script = """
-            tell application "iTerm2"
-                activate
-                set newWindow to (create window with default profile)
-                tell current session of newWindow
-                    write text "\(claudeCommand)"
-                end tell
-            end tell
-            """
-        } else {
-            // Terminal.app fallback
-            script = """
-            tell application "Terminal"
-                activate
-                do script "\(claudeCommand)"
-            end tell
-            """
-        }
-
-        runAppleScript(script, label: "spawn claude")
-    }
+    // MARK: - Close (Dashboard support)
 
     /// Close the iTerm2 session with the given TTY. Best-effort.
     /// If TTY is unknown or we can't find the session, this no-ops.

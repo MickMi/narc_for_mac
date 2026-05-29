@@ -25,8 +25,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("[NARC] 🚀 App launching...")
 
-        // Hide from Dock (accessory app — no Dock icon)
-        NSApp.setActivationPolicy(.accessory)
+        // Regular Dock app — primary entry is the Dock icon (toggle Dashboard).
+        // The floating widget and menu bar item remain as auxiliary UI for
+        // notifications / quick toggle, but are NOT the only way in.
+        NSApp.setActivationPolicy(.regular)
 
         print("[NARC] Setting up menu bar icon...")
         setupMenuBarIcon()
@@ -81,12 +83,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Register for macOS system notifications (for click-to-jump support)
         setupSystemNotifications()
 
+        // Dock app — show the Dashboard immediately on first launch so the user
+        // has a primary surface. Subsequent Dock clicks toggle it back open.
+        showDashboard()
+
         print("[NARC] ✅ App launch complete. Look for the floating widget (bottom-right) and menu bar icon.")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         appMonitor.stopMonitoring()
         claudeService.stopListening()
+    }
+
+    /// Keep the app alive when Dashboard / panel windows are closed — menu bar
+    /// item and floating widget remain available, and the user can re-summon
+    /// the Dashboard from the Dock or the menu bar.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return false
+    }
+
+    /// Dock icon clicked (or `open -a NARC` while already running). If no window
+    /// is visible, open the Dashboard. Otherwise let macOS handle un-minimize.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows {
+            showDashboard()
+        }
+        return true
     }
 
     /// Show a brief visual feedback on the floating widget when a window is pinned.
