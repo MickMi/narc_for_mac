@@ -1,80 +1,63 @@
 import SwiftUI
 
-/// Independent dashboard view — top toolbar (new-terminal button) + completed banner +
-/// HSplit (session list / detail). Reuses `SessionDetailView` and `CompletedBanner`
-/// from `ClaudeSessionListView.swift`.
+/// Dashboard with embedded multi-terminal workspace.
+/// - Top toolbar: new-terminal menu (Shell / Claude).
+/// - Left column: list of in-NARC terminal sessions (each is its own PTY+child).
+/// - Right column: live, interactive terminal of the selected session.
+///
+/// Sessions are kept alive by rendering all panes in a ZStack; only the selected
+/// one is visible/interactive. ClaudeService is kept around for future status
+/// badge enrichment but not used by the MVP.
 struct DashboardView: View {
     @ObservedObject var claudeService: ClaudeSessionService
+    @StateObject private var terminals = TerminalSessionManager()
 
-    @State private var selectedSessionId: String?
+    @State private var selectedSessionId: UUID?
 
     var body: some View {
-        let sessions = activeSessions
-
         VStack(spacing: 0) {
-            toolbar(sessionCount: sessions.count)
+            toolbar
             Divider()
-
-            // Completed-flash banner
-            if let flashId = claudeService.completedFlash,
-               let flashSession = claudeService.sessions[flashId] {
-                CompletedBanner(
-                    session: flashSession,
-                    onJump: {
-                        TerminalJumper.jump(
-                            tty: flashSession.tty,
-                            cwd: flashSession.cwd,
-                            projectName: flashSession.projectName
-                        )
-                        claudeService.dismissCompletedFlash()
-                    },
-                    onSelect: {
-                        selectedSessionId = flashId
-                        claudeService.dismissCompletedFlash()
-                    },
-                    onDismiss: { claudeService.dismissCompletedFlash() }
-                )
+            HSplitView {
+                leftColumn
+                    .frame(minWidth: 180, idealWidth: 220, maxWidth: 320)
+                rightColumn
+                    .frame(minWidth: 420, maxWidth: .infinity)
             }
-
-            // Body
-            if sessions.isEmpty && claudeService.pendingApprovals.isEmpty {
-                emptyState
-            } else {
-                HSplitView {
-                    leftColumn(sessions: sessions)
-                        .frame(minWidth: 200, idealWidth: 240, maxWidth: 320)
-                    rightColumn(sessions: sessions)
-                        .frame(minWidth: 380, maxWidth: .infinity)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 660, minHeight: 420)
-        .background(VisualEffectBackground(material: .windowBackground))
-        .onAppear { ensureValidSelection(sessions: sessions) }
-        .onChange(of: sessions.map(\.sessionId)) { _ in
-            ensureValidSelection(sessions: sessions)
+        .frame(minWidth: 760, minHeight: 480)
+        .background(Color.narcBackground)
+        .onChange(of: terminals.sessions.map(\.id)) { _ in
+            // Auto-select the first session when none is selected, or pick the
+            // newest one if our selection just got removed.
+            if selectedSessionId == nil || !terminals.sessions.contains(where: { $0.id == selectedSessionId }) {
+                selectedSessionId = terminals.sessions.last?.id
+            }
         }
     }
 
     // MARK: - Toolbar
 
-    private func toolbar(sessionCount: Int) -> some View {
+    private var toolbar: some View {
         HStack(spacing: NarcSpacing.sm) {
             Image(systemName: "terminal.fill")
                 .foregroundStyle(Color.narcAccent)
-            Text("Claude Workspace")
+            Text("NARC Workspace")
                 .font(.narcSubtitle)
                 .foregroundStyle(Color.narcText)
             Text("·")
                 .foregroundStyle(Color.narcTextMuted)
-            Text("\(sessionCount) 个会话")
+            Text("\(terminals.sessions.count) 个终端")
                 .font(.narcCaption)
                 .foregroundStyle(Color.narcTextMuted)
 
             Spacer()
 
-            Button(action: { TerminalJumper.spawnClaude() }) {
+            Menu {
+                Button("Shell (zsh)") { spawnShell() }
+                Button("Claude") { spawnClaude() }
+            } label: {
                 HStack(spacing: NarcSpacing.xs) {
                     Image(systemName: "plus")
                     Text("新建终端")
@@ -85,172 +68,135 @@ struct DashboardView: View {
                 .padding(.vertical, NarcSpacing.xs + 2)
                 .background(Capsule().fill(Color.narcAccent))
             }
-            .buttonStyle(.plain)
+            .menuStyle(.borderlessButton)
+            .fixedSize()
         }
         .padding(.horizontal, NarcSpacing.lg)
         .padding(.vertical, NarcSpacing.sm)
     }
 
-    // MARK: - Left Column
+    // MARK: - Left Column (Tab list)
 
-    private func leftColumn(sessions: [ClaudeSession]) -> some View {
+    private var leftColumn: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                ForEach(sessions, id: \.sessionId) { session in
-                    DashboardSessionRow(
+                ForEach(terminals.sessions) { session in
+                    TerminalTabRow(
                         session: session,
-                        hasPendingApproval: hasPendingApproval(session.sessionId),
-                        isSelected: session.sessionId == selectedSessionId,
-                        onTap: { selectedSessionId = session.sessionId },
-                        onClose: { TerminalJumper.closeSession(tty: session.tty) }
+                        isSelected: session.id == selectedSessionId,
+                        onTap: { selectedSessionId = session.id },
+                        onClose: { terminals.remove(session.id) }
                     )
-                    Divider().padding(.leading, 14)
+                    Divider().padding(.leading, 12)
                 }
             }
             .padding(.vertical, NarcSpacing.xs)
         }
+        .background(Color.narcBackground.opacity(0.6))
     }
 
-    // MARK: - Right Column
+    // MARK: - Right Column (Active terminal)
 
     @ViewBuilder
-    private func rightColumn(sessions: [ClaudeSession]) -> some View {
-        if let selectedId = selectedSessionId,
-           let session = sessions.first(where: { $0.sessionId == selectedId }) {
-            SessionDetailView(
-                session: session,
-                pendingApproval: pendingApprovalFor(selectedId),
-                onJump: {
-                    TerminalJumper.jump(
-                        tty: session.tty,
-                        cwd: session.cwd,
-                        projectName: session.projectName
-                    )
-                },
-                onAllow: { approval in claudeService.approve(approval) },
-                onDeny: { approval in claudeService.deny(approval) }
-            )
+    private var rightColumn: some View {
+        if terminals.sessions.isEmpty {
+            emptyState
         } else {
-            VStack {
-                Spacer()
-                Text("选择左侧会话查看详情")
-                    .font(.narcCaption)
-                    .foregroundStyle(Color.narcTextMuted)
-                Spacer()
+            ZStack {
+                ForEach(terminals.sessions) { session in
+                    TerminalPaneView(
+                        executable: session.executable,
+                        args: session.args,
+                        cwd: session.cwd,
+                        onExit: { _ in terminals.markDead(session.id) },
+                        onTitleChange: { title in terminals.updateTitle(id: session.id, title: title) }
+                    )
+                    .opacity(session.id == selectedSessionId ? 1 : 0)
+                    .allowsHitTesting(session.id == selectedSessionId)
+                }
             }
-            .frame(maxWidth: .infinity)
+            .background(Color.black)
         }
     }
 
     // MARK: - Empty State
 
     private var emptyState: some View {
-        VStack(spacing: NarcSpacing.lg) {
+        VStack(spacing: NarcSpacing.md) {
             Spacer()
             Image(systemName: "terminal.fill")
                 .font(.system(size: 48))
                 .foregroundStyle(Color.narcTextMuted)
-            Text("暂无 Claude 会话")
+            Text("还没有终端")
                 .font(.narcSubtitle)
                 .foregroundStyle(Color.narcText)
-            Text("点击右上角「新建终端」开始一个新会话")
+            Text("点击右上角「新建终端」开始")
                 .font(.narcCaption)
                 .foregroundStyle(Color.narcTextMuted)
-            Button(action: { TerminalJumper.spawnClaude() }) {
-                HStack(spacing: NarcSpacing.xs) {
-                    Image(systemName: "plus.circle.fill")
-                    Text("新建终端")
-                        .font(.narcCaption)
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, NarcSpacing.lg)
-                .padding(.vertical, NarcSpacing.sm)
-                .background(Capsule().fill(Color.narcAccent))
+            HStack(spacing: NarcSpacing.sm) {
+                Button("+ Shell") { spawnShell() }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, NarcSpacing.md)
+                    .padding(.vertical, NarcSpacing.xs + 2)
+                    .background(Capsule().fill(Color.narcSurfaceMuted))
+                Button("+ Claude") { spawnClaude() }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, NarcSpacing.md)
+                    .padding(.vertical, NarcSpacing.xs + 2)
+                    .background(Capsule().fill(Color.narcAccent))
             }
-            .buttonStyle(.plain)
+            .font(.narcCaption)
             Spacer()
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.narcBackground)
     }
 
-    // MARK: - Helpers
+    // MARK: - Spawn helpers
 
-    private var activeSessions: [ClaudeSession] {
-        claudeService.sessions.values
-            .filter { $0.status != .ended }
-            .sorted { $0.lastUpdated < $1.lastUpdated }
+    private func spawnShell() {
+        let cwd = NSHomeDirectory()
+        let id = terminals.newSession(cwd: cwd)
+        selectedSessionId = id
     }
 
-    private func hasPendingApproval(_ sessionId: String) -> Bool {
-        claudeService.pendingApprovals.contains { $0.sessionId == sessionId }
-    }
-
-    private func pendingApprovalFor(_ sessionId: String) -> PendingApproval? {
-        claudeService.pendingApprovals.first { $0.sessionId == sessionId }
-    }
-
-    private func ensureValidSelection(sessions: [ClaudeSession]) {
-        if let current = selectedSessionId, sessions.contains(where: { $0.sessionId == current }) {
-            return
-        }
-        if let pending = sessions.first(where: { hasPendingApproval($0.sessionId) }) {
-            selectedSessionId = pending.sessionId
-            return
-        }
-        selectedSessionId = sessions.first?.sessionId
+    private func spawnClaude() {
+        let cwd = NSHomeDirectory()
+        let id = terminals.newClaudeSession(cwd: cwd)
+        selectedSessionId = id
     }
 }
 
-// MARK: - Dashboard Session Row
+// MARK: - Tab Row
 
-/// Wider/heavier session row for the dashboard, with a confirming-close button.
-struct DashboardSessionRow: View {
-    let session: ClaudeSession
-    let hasPendingApproval: Bool
+struct TerminalTabRow: View {
+    let session: OwnedSession
     let isSelected: Bool
     var onTap: () -> Void
     var onClose: () -> Void
 
     @State private var isHovering = false
-    @State private var confirmingClose = false
 
     var body: some View {
         HStack(spacing: NarcSpacing.sm) {
-            // Status dot
-            ZStack {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 10, height: 10)
-                if hasPendingApproval {
-                    Circle()
-                        .strokeBorder(Color.narcDanger, lineWidth: 2)
-                        .frame(width: 16, height: 16)
-                }
-            }
-            .frame(width: 18)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(session.projectName ?? "Unknown")
-                    .font(.narcCaption)
-                    .foregroundStyle(Color.narcText)
-                    .lineLimit(1)
-                Text(session.statusDescription)
-                    .font(.system(size: 10))
-                    .foregroundStyle(statusColor)
-                    .lineLimit(1)
-            }
-
+            Circle()
+                .fill(session.isAlive ? Color.narcSuccess : Color.narcTextFaint)
+                .frame(width: 8, height: 8)
+            Text(session.displayTitle)
+                .font(.narcCaption)
+                .foregroundStyle(session.isAlive ? Color.narcText : Color.narcTextMuted)
+                .lineLimit(1)
+                .truncationMode(.tail)
             Spacer(minLength: 0)
-
-            // Close button — confirm on first click, execute on second.
-            if isHovering || confirmingClose {
-                Button(action: handleCloseTap) {
-                    Image(systemName: confirmingClose ? "exclamationmark.circle.fill" : "xmark.circle.fill")
+            if isHovering {
+                Button(action: onClose) {
+                    Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 13))
-                        .foregroundStyle(confirmingClose ? Color.narcDanger : Color.narcTextMuted)
+                        .foregroundStyle(Color.narcTextMuted)
                 }
                 .buttonStyle(.plain)
-                .help(confirmingClose ? "再点一次确认关闭" : "关闭终端")
+                .help("关闭终端")
             }
         }
         .padding(.horizontal, NarcSpacing.md)
@@ -261,36 +207,12 @@ struct DashboardSessionRow: View {
         .onTapGesture { onTap() }
     }
 
-    private func handleCloseTap() {
-        if confirmingClose {
-            onClose()
-            confirmingClose = false
-        } else {
-            confirmingClose = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                confirmingClose = false
-            }
-        }
-    }
-
-    private var statusColor: Color {
-        switch session.status {
-        case .waitingForApproval: return .narcDanger
-        case .runningTool, .processing: return .narcAccent
-        case .waitingForInput: return .narcSuccess
-        case .compacting: return .narcWarn
-        case .ended, .unknown: return .narcTextFaint
-        }
-    }
-
     @ViewBuilder
     private var rowBackground: some View {
         if isSelected {
             Color.narcAccent.opacity(0.18)
         } else if isHovering {
             Color.narcSurfaceMuted
-        } else if hasPendingApproval {
-            Color.narcDanger.opacity(0.08)
         } else {
             Color.clear
         }
