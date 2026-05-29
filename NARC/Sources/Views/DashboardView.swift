@@ -54,10 +54,7 @@ struct DashboardView: View {
 
             Spacer()
 
-            Menu {
-                Button("Shell (zsh)") { spawnShell() }
-                Button("Claude") { spawnClaude() }
-            } label: {
+            Button(action: spawnShell) {
                 HStack(spacing: NarcSpacing.xs) {
                     Image(systemName: "plus")
                     Text("新建终端")
@@ -68,8 +65,7 @@ struct DashboardView: View {
                 .padding(.vertical, NarcSpacing.xs + 2)
                 .background(Capsule().fill(Color.narcAccent))
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, NarcSpacing.lg)
         .padding(.vertical, NarcSpacing.sm)
@@ -134,37 +130,29 @@ struct DashboardView: View {
             Text("点击右上角「新建终端」开始")
                 .font(.narcCaption)
                 .foregroundStyle(Color.narcTextMuted)
-            HStack(spacing: NarcSpacing.sm) {
-                Button("+ Shell") { spawnShell() }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, NarcSpacing.md)
-                    .padding(.vertical, NarcSpacing.xs + 2)
-                    .background(Capsule().fill(Color.narcSurfaceMuted))
-                Button("+ Claude") { spawnClaude() }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, NarcSpacing.md)
-                    .padding(.vertical, NarcSpacing.xs + 2)
-                    .background(Capsule().fill(Color.narcAccent))
+            Button(action: spawnShell) {
+                HStack(spacing: NarcSpacing.xs) {
+                    Image(systemName: "plus.circle.fill")
+                    Text("新建终端")
+                        .font(.narcCaption)
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, NarcSpacing.lg)
+                .padding(.vertical, NarcSpacing.sm)
+                .background(Capsule().fill(Color.narcAccent))
             }
-            .font(.narcCaption)
+            .buttonStyle(.plain)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.narcBackground)
     }
 
-    // MARK: - Spawn helpers
+    // MARK: - Spawn
 
     private func spawnShell() {
         let cwd = NSHomeDirectory()
         let id = terminals.newSession(cwd: cwd)
-        selectedSessionId = id
-    }
-
-    private func spawnClaude() {
-        let cwd = NSHomeDirectory()
-        let id = terminals.newClaudeSession(cwd: cwd)
         selectedSessionId = id
     }
 }
