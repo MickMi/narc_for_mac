@@ -108,6 +108,7 @@ struct DashboardView: View {
                         executable: session.executable,
                         args: session.args,
                         cwd: session.cwd,
+                        isSelected: session.id == selectedSessionId,
                         onExit: { _ in terminals.markDead(session.id) },
                         onTitleChange: { title in terminals.updateTitle(id: session.id, title: title) }
                     )
