@@ -18,6 +18,7 @@ struct TerminalPaneView: NSViewRepresentable {
     let isSelected: Bool
     let onExit: ((Int32?) -> Void)?
     let onTitleChange: ((String) -> Void)?
+    let onCwdChange: ((String?) -> Void)?
 
     init(
         executable: String = "/bin/zsh",
@@ -25,7 +26,8 @@ struct TerminalPaneView: NSViewRepresentable {
         cwd: String? = nil,
         isSelected: Bool = true,
         onExit: ((Int32?) -> Void)? = nil,
-        onTitleChange: ((String) -> Void)? = nil
+        onTitleChange: ((String) -> Void)? = nil,
+        onCwdChange: ((String?) -> Void)? = nil
     ) {
         self.executable = executable
         self.args = args
@@ -33,6 +35,7 @@ struct TerminalPaneView: NSViewRepresentable {
         self.isSelected = isSelected
         self.onExit = onExit
         self.onTitleChange = onTitleChange
+        self.onCwdChange = onCwdChange
     }
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
@@ -79,16 +82,22 @@ struct TerminalPaneView: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onExit: onExit, onTitleChange: onTitleChange)
+        Coordinator(onExit: onExit, onTitleChange: onTitleChange, onCwdChange: onCwdChange)
     }
 
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
         let onExit: ((Int32?) -> Void)?
         let onTitleChange: ((String) -> Void)?
+        let onCwdChange: ((String?) -> Void)?
 
-        init(onExit: ((Int32?) -> Void)?, onTitleChange: ((String) -> Void)?) {
+        init(
+            onExit: ((Int32?) -> Void)?,
+            onTitleChange: ((String) -> Void)?,
+            onCwdChange: ((String?) -> Void)?
+        ) {
             self.onExit = onExit
             self.onTitleChange = onTitleChange
+            self.onCwdChange = onCwdChange
         }
 
         // MARK: - LocalProcessTerminalViewDelegate
@@ -108,7 +117,9 @@ struct TerminalPaneView: NSViewRepresentable {
         // not `LocalProcessTerminalView` — match exactly or conformance fails.
 
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
-            // Useful later for showing cwd in the tab; ignored for MVP.
+            DispatchQueue.main.async { [weak self] in
+                self?.onCwdChange?(directory)
+            }
         }
 
         func processTerminated(source: TerminalView, exitCode: Int32?) {
