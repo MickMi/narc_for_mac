@@ -190,9 +190,7 @@ struct TerminalTabRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 titleLine
                 metaLine
-                if let claudeBadge = claudeBadge {
-                    claudeBadge
-                }
+                claudeBadge
             }
 
             Spacer(minLength: 0)
