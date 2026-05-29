@@ -6,6 +6,7 @@ struct PanelView: View {
     @ObservedObject var appMonitor: AppMonitorService
     @ObservedObject var windowManager: WindowManagerService
     @ObservedObject var pinnedWindowService: PinnedWindowService
+    @ObservedObject var claudeService: ClaudeSessionService
     var onClose: () -> Void
     var onOpenPreferences: () -> Void
     /// The screen where NARC's floating widget is located.
@@ -17,11 +18,13 @@ struct PanelView: View {
 
     enum PanelTab: String, CaseIterable {
         case notifications = "Notifications"
+        case claude = "Claude"
         case windows = "Windows"
 
         var icon: String {
             switch self {
             case .notifications: return "bell.fill"
+            case .claude: return "terminal.fill"
             case .windows: return "macwindow"
             }
         }
@@ -46,6 +49,11 @@ struct PanelView: View {
                         narcScreen: narcScreen,
                         keyboardSelection: keyboardSelection
                     )
+                case .claude:
+                    ClaudeSessionListView(
+                        claudeService: claudeService,
+                        onClose: onClose
+                    )
                 case .windows:
                     WindowGridView(windowManager: windowManager)
                 }
@@ -55,9 +63,13 @@ struct PanelView: View {
             // Footer
             footerBar
         }
-        .frame(width: 320, height: 420)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .frame(width: NarcSize.panelWidth, height: NarcSize.panelHeight)
+        .background(VisualEffectBackground(material: .hudWindow))
+        .clipShape(RoundedRectangle(cornerRadius: NarcRadius.xl))
+        .overlay(
+            RoundedRectangle(cornerRadius: NarcRadius.xl)
+                .strokeBorder(Color.narcBorder)
+        )
     }
 
     // MARK: - Title Bar
@@ -65,111 +77,109 @@ struct PanelView: View {
     private var titleBar: some View {
         HStack {
             Text("NARC")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(.primary)
+                .font(.narcSubtitle)
+                .foregroundColor(.narcText)
 
             Spacer()
 
             Button(action: onOpenPreferences) {
                 Image(systemName: "gearshape")
-                    .font(.system(size: 14))
-                    .foregroundColor(.secondary)
+                    .font(.narcSubtitle)
+                    .foregroundColor(.narcTextMuted)
             }
             .buttonStyle(.plain)
 
             Button(action: onClose) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.secondary)
+                    .font(.narcBody)
+                    .foregroundColor(.narcTextMuted)
             }
             .buttonStyle(.plain)
-            .padding(.leading, 4)
+            .padding(.leading, NarcSpacing.xs)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, NarcSpacing.lg)
+        .padding(.vertical, NarcSpacing.md)
     }
 
-    // MARK: - Tab Bar
+    // MARK: - Tab Bar (Pill Style)
 
     private var tabBar: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                ForEach(PanelTab.allCases, id: \.self) { tab in
-                    Button(action: { selectedTab = tab }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: tab.icon)
-                                .font(.system(size: 12))
-                            Text(tab.rawValue)
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        .foregroundColor(selectedTab == tab ? .accentColor : .secondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .overlay(alignment: .bottom) {
-                            if selectedTab == tab {
-                                Rectangle()
-                                    .fill(Color.accentColor)
-                                    .frame(height: 2)
-                            }
-                        }
+        HStack(spacing: NarcSpacing.sm) {
+            ForEach(PanelTab.allCases, id: \.self) { tab in
+                Button(action: {
+                    withAnimation(.narcSnap) {
+                        selectedTab = tab
                     }
-                    .buttonStyle(.plain)
+                }) {
+                    HStack(spacing: NarcSpacing.xs + NarcSpacing.xxs) {
+                        Image(systemName: tab.icon)
+                            .font(.narcBody)
+                        Text(tab.rawValue)
+                            .font(.narcBody)
+                    }
+                    .foregroundColor(selectedTab == tab ? .narcAccent : .narcTextMuted)
+                    .padding(.horizontal, NarcSpacing.md)
+                    .padding(.vertical, NarcSpacing.sm)
+                    .background(
+                        Capsule()
+                            .fill(selectedTab == tab ? Color.narcAccent.opacity(0.14) : Color.clear)
+                    )
                 }
+                .buttonStyle(.plain)
             }
-            .padding(.horizontal, 16)
-
-            Divider()
         }
+        .padding(.horizontal, NarcSpacing.lg)
+        .padding(.bottom, NarcSpacing.sm)
     }
 
     // MARK: - Footer
 
     private var footerBar: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: NarcSpacing.xs) {
             // Keyboard hints
             Group {
                 Text("↑↓")
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .padding(.horizontal, 3)
-                    .padding(.vertical, 1)
-                    .background(Color.primary.opacity(0.08))
-                    .cornerRadius(2)
+                    .font(.narcMonoTiny)
+                    .padding(.horizontal, NarcSpacing.xxs + 1)
+                    .padding(.vertical, NarcSpacing.xxs / 2)
+                    .background(Color.narcSurfaceMuted)
+                    .cornerRadius(NarcRadius.xs / 2)
                 Text("select")
-                    .font(.system(size: 9))
+                    .font(.narcMonoTiny)
 
                 Text("↩")
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .padding(.horizontal, 3)
-                    .padding(.vertical, 1)
-                    .background(Color.primary.opacity(0.08))
-                    .cornerRadius(2)
+                    .font(.narcMonoTiny)
+                    .padding(.horizontal, NarcSpacing.xxs + 1)
+                    .padding(.vertical, NarcSpacing.xxs / 2)
+                    .background(Color.narcSurfaceMuted)
+                    .cornerRadius(NarcRadius.xs / 2)
                 Text("open")
-                    .font(.system(size: 9))
+                    .font(.narcMonoTiny)
 
                 Text("esc")
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .padding(.horizontal, 3)
-                    .padding(.vertical, 1)
-                    .background(Color.primary.opacity(0.08))
-                    .cornerRadius(2)
+                    .font(.narcMonoTiny)
+                    .padding(.horizontal, NarcSpacing.xxs + 1)
+                    .padding(.vertical, NarcSpacing.xxs / 2)
+                    .background(Color.narcSurfaceMuted)
+                    .cornerRadius(NarcRadius.xs / 2)
                 Text("close")
-                    .font(.system(size: 9))
+                    .font(.narcMonoTiny)
             }
-            .foregroundColor(.secondary)
+            .foregroundColor(.narcTextMuted)
 
             Spacer()
 
             Circle()
-                .fill(Color.green)
+                .fill(Color.narcSuccess)
                 .frame(width: 6, height: 6)
 
             Text("Live")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.green)
+                .font(.narcCaption)
+                .foregroundColor(.narcSuccess)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(Color.primary.opacity(0.03))
+        .padding(.horizontal, NarcSpacing.lg)
+        .padding(.vertical, NarcSpacing.sm)
+        .background(Color.narcBackground)
     }
 
     private var formattedTime: String {
