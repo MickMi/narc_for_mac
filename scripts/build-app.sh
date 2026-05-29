@@ -53,6 +53,30 @@ if [ -d "$RESOURCE_BUNDLE" ]; then
     cp -R "$RESOURCE_BUNDLE" "${APP_BUNDLE}/Contents/Resources/"
 fi
 
+# Step 6.5: Re-sign with a stable self-signed identity so macOS Accessibility
+# authorization survives rebuilds. ad-hoc / linker-signed binaries are indexed
+# by cdhash in TCC.db; every swift build mutates the binary so the cdhash
+# changes and the user has to re-authorize. Signing with a persistent identity
+# (whose Designated Requirement stays constant) lets TCC match across rebuilds.
+#
+# Set NARC_SIGN_IDENTITY to override; default 'NARC Dev' (created via Keychain
+# Assistant > Create a Certificate, type: Code Signing, self-signed).
+SIGN_IDENTITY="${NARC_SIGN_IDENTITY:-NARC Dev}"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "\"$SIGN_IDENTITY\""; then
+    echo "🔏 Signing with stable identity: $SIGN_IDENTITY"
+    codesign --force --deep \
+        --sign "$SIGN_IDENTITY" \
+        --identifier "$BUNDLE_ID" \
+        --options runtime \
+        "$APP_BUNDLE"
+    echo "✓ Signed — Accessibility / Notifications authorization will persist across rebuilds"
+else
+    echo "⚠️  Stable signing identity '$SIGN_IDENTITY' not found in Keychain."
+    echo "   Falling back to ad-hoc — you will need to re-authorize Accessibility on every rebuild."
+    echo "   To fix: Keychain Access > Certificate Assistant > Create a Certificate"
+    echo "           Name=$SIGN_IDENTITY, Identity=Self Signed Root, Type=Code Signing"
+fi
+
 # Step 7: Generate a simple app icon (using system icon as placeholder)
 # For a proper icon, replace with an .icns file
 # We'll create a minimal icns from the SF Symbol later if needed
