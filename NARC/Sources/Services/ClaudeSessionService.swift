@@ -154,7 +154,6 @@ class ClaudeSessionService: ObservableObject {
         let message = json["message"] as? String
         let tty = json["tty"] as? String
         let narcSessionId = json["narc_session_id"] as? String
-        let narcSessionId = json["narc_session_id"] as? String
 
         print("[NARC] 🔌 Received: event=\(event) status=\(status) session=\(sessionId.prefix(8))")
 
