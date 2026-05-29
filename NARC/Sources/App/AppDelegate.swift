@@ -170,6 +170,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.togglePanel()
         }
 
+        // Right-click (or Ctrl+left-click) summons the standalone Claude Dashboard.
+        window.onWidgetRightClicked = { [weak self] in
+            self?.toggleDashboard()
+        }
+
         // When the widget is dragged, reposition the panel
         window.onWindowMoved = { [weak self] in
             self?.repositionPanel()
@@ -271,7 +276,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             appMonitor: appMonitor,
             windowManager: windowManager,
             pinnedWindowService: pinnedWindowService,
-            claudeService: claudeService,
             onClose: { [weak self] in self?.hidePanel() },
             onOpenPreferences: { [weak self] in self?.openPreferences() },
             narcScreen: narcScreen,
@@ -323,6 +327,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         removeKeyEventMonitor()
         panelWindow?.orderOut(nil)
         panelWindow = nil
+    }
+
+    // MARK: - Claude Dashboard (standalone window)
+
+    private var dashboardWindow: DashboardWindow?
+
+    /// Toggle the dashboard window. Right-click on the floating widget calls this.
+    private func toggleDashboard() {
+        if let window = dashboardWindow, window.isVisible {
+            hideDashboard()
+        } else {
+            showDashboard()
+        }
+    }
+
+    /// Show (or front) the dashboard window. Lazy-creates on first call.
+    private func showDashboard() {
+        if let window = dashboardWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let window = DashboardWindow()
+        let dashboardView = DashboardView(claudeService: claudeService)
+        window.contentView = NSHostingView(rootView: dashboardView)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        self.dashboardWindow = window
+    }
+
+    private func hideDashboard() {
+        dashboardWindow?.orderOut(nil)
     }
 
     // MARK: - Claude Toast Notification

@@ -6,7 +6,6 @@ struct PanelView: View {
     @ObservedObject var appMonitor: AppMonitorService
     @ObservedObject var windowManager: WindowManagerService
     @ObservedObject var pinnedWindowService: PinnedWindowService
-    @ObservedObject var claudeService: ClaudeSessionService
     var onClose: () -> Void
     var onOpenPreferences: () -> Void
     /// The screen where NARC's floating widget is located.
@@ -18,13 +17,11 @@ struct PanelView: View {
 
     enum PanelTab: String, CaseIterable {
         case notifications = "Notifications"
-        case claude = "Claude"
         case windows = "Windows"
 
         var icon: String {
             switch self {
             case .notifications: return "bell.fill"
-            case .claude: return "terminal.fill"
             case .windows: return "macwindow"
             }
         }
@@ -48,11 +45,6 @@ struct PanelView: View {
                         onClose: onClose,
                         narcScreen: narcScreen,
                         keyboardSelection: keyboardSelection
-                    )
-                case .claude:
-                    ClaudeSessionListView(
-                        claudeService: claudeService,
-                        onClose: onClose
                     )
                 case .windows:
                     WindowGridView(windowManager: windowManager)

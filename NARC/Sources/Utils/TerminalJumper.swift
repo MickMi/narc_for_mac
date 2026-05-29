@@ -131,4 +131,92 @@ enum TerminalJumper {
         end tell
         """
     }
+
+    // MARK: - Spawn / Close (Dashboard support)
+
+    /// Open a new iTerm2 window, cd to `cwd` if provided, and run `claude`.
+    /// Falls back to Terminal.app if iTerm2 is not running.
+    static func spawnClaude(cwd: String? = nil) {
+        let cdLine = (cwd?.isEmpty == false) ? "cd \(shellEscape(cwd!)) && " : ""
+        let claudeCommand = "\(cdLine)claude"
+
+        let script: String
+        if NSRunningApplication.runningApplications(withBundleIdentifier: "com.googlecode.iterm2").first != nil {
+            script = """
+            tell application "iTerm2"
+                activate
+                set newWindow to (create window with default profile)
+                tell current session of newWindow
+                    write text "\(claudeCommand)"
+                end tell
+            end tell
+            """
+        } else {
+            // Terminal.app fallback
+            script = """
+            tell application "Terminal"
+                activate
+                do script "\(claudeCommand)"
+            end tell
+            """
+        }
+
+        runAppleScript(script, label: "spawn claude")
+    }
+
+    /// Close the iTerm2 session with the given TTY. Best-effort.
+    /// If TTY is unknown or we can't find the session, this no-ops.
+    /// The user can also Ctrl-D / `exit` in the terminal manually.
+    static func closeSession(tty: String?) {
+        guard let tty = tty, !tty.isEmpty else {
+            print("[NARC] ⚠️ closeSession: missing tty")
+            return
+        }
+
+        let script = """
+        tell application "iTerm2"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if tty of s is "\(tty)" then
+                            close s
+                            return
+                        end if
+                    end repeat
+                end repeat
+            end repeat
+        end tell
+        """
+
+        runAppleScript(script, label: "close session")
+    }
+
+    // MARK: - Internals
+
+    private static func runAppleScript(_ script: String, label: String) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", script]
+            let pipe = Pipe()
+            process.standardError = pipe
+            do {
+                try process.run()
+                process.waitUntilExit()
+                if process.terminationStatus != 0 {
+                    let err = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    print("[NARC] ⚠️ \(label) script error: \(err)")
+                } else {
+                    print("[NARC] ✓ \(label)")
+                }
+            } catch {
+                print("[NARC] ⚠️ \(label) failed: \(error)")
+            }
+        }
+    }
+
+    /// Single-quote-escape a path for safe inclusion in a shell command inside AppleScript.
+    private static func shellEscape(_ s: String) -> String {
+        return "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
 }

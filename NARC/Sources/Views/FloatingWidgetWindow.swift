@@ -27,6 +27,10 @@ class FloatingWidgetWindow: NSPanel {
     /// when the app is not the frontmost application.
     var onWidgetTapped: (() -> Void)?
 
+    /// Called when the widget is right-clicked (or Ctrl+clicked).
+    /// Used to summon the Claude Dashboard window.
+    var onWidgetRightClicked: (() -> Void)?
+
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
@@ -104,6 +108,12 @@ class FloatingWidgetWindow: NSPanel {
             }
             mouseDownTime = nil
             mouseDownLocation = nil
+            super.sendEvent(event)
+
+        case .rightMouseDown:
+            // Right-click (or Ctrl+left-click on trackpads) summons the dashboard.
+            // macOS auto-translates Ctrl+leftMouseDown into rightMouseDown for us.
+            onWidgetRightClicked?()
             super.sendEvent(event)
 
         default:
