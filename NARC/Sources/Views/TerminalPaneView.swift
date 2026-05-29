@@ -80,11 +80,15 @@ struct TerminalPaneView: NSViewRepresentable {
             }
         }
 
-        func hostCurrentDirectoryUpdate(source: LocalProcessTerminalView, directory: String?) {
+        // The following two are inherited from `TerminalViewDelegate` (the base
+        // protocol). SwiftTerm 1.2 declares them with `source: TerminalView`,
+        // not `LocalProcessTerminalView` — match exactly or conformance fails.
+
+        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
             // Useful later for showing cwd in the tab; ignored for MVP.
         }
 
-        func processTerminated(source: LocalProcessTerminalView, exitCode: Int32?) {
+        func processTerminated(source: TerminalView, exitCode: Int32?) {
             DispatchQueue.main.async { [weak self] in
                 self?.onExit?(exitCode)
             }
