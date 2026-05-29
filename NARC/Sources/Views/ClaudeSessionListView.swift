@@ -58,7 +58,7 @@ struct ClaudeSessionListView: View {
             .onAppear {
                 ensureValidSelection(sessions: sessions)
             }
-            .onChange(of: sessions.map(\.sessionId)) { _ in
+            .onChange(of: sessions.map(\.sessionId)) { _, _ in
                 ensureValidSelection(sessions: sessions)
             }
         }

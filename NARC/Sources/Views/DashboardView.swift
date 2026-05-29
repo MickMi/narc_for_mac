@@ -28,7 +28,7 @@ struct DashboardView: View {
         }
         .frame(minWidth: 760, minHeight: 480)
         .background(Color.narcBackground)
-        .onChange(of: terminals.sessions.map(\.id)) { _ in
+        .onChange(of: terminals.sessions.map(\.id)) { _, _ in
             // Auto-select the first session when none is selected, or pick the
             // newest one if our selection just got removed.
             if selectedSessionId == nil || !terminals.sessions.contains(where: { $0.id == selectedSessionId }) {
