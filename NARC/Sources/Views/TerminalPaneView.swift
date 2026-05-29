@@ -12,6 +12,10 @@ struct TerminalPaneView: NSViewRepresentable {
     let executable: String
     let args: [String]
     let cwd: String?
+    /// Stamped into the child's env as `NARC_SESSION_ID`. The narc-hook script
+    /// reads this and includes it on the socket payload, so workspace tabs
+    /// can be matched to the hook events without relying on tty.
+    let narcSessionId: String
     /// True when this pane is the active one in the dashboard. We use this to
     /// route keyboard focus (first responder) to the correct SwiftTerm view —
     /// without it, the user would see the terminal but be unable to type.
@@ -24,6 +28,7 @@ struct TerminalPaneView: NSViewRepresentable {
         executable: String = "/bin/zsh",
         args: [String] = ["-l"],
         cwd: String? = nil,
+        narcSessionId: String,
         isSelected: Bool = true,
         onExit: ((Int32?) -> Void)? = nil,
         onTitleChange: ((String) -> Void)? = nil,
@@ -32,6 +37,7 @@ struct TerminalPaneView: NSViewRepresentable {
         self.executable = executable
         self.args = args
         self.cwd = cwd
+        self.narcSessionId = narcSessionId
         self.isSelected = isSelected
         self.onExit = onExit
         self.onTitleChange = onTitleChange
@@ -43,10 +49,20 @@ struct TerminalPaneView: NSViewRepresentable {
         term.processDelegate = context.coordinator
         term.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
 
+        // Bind background/foreground to system semantic colors so the terminal
+        // blends into the workspace chrome (and follows light/dark mode). The
+        // ANSI 16-color palette stays at SwiftTerm's default — git/claude
+        // colored output is preserved. Themed palette is a follow-up task.
+        term.nativeBackgroundColor = NSColor.windowBackgroundColor
+        term.nativeForegroundColor = NSColor.labelColor
+
         // Build environment: inherit user shell env, force xterm-256color for compat
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "xterm-256color"
         if env["LANG"] == nil { env["LANG"] = "en_US.UTF-8" }
+        // Tag this PTY with the workspace session ID so narc-hook can correlate
+        // claude events back to this tab.
+        env["NARC_SESSION_ID"] = narcSessionId
 
         // SwiftTerm wants env as ["KEY=VALUE", ...]
         let envArray = env.map { "\($0.key)=\($0.value)" }
