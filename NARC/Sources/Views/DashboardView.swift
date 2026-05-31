@@ -8,9 +8,13 @@ import SwiftUI
 /// Sessions are kept alive by rendering all panes in a ZStack; only the selected
 /// one is visible/interactive. ClaudeService is kept around for future status
 /// badge enrichment but not used by the MVP.
+///
+/// `terminals` is owned by AppDelegate (not @StateObject here) so closing the
+/// Dashboard window doesn't tear it down — child PTYs keep running and the
+/// next time the window is summoned we see the same tabs / output / state.
 struct DashboardView: View {
     @ObservedObject var claudeService: ClaudeSessionService
-    @StateObject private var terminals = TerminalSessionManager()
+    @ObservedObject var terminals: TerminalSessionManager
 
     @State private var selectedSessionId: UUID?
 

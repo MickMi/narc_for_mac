@@ -19,6 +19,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let pinnedWindowService = PinnedWindowService()
     private let hotkeyService = HotkeyService()
     private let claudeService = ClaudeSessionService.shared
+    /// Owned at the app level (not by DashboardView) so that closing the
+    /// dashboard window doesn't tear down running terminals. The user can
+    /// dismiss the window and re-open it later to find their tabs intact.
+    private let terminalManager = TerminalSessionManager()
 
     // MARK: - App Lifecycle
 
@@ -373,7 +377,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let window = DashboardWindow()
-        let dashboardView = DashboardView(claudeService: claudeService)
+        let dashboardView = DashboardView(
+            claudeService: claudeService,
+            terminals: terminalManager
+        )
         window.contentView = NSHostingView(rootView: dashboardView)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
