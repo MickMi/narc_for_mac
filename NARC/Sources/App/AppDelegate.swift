@@ -169,6 +169,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let hostingView = NSHostingView(rootView: widgetView)
         hostingView.frame = NSRect(x: 0, y: 0, width: 48, height: 48)
+        // Force the hosting view's backing layer to be transparent — without
+        // this, NSHostingView can render an opaque default fill that shows up
+        // as a square chrome around the round widget on some macOS versions.
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+        hostingView.layer?.isOpaque = false
+        // Force the hosting view's backing layer to be transparent — without
+        // this, NSHostingView can render an opaque default fill that shows up
+        // as a square chrome around the round widget on some macOS versions.
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+        hostingView.layer?.isOpaque = false
 
         // Position: bottom-right corner of the screen with the mouse cursor
         // This ensures the widget appears on the screen the user is actively using
