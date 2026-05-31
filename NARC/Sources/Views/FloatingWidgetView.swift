@@ -49,21 +49,31 @@ struct FloatingWidgetView: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            // halo-inner: clipShape lets bloom + ripple stay inside the 48pt circle
-            HaloInnerView(state: state)
+            // Root is a real Circle view filled with .regularMaterial — this
+            // guarantees there is no square chrome anywhere. (Spec §6 used
+            // `.background(.regularMaterial, in: Circle())` on a generic ZStack
+            // which on some macOS versions leaks the material outside the
+            // intended Circle bounds, producing a rounded-rect halo around the
+            // widget. A real Circle as the root avoids that entirely.)
+            Circle()
+                .fill(.regularMaterial)
                 .frame(width: 48, height: 48)
-                .clipShape(Circle())
-                .overlay(
-                    Circle().strokeBorder(
-                        Color(NSColor.separatorColor).opacity(0.6),
-                        lineWidth: 1
-                    )
-                )
-                .background(.regularMaterial, in: Circle())
+                .overlay {
+                    HaloInnerView(state: state)
+                        .clipShape(Circle())
+                }
+                .overlay {
+                    Circle()
+                        .strokeBorder(
+                            Color(NSColor.separatorColor).opacity(0.6),
+                            lineWidth: 1
+                        )
+                }
                 .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
                 .shadow(color: .black.opacity(0.12), radius: 32, y: 12)
 
-            // Badge — must NOT be clipped, sits outside .halo-inner
+            // Badge — sibling of the Circle, NOT inside its overlay, so the
+            // capsule overflows the 48pt circle's top-right corner.
             if case .hasNotification(let count) = state {
                 FloatingBadgeView(count: count)
                     .offset(x: 3, y: -3)
