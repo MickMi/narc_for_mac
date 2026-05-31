@@ -23,6 +23,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// dashboard window doesn't tear down running terminals. The user can
     /// dismiss the window and re-open it later to find their tabs intact.
     private let terminalManager = TerminalSessionManager()
+    /// Drives FloatingWidgetView's `.dragging` state transitions per spec §2.
+    /// Flipped by FloatingWidgetWindow's onDragStart / onDragEnd callbacks.
+    private let widgetDragState = WidgetDragState()
 
     // MARK: - App Lifecycle
 
@@ -158,10 +161,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Floating Widget
 
     private func setupFloatingWidget() {
-        let widgetView = FloatingWidgetView(
+        let widgetView = FloatingWidgetContainer(
             appMonitor: appMonitor,
             claudeService: claudeService,
-            onTap: { /* Handled at AppKit level via onWidgetTapped */ }
+            dragState: widgetDragState
         )
 
         let hostingView = NSHostingView(rootView: widgetView)
@@ -175,19 +178,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let widgetX = screenFrame.maxX - 48 - 20
         let widgetY = screenFrame.minY + 80
 
-        let window = FloatingWidgetWindow(
-            contentRect: NSRect(x: widgetX, y: widgetY, width: 48, height: 48),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
+        // Spec §7: window configuration is fully encapsulated in FloatingWidgetWindow.init().
+        let window = FloatingWidgetWindow()
+        window.setFrameOrigin(NSPoint(x: widgetX, y: widgetY))
         window.contentView = hostingView
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.level = .floating
-        window.hasShadow = false
-        window.isMovableByWindowBackground = true
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary]
         window.orderFrontRegardless()
 
         // Handle tap at AppKit level — this fires reliably even on the first click
@@ -199,6 +193,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Right-click (or Ctrl+left-click) summons the standalone Claude Dashboard.
         window.onWidgetRightClicked = { [weak self] in
             self?.toggleDashboard()
+        }
+
+        // Spec §2: drag flips state to .dragging; bloom + ripple + wordmark hide
+        // and the widget tilts/scales (spec §5).
+        window.onDragStart = { [weak self] in
+            self?.widgetDragState.isDragging = true
+        }
+        window.onDragEnd = { [weak self] in
+            self?.widgetDragState.isDragging = false
         }
 
         // When the widget is dragged, reposition the panel

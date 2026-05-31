@@ -10,6 +10,13 @@ private class FirstMouseView: NSView {
 
 /// A borderless, always-on-top floating window for the NARC widget.
 ///
+/// Conforms to spec §7:
+/// - `isOpaque = false` + `backgroundColor = .clear` so the 48pt circle's
+///   surroundings are fully transparent (otherwise the window degrades into
+///   a "rounded rect with a circle painted on it").
+/// - `hasShadow = false` because the SwiftUI view supplies its own dual-layer
+///   drop shadow per spec §6.
+///
 /// Handles the "first click eaten" problem on macOS:
 /// When the app is not the frontmost application, the first click on a `nonactivatingPanel`
 /// is consumed by the system to activate the window, and SwiftUI's `.onTapGesture` never fires.
@@ -17,7 +24,7 @@ private class FirstMouseView: NSView {
 /// Solution: We intercept `mouseDown` at the AppKit level and detect short clicks (< 0.3s)
 /// that don't move significantly (< 5pt). This bypasses SwiftUI's gesture system entirely
 /// for the initial tap, ensuring the first click always works.
-class FloatingWidgetWindow: NSPanel {
+final class FloatingWidgetWindow: NSPanel {
 
     /// Called whenever the window is moved (e.g. by dragging).
     var onWindowMoved: (() -> Void)?
@@ -31,23 +38,41 @@ class FloatingWidgetWindow: NSPanel {
     /// Used to summon the Claude Dashboard window.
     var onWidgetRightClicked: (() -> Void)?
 
-    override var canBecomeKey: Bool { true }
+    /// Called when a drag gesture starts (mouse moved > 5pt while held).
+    /// Spec §2: idle/hasNotification → dragging.
+    var onDragStart: (() -> Void)?
+
+    /// Called when the drag gesture ends. Spec §2: dragging → idle/hasNotification.
+    var onDragEnd: (() -> Void)?
+
+    /// Spec §7: the panel must never become key. Drag/click gestures still work
+    /// because we override sendEvent.
+    override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
     // Track mouse down for tap detection
     private var mouseDownTime: Date?
     private var mouseDownLocation: NSPoint?
+    /// True after we've upgraded a mouse-down to a drag (movement > 5pt).
+    /// Cleared on mouseUp.
+    private var isDragging: Bool = false
 
-    override init(
-        contentRect: NSRect,
-        styleMask style: NSWindow.StyleMask,
-        backing backingStoreType: NSWindow.BackingStoreType,
-        defer flag: Bool
-    ) {
-        super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
+    init() {
+        super.init(
+            contentRect: NSRect(x: 0, y: 0, width: 48, height: 48),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
 
-        self.isFloatingPanel = true
-        self.hidesOnDeactivate = false
+        // Spec §7
+        self.level = .floating
+        self.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        self.isOpaque = false              // critical — keeps the 48pt circle's surroundings transparent
+        self.backgroundColor = .clear      // critical — same reason
+        self.hasShadow = false             // SwiftUI view supplies its own drop shadow
+        self.isMovableByWindowBackground = true
+        self.acceptsMouseMovedEvents = true
         self.animationBehavior = .none
 
         // Observe window move events
@@ -65,11 +90,9 @@ class FloatingWidgetWindow: NSPanel {
         get { super.contentView }
         set {
             if let newView = newValue {
-                // If the new view is already a FirstMouseView, use it directly
                 if newView is FirstMouseView {
                     super.contentView = newView
                 } else {
-                    // Wrap the provided view in a FirstMouseView
                     let wrapper = FirstMouseView(frame: newView.frame)
                     wrapper.autoresizesSubviews = true
                     newView.autoresizingMask = [.width, .height]
@@ -82,19 +105,33 @@ class FloatingWidgetWindow: NSPanel {
         }
     }
 
-    // MARK: - AppKit-level tap detection
+    // MARK: - AppKit-level tap / drag detection
 
-    /// Intercept all events to detect taps at the AppKit level.
-    /// This fires before SwiftUI's gesture system, ensuring the first click always works.
     override func sendEvent(_ event: NSEvent) {
         switch event.type {
         case .leftMouseDown:
             mouseDownTime = Date()
             mouseDownLocation = event.locationInWindow
+            isDragging = false
+            super.sendEvent(event)
+
+        case .leftMouseDragged:
+            // Once movement crosses 5pt threshold, upgrade to drag state.
+            if !isDragging, let downLocation = mouseDownLocation {
+                let here = event.locationInWindow
+                let dx = here.x - downLocation.x
+                let dy = here.y - downLocation.y
+                if sqrt(dx * dx + dy * dy) >= 5.0 {
+                    isDragging = true
+                    onDragStart?()
+                }
+            }
             super.sendEvent(event)
 
         case .leftMouseUp:
-            if let downTime = mouseDownTime, let downLocation = mouseDownLocation {
+            if isDragging {
+                onDragEnd?()
+            } else if let downTime = mouseDownTime, let downLocation = mouseDownLocation {
                 let elapsed = Date().timeIntervalSince(downTime)
                 let upLocation = event.locationInWindow
                 let dx = upLocation.x - downLocation.x
@@ -108,6 +145,7 @@ class FloatingWidgetWindow: NSPanel {
             }
             mouseDownTime = nil
             mouseDownLocation = nil
+            isDragging = false
             super.sendEvent(event)
 
         case .rightMouseDown:
