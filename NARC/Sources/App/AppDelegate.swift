@@ -334,9 +334,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             claudeService: claudeService,
             onClose: { [weak self] in self?.hidePanel() },
             onOpenPreferences: { [weak self] in self?.openPreferences() },
-            onOpenDashboard: { [weak self] in
+            onOpenDashboard: { [weak self] narcSessionId in
                 self?.hidePanel()
-                self?.showDashboard()
+                self?.showDashboard(selectingNarcSessionId: narcSessionId)
             },
             narcScreen: narcScreen,
             keyboardSelection: keyboardSelection
@@ -403,10 +403,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Show (or front) the dashboard window. Lazy-creates on first call.
-    private func showDashboard() {
+    /// If `selectingNarcSessionId` is non-nil and matches an existing
+    /// terminal tab, that tab becomes the active one — used when the user
+    /// clicks a Claude notification in the panel and expects to land on
+    /// the originating session, not whatever was last selected.
+    private func showDashboard(selectingNarcSessionId narcSessionId: String? = nil) {
         if let window = dashboardWindow {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            applyTabSelectionIfMatches(narcSessionId)
             return
         }
 
@@ -419,6 +424,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.dashboardWindow = window
+        applyTabSelectionIfMatches(narcSessionId)
+    }
+
+    /// Push the desired tab selection into the manager. Resolved match-by-match
+    /// so we don't clobber the user's current selection if the notification's
+    /// session no longer exists in the workspace (e.g. external iTerm session).
+    private func applyTabSelectionIfMatches(_ narcSessionId: String?) {
+        guard let raw = narcSessionId,
+              let uuid = UUID(uuidString: raw),
+              terminalManager.sessions.contains(where: { $0.id == uuid }) else {
+            return
+        }
+        // Defer one runloop turn so DashboardView has wired its onAppear /
+        // onChange before we mutate; otherwise the very-first-summon path
+        // would set selectedId before the view subscribed.
+        DispatchQueue.main.async { [weak self] in
+            self?.terminalManager.selectedId = uuid
+        }
     }
 
     private func hideDashboard() {

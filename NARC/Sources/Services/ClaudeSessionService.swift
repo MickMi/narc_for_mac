@@ -200,6 +200,7 @@ class ClaudeSessionService: ObservableObject {
             let context = json["context"] as? String
             let approval = PendingApproval(
                 sessionId: sessionId,
+                narcSessionId: narcSessionId,
                 tool: tool ?? "Unknown",
                 toolInput: toolInput,
                 cwd: cwd,
@@ -218,6 +219,7 @@ class ClaudeSessionService: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 let notification = ClaudeNotification(
                     sessionId: sessionId,
+                    narcSessionId: narcSessionId,
                     type: .stopped,
                     message: "会话等待输入",
                     cwd: cwd,
@@ -234,6 +236,7 @@ class ClaudeSessionService: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 let notification = ClaudeNotification(
                     sessionId: sessionId,
+                    narcSessionId: narcSessionId,
                     type: .error,
                     message: message ?? "执行出错",
                     cwd: cwd,
@@ -414,6 +417,10 @@ enum ClaudeStatus: String {
 struct PendingApproval: Identifiable {
     let id = UUID()
     let sessionId: String
+    /// Workspace tab UUID (NARC_SESSION_ID env var) — present when this
+    /// approval came from a terminal NARC itself spawned in the Dashboard.
+    /// Lets us jump straight to the right tab when the user taps the row.
+    let narcSessionId: String?
     let tool: String
     let toolInput: [String: Any]?
     let cwd: String?
@@ -464,8 +471,7 @@ struct PendingApproval: Identifiable {
     }
 
     var projectName: String {
-        guard let cwd = cwd else { return "?" }
-        return (cwd as NSString).lastPathComponent
+        return ClaudeProjectName.from(cwd: cwd)
     }
 
     /// True if this is a tool permission request (Bash/Edit/Write) that can be Allow/Deny'd.
@@ -479,6 +485,10 @@ struct PendingApproval: Identifiable {
 struct ClaudeNotification: Identifiable {
     let id = UUID()
     let sessionId: String
+    /// Workspace tab UUID (NARC_SESSION_ID env var) — same role as on
+    /// PendingApproval: lets the panel row jump straight to the matching
+    /// tab in the Dashboard.
+    let narcSessionId: String?
     let type: NotificationType
     let message: String
     let cwd: String?
@@ -492,8 +502,58 @@ struct ClaudeNotification: Identifiable {
     }
 
     var projectName: String {
-        guard let cwd = cwd else { return "?" }
-        return (cwd as NSString).lastPathComponent
+        return ClaudeProjectName.from(cwd: cwd)
+    }
+}
+
+// MARK: - Project name resolver
+
+/// Derives a meaningful "what should we call this Claude session in the UI"
+/// label from a raw `cwd`. The naive `lastPathComponent` approach displays
+/// the user's home folder as their *username* — i.e. a session running in
+/// `/Users/mickmi` shows as "mickmi · 会话等待输入" which looks like
+/// nonsense ("who is mickmi? a person? a project?").
+///
+/// Resolution order:
+/// 1. nil cwd → "?"
+/// 2. cwd == $HOME → "Home"
+/// 3. cwd inside a git repo → repo folder name (the dir that contains .git)
+/// 4. cwd looks like ~/<segment>/<rest> → second-to-last segment for context
+/// 5. fallback → cwd's last path component
+enum ClaudeProjectName {
+    static func from(cwd: String?) -> String {
+        guard let cwd = cwd, !cwd.isEmpty else { return "?" }
+
+        let home = NSHomeDirectory()
+        if cwd == home { return "Home" }
+
+        if let repoName = gitRepoName(startingAt: cwd) {
+            return repoName
+        }
+
+        let last = (cwd as NSString).lastPathComponent
+        // Final fallback: last segment of the path.
+        return last.isEmpty ? cwd : last
+    }
+
+    /// Walk up from `path` looking for a `.git` directory; if found return
+    /// the *containing* directory's name. Capped at 8 hops so a misconfigured
+    /// path doesn't traverse the whole disk.
+    private static func gitRepoName(startingAt path: String) -> String? {
+        var current = (path as NSString).standardizingPath
+        let fm = FileManager.default
+        for _ in 0..<8 {
+            let gitPath = (current as NSString).appendingPathComponent(".git")
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: gitPath, isDirectory: &isDir) {
+                return (current as NSString).lastPathComponent
+            }
+            let parent = (current as NSString).deletingLastPathComponent
+            // Reached root
+            if parent == current || parent.isEmpty || parent == "/" { return nil }
+            current = parent
+        }
+        return nil
     }
 }
 

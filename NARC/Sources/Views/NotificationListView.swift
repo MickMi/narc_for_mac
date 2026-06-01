@@ -9,8 +9,11 @@ struct NotificationListView: View {
     @ObservedObject var claudeService: ClaudeSessionService
     var onClose: () -> Void
     /// Called when the user clicks a Claude row — opens the standalone
-    /// Dashboard so they can see the relevant terminal session.
-    var onOpenDashboard: () -> Void
+    /// Dashboard so they can see the relevant terminal session. The string
+    /// is the workspace tab UUID (NARC_SESSION_ID) when known, so the
+    /// Dashboard can jump straight to the right tab; nil means "just open
+    /// / front the window".
+    var onOpenDashboard: (String?) -> Void
     /// The screen where NARC's floating widget is located.
     var narcScreen: NSScreen?
     /// Keyboard selection state for ↑↓ navigation.
@@ -51,7 +54,7 @@ struct NotificationListView: View {
                                         // User wants to handle it in the terminal.
                                         // Close socket so CLI prompt takes over.
                                         claudeService.dismissApproval(approval)
-                                        onOpenDashboard()
+                                        onOpenDashboard(approval.narcSessionId)
                                     },
                                     onDismiss: {
                                         claudeService.dismissApproval(approval)
@@ -66,7 +69,7 @@ struct NotificationListView: View {
                                     notification: notification,
                                     onTap: {
                                         claudeService.dismissNotification(notification.id)
-                                        onOpenDashboard()
+                                        onOpenDashboard(notification.narcSessionId)
                                     },
                                     onDismiss: {
                                         claudeService.dismissNotification(notification.id)
