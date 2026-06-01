@@ -39,6 +39,14 @@ struct DashboardView: View {
                 selectedSessionId = terminals.sessions.last?.id
             }
         }
+        .onChange(of: selectedSessionId) { _, newValue in
+            // Push selection into the manager so it knows which tab's
+            // unseen-change flag to clear and which tabs to flag-on.
+            terminals.selectedId = newValue
+        }
+        .onAppear {
+            terminals.selectedId = selectedSessionId
+        }
     }
 
     // MARK: - Toolbar
@@ -58,6 +66,11 @@ struct DashboardView: View {
 
             Spacer()
 
+            // Smart-paste hint — keeps the ⌘⇧V shortcut discoverable. Without
+            // this strip the feature is invisible (we can't add an item to the
+            // Edit menu without going Catalyst-style menu builder).
+            smartPasteHint
+
             Button(action: spawnShell) {
                 HStack(spacing: NarcSpacing.xs) {
                     Image(systemName: "plus")
@@ -73,6 +86,28 @@ struct DashboardView: View {
         }
         .padding(.horizontal, NarcSpacing.lg)
         .padding(.vertical, NarcSpacing.sm)
+    }
+
+    /// Permanent affordance reminding the user that ⌘⇧V exists and what it
+    /// does. macOS doesn't surface the shortcut anywhere else (we're not using
+    /// the Edit menu), so without this hint the feature would be undiscoverable.
+    private var smartPasteHint: some View {
+        HStack(spacing: NarcSpacing.xs) {
+            Image(systemName: "doc.on.clipboard")
+                .font(.system(size: 10))
+            Text("⌘⇧V")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .padding(.horizontal, NarcSpacing.xs)
+                .padding(.vertical, 1)
+                .background(
+                    RoundedRectangle(cornerRadius: NarcRadius.xs)
+                        .fill(Color.narcSurfaceMuted)
+                )
+            Text("智能粘贴")
+                .font(.narcCaption)
+        }
+        .foregroundStyle(Color.narcTextMuted)
+        .help("从 VS Code / Slack 粘贴代码时，⌘⇧V 自动剥掉每行最前面的公共缩进；普通 ⌘V 保持原样不变。")
     }
 
     // MARK: - Left Column (Tab list)
@@ -181,39 +216,88 @@ struct TerminalTabRow: View {
     @State private var isHovering = false
     @State private var isEditing = false
     @State private var editText = ""
+    @State private var attentionPulse = false
     @FocusState private var titleFieldFocused: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: NarcSpacing.sm) {
-            // Status dot — claude state if known, else alive/dead.
-            Circle()
-                .fill(statusDotColor)
-                .frame(width: 8, height: 8)
-                .padding(.top, 5)
+        HStack(alignment: .top, spacing: 0) {
+            // Left attention bar — slim vertical accent for needs-attention
+            // tabs. This is the primary "look here" cue per the design
+            // decision that the sidebar is the only notification surface.
+            attentionBar
 
-            VStack(alignment: .leading, spacing: 2) {
-                titleLine
-                metaLine
-                claudeBadge
+            HStack(alignment: .top, spacing: NarcSpacing.sm) {
+                // Status dot — claude state if known, else alive/dead.
+                Circle()
+                    .fill(statusDotColor)
+                    .frame(width: 8, height: 8)
+                    .padding(.top, 5)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    titleLine
+                    metaLine
+                    claudeBadge
+                }
+
+                Spacer(minLength: 0)
+
+                if isHovering && !isEditing {
+                    actionButtons
+                } else if session.hasUnseenChange && !isSelected {
+                    // Unseen indicator — appears when the claude state
+                    // changed while user was on a different tab. Cleared
+                    // automatically by TerminalSessionManager.selectedId
+                    // when the user switches to this tab.
+                    unseenDot
+                }
             }
-
-            Spacer(minLength: 0)
-
-            if isHovering && !isEditing {
-                actionButtons
-            }
+            .padding(.horizontal, NarcSpacing.md)
+            .padding(.vertical, NarcSpacing.sm)
         }
-        .padding(.horizontal, NarcSpacing.md)
-        .padding(.vertical, NarcSpacing.sm)
         .background(rowBackground)
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .onTapGesture {
             if !isEditing { onTap() }
         }
+        .onAppear {
+            if needsAttention { attentionPulse.toggle() }
+        }
+        .onChange(of: needsAttention) { _, nowAttention in
+            if nowAttention { attentionPulse.toggle() }
+        }
     }
 
     // MARK: - Pieces
+
+    @ViewBuilder
+    private var attentionBar: some View {
+        if needsAttention {
+            Rectangle()
+                .fill(Color.narcDanger)
+                .frame(width: 3)
+                .opacity(attentionPulse ? 1.0 : 0.4)
+                .animation(
+                    .easeInOut(duration: 1.0).repeatForever(autoreverses: true),
+                    value: attentionPulse
+                )
+        } else {
+            // Reserve the same 3pt gutter so titles never shift horizontally
+            // when a tab toggles between attention / non-attention states.
+            Color.clear.frame(width: 3)
+        }
+    }
+
+    private var unseenDot: some View {
+        Circle()
+            .fill(Color.narcDanger)
+            .frame(width: 8, height: 8)
+            .overlay(
+                Circle()
+                    .strokeBorder(Color.white.opacity(0.85), lineWidth: 1)
+            )
+            .help("此标签页在你离开后状态有变化")
+    }
 
     @ViewBuilder
     private var titleLine: some View {
