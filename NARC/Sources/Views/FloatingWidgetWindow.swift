@@ -1,10 +1,35 @@
 import Cocoa
 
-/// A transparent NSView that accepts the first mouse click even when the window is inactive.
-/// This prevents macOS from "eating" the first click on a non-key window.
-private class FirstMouseView: NSView {
+/// A transparent NSView that accepts the first mouse click even when the window is inactive,
+/// AND restricts the window's hit-test region to the visible 48pt circle area in the
+/// center of the panel. The 40pt of transparent padding around the circle (which exists
+/// to give SwiftUI's drop shadow room to render — see FloatingWidgetView) must be
+/// click-through, otherwise the "empty space" around the widget would steal clicks
+/// from whatever app is below.
+private final class FirstMouseView: NSView {
+    /// Side length of the visible widget in the center of the canvas.
+    var visibleSize: CGFloat = 48
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         return true
+    }
+
+    /// Only the central `visibleSize × visibleSize` bbox is hit-testable.
+    /// Clicks in the outer transparent shadow region pass through to the
+    /// window/app below.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // `point` is in the superview's coordinate system. The contentView
+        // has no superview, so it's already in window coords.
+        let local = superview.map { convert(point, from: $0) } ?? point
+        let inset = (bounds.width - visibleSize) / 2
+        let visibleRect = NSRect(
+            x: bounds.minX + inset,
+            y: bounds.minY + inset,
+            width: visibleSize,
+            height: visibleSize
+        )
+        guard visibleRect.contains(local) else { return nil }
+        return super.hitTest(point)
     }
 }
 
@@ -17,6 +42,12 @@ private class FirstMouseView: NSView {
 /// - `hasShadow = false` because the SwiftUI view supplies its own dual-layer
 ///   drop shadow per spec §6.
 ///
+/// Sized 128×128 even though the visible widget is 48×48: SwiftUI's
+/// `.shadow(radius: 32)` is rendered into the host layer and clips to the
+/// host's frame, so we need 40pt of transparent padding on each side for
+/// the shadow to render fully (otherwise it leaves a hard rectangular halo
+/// at the edge — the "方框" bug).
+///
 /// Handles the "first click eaten" problem on macOS:
 /// When the app is not the frontmost application, the first click on a `nonactivatingPanel`
 /// is consumed by the system to activate the window, and SwiftUI's `.onTapGesture` never fires.
@@ -25,6 +56,11 @@ private class FirstMouseView: NSView {
 /// that don't move significantly (< 5pt). This bypasses SwiftUI's gesture system entirely
 /// for the initial tap, ensuring the first click always works.
 final class FloatingWidgetWindow: NSPanel {
+
+    /// Side length of the full panel (visible widget + transparent shadow padding).
+    static let canvasSize: CGFloat = 128
+    /// Side length of the visible (clickable) widget area.
+    static let widgetSize: CGFloat = 48
 
     /// Called whenever the window is moved (e.g. by dragging).
     var onWindowMoved: (() -> Void)?
@@ -59,7 +95,11 @@ final class FloatingWidgetWindow: NSPanel {
 
     init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 48, height: 48),
+            contentRect: NSRect(
+                x: 0, y: 0,
+                width: FloatingWidgetWindow.canvasSize,
+                height: FloatingWidgetWindow.canvasSize
+            ),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false

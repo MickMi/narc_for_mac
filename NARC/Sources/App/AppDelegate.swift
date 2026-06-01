@@ -167,14 +167,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             dragState: widgetDragState
         )
 
+        // The panel canvas is 128×128 (visible 48pt circle + 40pt of
+        // transparent shadow padding on each side). The hostingView fills
+        // the full canvas; only the central 48pt is hit-testable thanks to
+        // FirstMouseView.hitTest. Without this padding, SwiftUI's drop
+        // shadow gets clipped at the host's frame edge and shows up as a
+        // hard rectangular halo around the circle (the "方框" bug).
+        let canvas = FloatingWidgetWindow.canvasSize
+        let widgetSide = FloatingWidgetWindow.widgetSize
+        let widgetInset = (canvas - widgetSide) / 2  // 40pt
+
         let hostingView = NSHostingView(rootView: widgetView)
-        hostingView.frame = NSRect(x: 0, y: 0, width: 48, height: 48)
-        // Force the hosting view's backing layer to be transparent — without
-        // this, NSHostingView can render an opaque default fill that shows up
-        // as a square chrome around the round widget on some macOS versions.
-        hostingView.wantsLayer = true
-        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
-        hostingView.layer?.isOpaque = false
+        hostingView.frame = NSRect(x: 0, y: 0, width: canvas, height: canvas)
         // Force the hosting view's backing layer to be transparent — without
         // this, NSHostingView can render an opaque default fill that shows up
         // as a square chrome around the round widget on some macOS versions.
@@ -182,13 +186,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         hostingView.layer?.isOpaque = false
 
-        // Position: bottom-right corner of the screen with the mouse cursor
-        // This ensures the widget appears on the screen the user is actively using
+        // Position: bottom-right corner of the screen with the mouse cursor.
+        // We want the visible CIRCLE (not the panel frame) to sit at
+        // `(maxX - widgetSide - 20, minY + 80)`. Since the circle is centered
+        // inside the 128pt canvas with `widgetInset` of transparent padding
+        // on each side, shift the panel origin by `-widgetInset` on both axes.
         let mouseLocation = NSEvent.mouseLocation
         let activeScreen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main
         let screenFrame = activeScreen?.visibleFrame ?? .zero
-        let widgetX = screenFrame.maxX - 48 - 20
-        let widgetY = screenFrame.minY + 80
+        let widgetX = screenFrame.maxX - widgetSide - 20 - widgetInset
+        let widgetY = screenFrame.minY + 80 - widgetInset
 
         // Spec §7: window configuration is fully encapsulated in FloatingWidgetWindow.init().
         let window = FloatingWidgetWindow()
@@ -256,13 +263,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let screenFrame = screen.visibleFrame
 
+        // The widget panel is 128×128 with a 40pt transparent padding around
+        // the visible 48pt circle. To place the popup adjacent to the visible
+        // circle (not the invisible frame edge), strip the inset.
+        let widgetInset = (FloatingWidgetWindow.canvasSize - FloatingWidgetWindow.widgetSize) / 2
+        let visibleTop = widgetFrame.maxY - widgetInset
+        let visibleBottom = widgetFrame.minY + widgetInset
+
         // Default: panel above the widget, centered horizontally
         var panelX = widgetFrame.midX - panelWidth / 2
-        var panelY = widgetFrame.maxY + 8
+        var panelY = visibleTop + 8
 
         // If panel would go above the screen, show it below the widget
         if panelY + panelHeight > screenFrame.maxY {
-            panelY = widgetFrame.minY - panelHeight - 8
+            panelY = visibleBottom - panelHeight - 8
         }
 
         // Clamp horizontal position to screen bounds
@@ -317,8 +331,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             appMonitor: appMonitor,
             windowManager: windowManager,
             pinnedWindowService: pinnedWindowService,
+            claudeService: claudeService,
             onClose: { [weak self] in self?.hidePanel() },
             onOpenPreferences: { [weak self] in self?.openPreferences() },
+            onOpenDashboard: { [weak self] in
+                self?.hidePanel()
+                self?.showDashboard()
+            },
             narcScreen: narcScreen,
             keyboardSelection: keyboardSelection
         )

@@ -44,10 +44,34 @@ struct FloatingWidgetContainer: View {
 
 // MARK: - 4. Public View (spec §6)
 
+/// Total canvas size including transparent shadow padding.
+///
+/// SwiftUI's `.shadow(radius: 32, y: 12)` is rendered into the host's backing
+/// layer. When the host (`NSHostingView`) is sized exactly to the visible
+/// widget (48×48), the layer clips the shadow at the frame boundary, leaving
+/// a hard rectangular halo right at the edge of the circle — the exact bug
+/// the user kept reporting as "圆角方块/方框". Giving the canvas a 40pt
+/// transparent margin on each side lets the shadow render fully and the
+/// rounded "cushion" effect from the spec actually shows up.
+let floatingWidgetCanvasSize: CGFloat = 128
+let floatingWidgetVisibleSize: CGFloat = 48
+
 struct FloatingWidgetView: View {
     let state: FloatingWidgetState
 
     var body: some View {
+        widget
+            // Outer canvas — only used to give the inner shadow breathing room.
+            // The widget itself stays 48pt; the surrounding 40pt is fully
+            // transparent and click-through (see FloatingWidgetWindow.hitTest).
+            .frame(
+                width: floatingWidgetCanvasSize,
+                height: floatingWidgetCanvasSize,
+                alignment: .center
+            )
+    }
+
+    private var widget: some View {
         ZStack(alignment: .topTrailing) {
             // Root is a real Circle view filled with .regularMaterial — this
             // guarantees there is no square chrome anywhere. (Spec §6 used
@@ -57,7 +81,7 @@ struct FloatingWidgetView: View {
             // widget. A real Circle as the root avoids that entirely.)
             Circle()
                 .fill(.regularMaterial)
-                .frame(width: 48, height: 48)
+                .frame(width: floatingWidgetVisibleSize, height: floatingWidgetVisibleSize)
                 .overlay {
                     HaloInnerView(state: state)
                         .clipShape(Circle())
@@ -73,17 +97,18 @@ struct FloatingWidgetView: View {
                 .shadow(color: .black.opacity(0.12), radius: 32, y: 12)
 
             // Badge — sibling of the Circle, NOT inside its overlay, so the
-            // capsule overflows the 48pt circle's top-right corner.
+            // capsule overflows the 48pt circle's top-right corner. Per design
+            // ref, badge sits mostly OUTSIDE the circle (~70% out).
             if case .hasNotification(let count) = state {
                 FloatingBadgeView(count: count)
-                    .offset(x: 3, y: -3)
+                    .offset(x: 6, y: -6)
                     .transition(
                         .scale(scale: 0)
                             .animation(.spring(response: 0.4, dampingFraction: 0.6))
                     )
             }
         }
-        .frame(width: 48, height: 48)
+        .frame(width: floatingWidgetVisibleSize, height: floatingWidgetVisibleSize)
         .scaleEffect(state == .dragging ? 1.08 : 1.0)
         .rotationEffect(.degrees(state == .dragging ? -3 : 0))
         .shadow(

@@ -6,8 +6,13 @@ struct PanelView: View {
     @ObservedObject var appMonitor: AppMonitorService
     @ObservedObject var windowManager: WindowManagerService
     @ObservedObject var pinnedWindowService: PinnedWindowService
+    @ObservedObject var claudeService: ClaudeSessionService
     var onClose: () -> Void
     var onOpenPreferences: () -> Void
+    /// Open the standalone Claude Dashboard window. Used when the user clicks
+    /// a Claude notification / pending-approval row in the panel — they want
+    /// to jump to the relevant terminal session.
+    var onOpenDashboard: () -> Void
     /// The screen where NARC's floating widget is located.
     var narcScreen: NSScreen?
     /// Keyboard selection state for ↑↓ navigation.
@@ -42,7 +47,9 @@ struct PanelView: View {
                     NotificationListView(
                         appMonitor: appMonitor,
                         pinnedWindowService: pinnedWindowService,
+                        claudeService: claudeService,
                         onClose: onClose,
+                        onOpenDashboard: onOpenDashboard,
                         narcScreen: narcScreen,
                         keyboardSelection: keyboardSelection
                     )
