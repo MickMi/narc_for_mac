@@ -16,8 +16,6 @@ struct DashboardView: View {
     @ObservedObject var claudeService: ClaudeSessionService
     @ObservedObject var terminals: TerminalSessionManager
 
-    @State private var selectedSessionId: UUID?
-
     var body: some View {
         VStack(spacing: 0) {
             toolbar
@@ -35,17 +33,16 @@ struct DashboardView: View {
         .onChange(of: terminals.sessions.map(\.id)) { _, _ in
             // Auto-select the first session when none is selected, or pick the
             // newest one if our selection just got removed.
-            if selectedSessionId == nil || !terminals.sessions.contains(where: { $0.id == selectedSessionId }) {
-                selectedSessionId = terminals.sessions.last?.id
+            if terminals.selectedId == nil
+                || !terminals.sessions.contains(where: { $0.id == terminals.selectedId }) {
+                terminals.selectedId = terminals.sessions.last?.id
             }
         }
-        .onChange(of: selectedSessionId) { _, newValue in
-            // Push selection into the manager so it knows which tab's
-            // unseen-change flag to clear and which tabs to flag-on.
-            terminals.selectedId = newValue
-        }
         .onAppear {
-            terminals.selectedId = selectedSessionId
+            // Cold start: if we have sessions but no selection, default to last.
+            if terminals.selectedId == nil {
+                terminals.selectedId = terminals.sessions.last?.id
+            }
         }
     }
 
@@ -118,8 +115,8 @@ struct DashboardView: View {
                 ForEach(terminals.sessions) { session in
                     TerminalTabRow(
                         session: session,
-                        isSelected: session.id == selectedSessionId,
-                        onTap: { selectedSessionId = session.id },
+                        isSelected: session.id == terminals.selectedId,
+                        onTap: { terminals.selectedId = session.id },
                         onClose: { terminals.remove(session.id) },
                         onRename: { newTitle in terminals.rename(id: session.id, title: newTitle) }
                     )
@@ -145,13 +142,13 @@ struct DashboardView: View {
                         args: session.args,
                         cwd: session.cwd,
                         narcSessionId: session.id.uuidString,
-                        isSelected: session.id == selectedSessionId,
+                        isSelected: session.id == terminals.selectedId,
                         onExit: { _ in terminals.markDead(session.id) },
                         onTitleChange: { title in terminals.updateAutoTitle(id: session.id, title: title) },
                         onCwdChange: { cwd in terminals.updateCwd(id: session.id, cwd: cwd) }
                     )
-                    .opacity(session.id == selectedSessionId ? 1 : 0)
-                    .allowsHitTesting(session.id == selectedSessionId)
+                    .opacity(session.id == terminals.selectedId ? 1 : 0)
+                    .allowsHitTesting(session.id == terminals.selectedId)
                 }
             }
             .background(Color.narcBackground)
@@ -195,7 +192,7 @@ struct DashboardView: View {
     private func spawnShell() {
         let cwd = NSHomeDirectory()
         let id = terminals.newSession(cwd: cwd)
-        selectedSessionId = id
+        terminals.selectedId = id
     }
 }
 

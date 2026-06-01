@@ -12,7 +12,9 @@ struct PanelView: View {
     /// Open the standalone Claude Dashboard window. Used when the user clicks
     /// a Claude notification / pending-approval row in the panel — they want
     /// to jump to the relevant terminal session.
-    var onOpenDashboard: () -> Void
+    /// - Parameter narcSessionId: when non-nil, the Dashboard should switch to
+    ///   the matching terminal tab. nil = just open / front the window.
+    var onOpenDashboard: (String?) -> Void
     /// The screen where NARC's floating widget is located.
     var narcScreen: NSScreen?
     /// Keyboard selection state for ↑↓ navigation.
