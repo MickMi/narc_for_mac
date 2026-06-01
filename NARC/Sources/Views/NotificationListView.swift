@@ -1,19 +1,16 @@
 import SwiftUI
 
 /// Notification tab content: list of monitored apps and pinned windows.
-/// Divided into three sections: Claude (hook-driven attention items),
-/// Monitoring (IM badge tracking) and Pinned (user-pinned windows).
+/// Two sections: Monitoring (IM badge tracking) and Pinned (user-pinned windows).
+///
+/// **Scope note**: Claude events live elsewhere now — external Claude (iTerm /
+/// Terminal.app sessions) are surfaced as standalone stacked toasts, and
+/// Workspace Claude lives in the Dashboard sidebar. The panel intentionally
+/// stays "ambient awareness" only.
 struct NotificationListView: View {
     @ObservedObject var appMonitor: AppMonitorService
     @ObservedObject var pinnedWindowService: PinnedWindowService
-    @ObservedObject var claudeService: ClaudeSessionService
     var onClose: () -> Void
-    /// Called when the user clicks a Claude row — opens the standalone
-    /// Dashboard so they can see the relevant terminal session. The string
-    /// is the workspace tab UUID (NARC_SESSION_ID) when known, so the
-    /// Dashboard can jump straight to the right tab; nil means "just open
-    /// / front the window".
-    var onOpenDashboard: (String?) -> Void
     /// The screen where NARC's floating widget is located.
     var narcScreen: NSScreen?
     /// Keyboard selection state for ↑↓ navigation.
@@ -22,11 +19,8 @@ struct NotificationListView: View {
     var body: some View {
         let enabledStates = appMonitor.filteredStates
         let pinnedWindows = pinnedWindowService.pinnedWindows
-        let claudeApprovals = claudeService.pendingApprovals
-        let claudeNotifications = claudeService.notifications
-        let hasClaude = !claudeApprovals.isEmpty || !claudeNotifications.isEmpty
 
-        if enabledStates.isEmpty && pinnedWindows.isEmpty && !hasClaude {
+        if enabledStates.isEmpty && pinnedWindows.isEmpty {
             emptyState
         } else {
             // Build flat index for keyboard navigation:
@@ -38,52 +32,6 @@ struct NotificationListView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        // MARK: - Claude Section
-                        // Renders pending approvals (actionable, top priority)
-                        // and notifications (Stop / StopFailure events). Without
-                        // this section, the widget badge could increment for a
-                        // Claude event but the user would have no UI to see or
-                        // dismiss it — the "红点消不掉" bug.
-                        if hasClaude {
-                            SectionHeader(title: "Claude", icon: "sparkles")
-
-                            ForEach(claudeApprovals) { approval in
-                                ClaudeApprovalRow(
-                                    approval: approval,
-                                    onTap: {
-                                        // User wants to handle it in the terminal.
-                                        // Close socket so CLI prompt takes over.
-                                        claudeService.dismissApproval(approval)
-                                        onOpenDashboard(approval.narcSessionId)
-                                    },
-                                    onDismiss: {
-                                        claudeService.dismissApproval(approval)
-                                    }
-                                )
-
-                                Divider().padding(.leading, 56)
-                            }
-
-                            ForEach(claudeNotifications) { notification in
-                                ClaudeNotificationRow(
-                                    notification: notification,
-                                    onTap: {
-                                        claudeService.dismissNotification(notification.id)
-                                        onOpenDashboard(notification.narcSessionId)
-                                    },
-                                    onDismiss: {
-                                        claudeService.dismissNotification(notification.id)
-                                    }
-                                )
-
-                                Divider().padding(.leading, 56)
-                            }
-
-                            if !enabledStates.isEmpty || !pinnedWindows.isEmpty {
-                                Divider().padding(.vertical, 4)
-                            }
-                        }
-
                         // MARK: - Monitoring Section
                         if !enabledStates.isEmpty {
                             SectionHeader(title: "Monitoring", icon: "bell.fill")
@@ -490,150 +438,5 @@ struct AppItemRow: View {
                     .foregroundStyle(Color.narcSuccess)
             }
         }
-    }
-}
-
-// MARK: - Claude Approval Row
-
-/// One pending-approval row in the Claude section. Tap → open Dashboard
-/// (and let the user respond in the terminal, since the inline approve/deny
-/// flow lives in ClaudeApprovalView/Dashboard, not in this compact panel).
-/// Dismiss (✕) closes the socket so the CLI's own prompt takes over.
-struct ClaudeApprovalRow: View {
-    let approval: PendingApproval
-    var onTap: () -> Void
-    var onDismiss: () -> Void
-
-    @State private var isHovering = false
-
-    var body: some View {
-        HStack(spacing: NarcSpacing.md) {
-            ZStack {
-                Circle()
-                    .fill(Color.narcDanger.opacity(0.18))
-                    .frame(width: NarcSize.appIconSize, height: NarcSize.appIconSize)
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Color.narcDanger)
-            }
-
-            VStack(alignment: .leading, spacing: NarcSpacing.xxs) {
-                HStack(spacing: NarcSpacing.xs) {
-                    Text("待审批")
-                        .font(.narcSubtitle)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(Color.narcText)
-                    Text(approval.tool)
-                        .font(.narcCaption)
-                        .foregroundStyle(Color.narcDanger)
-                        .padding(.horizontal, NarcSpacing.xs)
-                        .padding(.vertical, 1)
-                        .background(
-                            Capsule()
-                                .fill(Color.narcDanger.opacity(0.14))
-                        )
-                }
-
-                Text(approval.commandDescription)
-                    .font(.narcCaption)
-                    .foregroundStyle(Color.narcTextMuted)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-
-            Spacer(minLength: 0)
-
-            Button(action: onDismiss) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.narcBody)
-                    .foregroundStyle(Color.narcTextMuted)
-            }
-            .buttonStyle(.plain)
-            .help("交给终端处理")
-        }
-        .padding(.horizontal, NarcSpacing.lg)
-        .padding(.vertical, NarcSpacing.sm)
-        .background(
-            isHovering
-                ? Color.narcDanger.opacity(0.10)
-                : Color.narcDanger.opacity(0.06)
-        )
-        .contentShape(Rectangle())
-        .onHover { isHovering = $0 }
-        .onTapGesture { onTap() }
-    }
-}
-
-// MARK: - Claude Notification Row
-
-/// One Claude notification (Stop / StopFailure / Stale). Tap → dismiss + open
-/// Dashboard. ✕ → dismiss only.
-struct ClaudeNotificationRow: View {
-    let notification: ClaudeNotification
-    var onTap: () -> Void
-    var onDismiss: () -> Void
-
-    @State private var isHovering = false
-
-    var body: some View {
-        HStack(spacing: NarcSpacing.md) {
-            ZStack {
-                Circle()
-                    .fill(iconBackground)
-                    .frame(width: NarcSize.appIconSize, height: NarcSize.appIconSize)
-                Image(systemName: iconName)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(iconColor)
-            }
-
-            VStack(alignment: .leading, spacing: NarcSpacing.xxs) {
-                Text(notification.projectName)
-                    .font(.narcSubtitle)
-                    .fontWeight(.medium)
-                    .foregroundStyle(Color.narcText)
-                    .lineLimit(1)
-                Text(notification.message)
-                    .font(.narcCaption)
-                    .foregroundStyle(Color.narcTextMuted)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-
-            Spacer(minLength: 0)
-
-            Button(action: onDismiss) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.narcBody)
-                    .foregroundStyle(Color.narcTextMuted)
-            }
-            .buttonStyle(.plain)
-            .help("清除")
-        }
-        .padding(.horizontal, NarcSpacing.lg)
-        .padding(.vertical, NarcSpacing.sm)
-        .background(isHovering ? Color.narcSurfaceMuted : Color.clear)
-        .contentShape(Rectangle())
-        .onHover { isHovering = $0 }
-        .onTapGesture { onTap() }
-    }
-
-    private var iconName: String {
-        switch notification.type {
-        case .stopped: return "checkmark.circle.fill"
-        case .error:   return "xmark.octagon.fill"
-        case .stale:   return "clock.fill"
-        }
-    }
-
-    private var iconColor: Color {
-        switch notification.type {
-        case .stopped: return Color.narcSuccess
-        case .error:   return Color.narcDanger
-        case .stale:   return Color.narcWarn
-        }
-    }
-
-    private var iconBackground: Color {
-        iconColor.opacity(0.18)
     }
 }

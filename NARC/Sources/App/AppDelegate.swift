@@ -67,25 +67,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self else { return }
             switch reason {
             case .permissionRequest:
-                // Permission requests ALWAYS show toast — user must act
-                self.showApprovalPanel()
+                // Toast stack is driven by Combine subscription on
+                // claudeService.$pendingApprovals (see setupToastSync). All
+                // we still need to do here is post a system-level notification
+                // so the user can be pulled back from another app or Space.
                 self.postPermissionRequestNotification()
             case .error:
-                // Errors show toast — something went wrong
-                self.showApprovalPanel()
                 self.postErrorNotification()
             case .stopped(let sessionId):
-                // Stop events (waiting for input): no toast (likely already in
-                // terminal), but post a system notification so the user can be
-                // pulled back from another app/space.
+                // Stop events (waiting for input): no toast for workspace-
+                // internal sessions (sidebar handles them). External sessions
+                // get a toast via syncToasts. Either way post the system
+                // notification so the user can be pulled back.
                 self.postStoppedNotification(sessionId: sessionId)
             case .stale(let sessionId):
-                // Stale sessions (>60s no activity) show toast — might be stuck
-                self.showApprovalPanel()
                 self.postStaleNotification(sessionId: sessionId)
             }
         }
         claudeService.startListening()
+
+        // Wire the stacked-toast reconciliation against the service's data.
+        // Must come AFTER claudeService.startListening so the Combine
+        // subscription gets the initial state, and BEFORE the dashboard is
+        // shown so any startup-replayed events surface immediately.
+        setupToastSync()
 
         // Register for macOS system notifications (for click-to-jump support)
         setupSystemNotifications()
@@ -331,13 +336,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             appMonitor: appMonitor,
             windowManager: windowManager,
             pinnedWindowService: pinnedWindowService,
-            claudeService: claudeService,
             onClose: { [weak self] in self?.hidePanel() },
             onOpenPreferences: { [weak self] in self?.openPreferences() },
-            onOpenDashboard: { [weak self] narcSessionId in
-                self?.hidePanel()
-                self?.showDashboard(selectingNarcSessionId: narcSessionId)
-            },
             narcScreen: narcScreen,
             keyboardSelection: keyboardSelection
         )
@@ -448,34 +448,51 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         dashboardWindow?.orderOut(nil)
     }
 
-    // MARK: - Claude Toast Notification
+    // MARK: - Claude Toast Notification (stacked)
 
-    private var toastWindow: NSPanel?
-    private var toastCancellables = Set<AnyCancellable>()
-    private var currentToastEvent: ClaudeToastEvent?
+    /// Per-session toast windows. Each external Claude event (running outside
+    /// the workspace) gets its own dismissable popup at the top-right of the
+    /// active screen. Workspace-internal events are NOT shown here — they
+    /// surface via the Dashboard sidebar's attention bar instead.
+    private var toastWindows: [String: NSPanel] = [:]
+    /// Mirror of the events behind toastWindows, kept so we can rebuild a
+    /// toast in place when its underlying event is updated.
+    private var toastEvents: [String: ClaudeToastEvent] = [:]
+    /// Combine subscription that drives `syncToasts()` whenever the service's
+    /// pendingApprovals or notifications arrays change (new event arrives,
+    /// user dismisses one, etc.).
+    private var toastSyncCancellables = Set<AnyCancellable>()
 
-    /// Show a toast notification at the top-right of the focused screen.
-    /// Stays visible until the user clicks (jump) or the event resolves.
-    private func showApprovalPanel() {
-        // Build toast event from the latest pending item
-        guard let event = buildToastEvent() else { return }
-
-        // If toast is already showing the same session, just update
-        if let current = currentToastEvent, current.sessionId == event.sessionId,
-           let window = toastWindow, window.isVisible {
-            // Update in-place (the binding will handle it if we rebuild)
-            updateToast(event: event)
-            return
+    /// Hook the service's published arrays so toasts auto-add/auto-remove
+    /// when the underlying data changes. Called once from
+    /// `applicationDidFinishLaunching`.
+    private func setupToastSync() {
+        Publishers.CombineLatest(
+            claudeService.$pendingApprovals,
+            claudeService.$notifications
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] _, _ in
+            self?.syncToasts()
         }
-
-        currentToastEvent = event
-        presentToast(event: event)
+        .store(in: &toastSyncCancellables)
     }
 
-    private func buildToastEvent() -> ClaudeToastEvent? {
-        // Priority: pending approvals first, then notifications
-        if let approval = claudeService.pendingApprovals.last {
-            return ClaudeToastEvent(
+    /// Reconcile the on-screen toast stack against the desired state derived
+    /// from `claudeService`. Adds toasts for new external events, removes
+    /// toasts whose underlying event is gone, repositions surviving ones.
+    private func syncToasts() {
+        // Build desired event list — external only (narcSessionId == nil).
+        // Order: pending approvals first (more urgent), then notifications,
+        // both newest-first so the freshest event sits on top of the stack.
+        var desired: [(String, ClaudeToastEvent)] = []
+
+        for approval in claudeService.pendingApprovals.reversed() where approval.narcSessionId == nil {
+            // Use a per-event key so two pending approvals from the same session
+            // (rare but possible for sequential PreToolUse + PermissionRequest)
+            // both get their own toast.
+            let key = "approval:\(approval.id.uuidString)"
+            let event = ClaudeToastEvent(
                 type: .permissionRequest,
                 projectName: approval.projectName,
                 detail: approval.commandDescription,
@@ -484,16 +501,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 sessionId: approval.sessionId,
                 approval: approval
             )
+            desired.append((key, event))
         }
 
-        if let notification = claudeService.notifications.last {
+        for notification in claudeService.notifications.reversed() where notification.narcSessionId == nil {
+            let key = "notif:\(notification.id.uuidString)"
             let type: ClaudeToastEvent.EventType
             switch notification.type {
             case .stopped: type = .waitingForInput
-            case .error: type = .error
-            case .stale: type = .stale
+            case .error:   type = .error
+            case .stale:   type = .stale
             }
-            return ClaudeToastEvent(
+            let event = ClaudeToastEvent(
                 type: type,
                 projectName: notification.projectName,
                 detail: notification.message,
@@ -501,40 +520,58 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 cwd: notification.cwd,
                 sessionId: notification.sessionId
             )
+            desired.append((key, event))
         }
 
-        return nil
+        let desiredKeys = Set(desired.map { $0.0 })
+
+        // Remove toasts whose underlying event is gone (user dismissed it
+        // via Allow/Deny/Jump, or it timed out, etc.).
+        for (key, panel) in toastWindows where !desiredKeys.contains(key) {
+            panel.orderOut(nil)
+            toastWindows[key] = nil
+            toastEvents[key] = nil
+        }
+
+        // Add missing toasts and reposition all surviving ones.
+        for (index, (key, event)) in desired.enumerated() {
+            if let existing = toastWindows[key] {
+                repositionToast(existing, atIndex: index)
+                toastEvents[key] = event
+            } else {
+                presentToast(event: event, key: key, atIndex: index)
+                NSSound.beep()
+            }
+        }
     }
 
-    private func presentToast(event: ClaudeToastEvent) {
-        // Determine the focused screen (where mouse cursor is)
+    private func presentToast(event: ClaudeToastEvent, key: String, atIndex index: Int) {
         let mouseLocation = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main!
         let screenFrame = screen.visibleFrame
 
-        // Position: top-right corner with padding
         let toastWidth: CGFloat = 380
         let toastHeight: CGFloat = 56
+        let gap: CGFloat = 8
         let x = screenFrame.maxX - toastWidth - 16
-        let y = screenFrame.maxY - toastHeight - 12
+        let y = screenFrame.maxY - toastHeight - 12 - CGFloat(index) * (toastHeight + gap)
 
         let toastView = ClaudeToastView(
             event: event,
             onJump: { [weak self] in
-                self?.jumpToClaudeTerminal(event: event)
+                self?.jumpToClaudeTerminal(event: event, key: key)
             },
             onDismiss: { [weak self] in
-                self?.hideToast()
+                self?.dismissToast(key: key, alsoClearService: true)
             },
             onAllow: event.approval != nil ? { [weak self] in
                 guard let approval = event.approval else { return }
                 self?.claudeService.approve(approval)
-                self?.hideToast()
+                // syncToasts will fire when pendingApprovals changes
             } : nil,
             onDeny: event.approval != nil ? { [weak self] in
                 guard let approval = event.approval else { return }
                 self?.claudeService.deny(approval)
-                self?.hideToast()
             } : nil
         )
 
@@ -557,64 +594,73 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
         panel.orderFrontRegardless()
 
-        // Clean up old toast
-        toastWindow?.orderOut(nil)
-        self.toastWindow = panel
+        toastWindows[key] = panel
+        toastEvents[key] = event
 
-        // Subscribe to approval cleanup — hide toast when resolved
-        toastCancellables.removeAll()
-        claudeService.$pendingApprovals
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] approvals in
-                guard let self = self, let current = self.currentToastEvent else { return }
-                // If this was a permission request and it's been resolved, hide
-                if current.type == .permissionRequest {
-                    if !approvals.contains(where: { $0.sessionId == current.sessionId }) {
-                        self.hideToast()
-                    }
+        print("[NARC] 🔔 Toast: \(event.statusLabel) — \(event.projectName) [stack #\(index)]")
+    }
+
+    private func repositionToast(_ panel: NSPanel, atIndex index: Int) {
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main!
+        let screenFrame = screen.visibleFrame
+
+        let toastWidth: CGFloat = 380
+        let toastHeight: CGFloat = 56
+        let gap: CGFloat = 8
+        let x = screenFrame.maxX - toastWidth - 16
+        let y = screenFrame.maxY - toastHeight - 12 - CGFloat(index) * (toastHeight + gap)
+
+        panel.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    /// Hide a single toast by key. If `alsoClearService` is true, also clear
+    /// the underlying event from the service so the floating-widget badge
+    /// count reflects the dismissal.
+    private func dismissToast(key: String, alsoClearService: Bool) {
+        guard let event = toastEvents[key] else { return }
+
+        if alsoClearService {
+            // Strip the prefix to figure out which array to mutate.
+            if key.hasPrefix("approval:"), let approval = event.approval {
+                // Closing the socket lets the CLI prompt take over.
+                claudeService.dismissApproval(approval)
+            } else if key.hasPrefix("notif:") {
+                // Find the matching notification by sessionId + timestamp-ish.
+                if let notif = claudeService.notifications.first(where: { $0.sessionId == event.sessionId }) {
+                    claudeService.dismissNotification(notif.id)
                 }
             }
-            .store(in: &toastCancellables)
-
-        // Play a subtle sound
-        NSSound.beep()
-        print("[NARC] 🔔 Toast notification: \(event.statusLabel) — \(event.projectName)")
-    }
-
-    private func updateToast(event: ClaudeToastEvent) {
-        currentToastEvent = event
-        // Re-present with updated content
-        hideToast()
-        presentToast(event: event)
-    }
-
-    private func hideToast() {
-        toastWindow?.orderOut(nil)
-        toastWindow = nil
-        currentToastEvent = nil
-        toastCancellables.removeAll()
-    }
-
-    /// Jump to the Claude Code terminal window.
-    /// Delegates to TerminalJumper for AppleScript orchestration.
-    private func jumpToClaudeTerminal(event: ClaudeToastEvent) {
-        // Dismiss the approval if it's a permission request (user will handle in terminal)
-        if let approval = event.approval {
-            claudeService.dismissApproval(approval)
         }
+        // syncToasts will pick up the array change and tear down the window.
+        // For an immediate visual response if nothing else fires, also remove
+        // the panel here.
+        toastWindows[key]?.orderOut(nil)
+        toastWindows[key] = nil
+        toastEvents[key] = nil
+    }
 
-        hideToast()
+    private func hideAllToasts() {
+        for panel in toastWindows.values {
+            panel.orderOut(nil)
+        }
+        toastWindows.removeAll()
+        toastEvents.removeAll()
+    }
+
+    /// Jump to the source Claude Code terminal window — only ever called for
+    /// external events (workspace-internal events don't get toasts in the
+    /// first place). Delegates to TerminalJumper for AppleScript orchestration.
+    private func jumpToClaudeTerminal(event: ClaudeToastEvent, key: String) {
+        // If the event was an approval, dismissing closes the socket so the
+        // CLI prompt takes over — the user wants to handle it in the terminal.
+        dismissToast(key: key, alsoClearService: true)
 
         TerminalJumper.jump(
             tty: event.tty,
             cwd: event.cwd,
             projectName: event.projectName
         )
-    }
-
-    // Keep old method name for compatibility but it's now unused
-    private func hideApprovalPanel() {
-        hideToast()
     }
 
     // MARK: - System Notifications

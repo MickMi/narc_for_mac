@@ -33,8 +33,14 @@ struct FloatingWidgetContainer: View {
     private var computedState: FloatingWidgetState {
         if dragState.isDragging { return .dragging }
         let imCount = appMonitor.totalBadgeCount
-        let claudeCount = claudeService.pendingApprovals.count + claudeService.notifications.count
-        let total = imCount + claudeCount
+        // Only count *external* Claude events (running outside the workspace,
+        // typically in iTerm / Terminal.app). Workspace-internal events surface
+        // via the Dashboard sidebar's own attention machinery — putting them
+        // in the floating-widget badge would double-count and route the user
+        // to the wrong place when they tap.
+        let externalClaudeCount = claudeService.pendingApprovals.filter { $0.narcSessionId == nil }.count
+            + claudeService.notifications.filter { $0.narcSessionId == nil }.count
+        let total = imCount + externalClaudeCount
         if total > 0 {
             return .hasNotification(count: total)
         }
