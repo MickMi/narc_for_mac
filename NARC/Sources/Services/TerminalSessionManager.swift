@@ -24,6 +24,11 @@ struct OwnedSession: Identifiable, Equatable {
     /// Set by TerminalSessionManager subscribing to ClaudeSessionService and
     /// matching by NARC_SESSION_ID. nil means "no claude detected in this tab".
     var claude: ClaudeSession?
+    /// True when this tab's claude state changed while the user wasn't looking
+    /// at it — driving the small red dot in the sidebar so the user can scan
+    /// "what happened while I was on another tab". Cleared automatically when
+    /// the user switches to this tab.
+    var hasUnseenChange: Bool = false
 
     /// What to show in the tab. User rename wins, otherwise auto title.
     var displayTitle: String { userTitle ?? autoTitle }
@@ -37,6 +42,12 @@ struct OwnedSession: Identifiable, Equatable {
 /// All mutations must happen on the main thread (SwiftUI/AppKit constraint).
 final class TerminalSessionManager: ObservableObject {
     @Published var sessions: [OwnedSession] = []
+    /// The session currently visible in the right pane. Drives the unseen-change
+    /// flag — when this changes, the just-selected session's flag clears.
+    /// DashboardView keeps this in sync with its `@State selectedSessionId`.
+    @Published var selectedId: UUID? {
+        didSet { clearUnseen(for: selectedId) }
+    }
     /// Monotonically increasing label counter. Reset only on app launch.
     private var nextSequenceNumber = 1
     /// Subscription to ClaudeSessionService, used to enrich tabs with claude state.
@@ -63,7 +74,27 @@ final class TerminalSessionManager: ObservableObject {
         }
         for idx in sessions.indices {
             let key = sessions[idx].id.uuidString
-            sessions[idx].claude = byNarcId[key]
+            let oldStatus = sessions[idx].claude?.status
+            let newClaude = byNarcId[key]
+            sessions[idx].claude = newClaude
+
+            // Flag tabs whose status meaningfully changed while the user was
+            // looking at a different tab. We deliberately ignore transitions
+            // *into* "processing" / "running tool" because those fire dozens
+            // of times per turn and would constantly bounce the dot.
+            let newStatus = newClaude?.status
+            if let new = newStatus, new != oldStatus,
+               sessions[idx].id != selectedId,
+               new == .waitingForApproval || new == .waitingForInput || new == .ended {
+                sessions[idx].hasUnseenChange = true
+            }
+        }
+    }
+
+    private func clearUnseen(for id: UUID?) {
+        guard let id = id, let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
+        if sessions[idx].hasUnseenChange {
+            sessions[idx].hasUnseenChange = false
         }
     }
 

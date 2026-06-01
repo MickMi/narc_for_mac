@@ -2,6 +2,90 @@ import SwiftUI
 import SwiftTerm
 import AppKit
 
+// MARK: - SwiftTerm subclass with smart-paste
+
+/// Subclass of `LocalProcessTerminalView` that adds **⌘⇧V smart paste**.
+///
+/// VS Code (and Slack / Notion / Confluence) preserve the *absolute* indent
+/// of every line when copying a code block, so pasting a function body
+/// taken from inside a class lands in the terminal as
+///
+///     ␣␣␣␣␣␣␣␣func foo() {
+///     ␣␣␣␣␣␣␣␣    return 1
+///     ␣␣␣␣␣␣␣␣}
+///
+/// — every line padded with the original 8-space indent. Re-yanking that
+/// out of a Claude prompt (or shell history) produces broken code.
+///
+/// `⌘⇧V` here strips the **minimum common leading-space prefix** of all
+/// non-blank lines before the paste reaches the PTY. `⌘V` is unchanged —
+/// users who *want* the absolute indent (rare: yaml, indented Markdown)
+/// can still get it.
+final class NarcTerminalView: LocalProcessTerminalView {
+
+    /// AppKit dispatches keyboard shortcuts through `performKeyEquivalent`
+    /// *before* `keyDown`, which means we can intercept ⌘⇧V without
+    /// fighting SwiftTerm's own key handling.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let isCmdShiftV = mods == [.command, .shift]
+            && event.charactersIgnoringModifiers?.lowercased() == "v"
+
+        if isCmdShiftV {
+            performSmartPaste()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    private func performSmartPaste() {
+        let pasteboard = NSPasteboard.general
+        guard let raw = pasteboard.string(forType: .string), !raw.isEmpty else { return }
+        let dedented = NarcTerminalView.dedent(raw)
+
+        // Reuse SwiftTerm's existing paste flow (which handles bracketed
+        // paste / focus / multi-byte safety) by temporarily swapping the
+        // clipboard, calling super.paste, then restoring. This keeps the
+        // user's clipboard content intact for downstream apps.
+        pasteboard.clearContents()
+        pasteboard.setString(dedented, forType: .string)
+        super.paste(self)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            pasteboard.clearContents()
+            pasteboard.setString(raw, forType: .string)
+        }
+    }
+
+    /// Strip the minimum common leading-space indent from every non-blank
+    /// line. Tabs are treated as a single column (we don't try to be clever
+    /// about tab-width — most editors ship with space-indent default).
+    /// Blank / whitespace-only lines are preserved verbatim so trailing
+    /// blank lines in code blocks don't get rewritten.
+    static func dedent(_ s: String) -> String {
+        let lines = s.components(separatedBy: "\n")
+        let nonBlank = lines.filter { !$0.allSatisfy({ $0 == " " || $0 == "\t" }) }
+        guard !nonBlank.isEmpty else { return s }
+
+        let leading = nonBlank.map { line -> Int in
+            var n = 0
+            for ch in line {
+                if ch == " " { n += 1 } else { break }
+            }
+            return n
+        }
+        let minIndent = leading.min() ?? 0
+        guard minIndent > 0 else { return s }
+
+        return lines.map { line -> String in
+            if line.allSatisfy({ $0 == " " || $0 == "\t" }) { return line }
+            // Safe because every non-blank line has at least minIndent leading spaces.
+            return String(line.dropFirst(minIndent))
+        }.joined(separator: "\n")
+    }
+}
+
+// MARK: - SwiftUI wrapper
+
 /// SwiftUI wrapper around SwiftTerm's `LocalProcessTerminalView`.
 /// Forks the given executable with a PTY and renders xterm-compatible output.
 ///
@@ -44,8 +128,8 @@ struct TerminalPaneView: NSViewRepresentable {
         self.onCwdChange = onCwdChange
     }
 
-    func makeNSView(context: Context) -> LocalProcessTerminalView {
-        let term = LocalProcessTerminalView(frame: .zero)
+    func makeNSView(context: Context) -> NarcTerminalView {
+        let term = NarcTerminalView(frame: .zero)
         term.processDelegate = context.coordinator
         term.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
 
@@ -84,7 +168,7 @@ struct TerminalPaneView: NSViewRepresentable {
         return term
     }
 
-    func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {
+    func updateNSView(_ nsView: NarcTerminalView, context: Context) {
         // Re-focus when this pane becomes the selected one (tab switch).
         // SwiftUI calls updateNSView on every state change; we only act when
         // we're the newly active pane and we don't already hold focus.
