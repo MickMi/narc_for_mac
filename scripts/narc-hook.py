@@ -91,6 +91,7 @@ def main():
         "cwd": cwd,
         "tty": tty,
         "pid": os.getppid(),  # Claude Code's PID — NARC can trace to terminal window
+        "narc_session_id": os.environ.get("NARC_SESSION_ID"),  # set by NARC workspace pane; nil for external terminals
     }
 
     if event == "PermissionRequest":
