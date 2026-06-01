@@ -727,6 +727,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// - Local monitor: catches events when NARC is the active app (returns nil to consume)
     /// - Global monitor: catches events when another app is active (panel is floating/non-activating)
     /// Handles: ↑↓ to select items, ↩ to activate, Esc to close, number keys for quick access.
+    ///
+    /// CRITICAL: addLocalMonitorForEvents is APP-WIDE — it sees keyDown for every
+    /// window in NARC, not just the panel. We must short-circuit when the event
+    /// is targeted at any other window (Dashboard, Preferences, etc.) so the
+    /// terminal in the workspace can receive characters like `-` and Enter that
+    /// happen to overlap with our numeric/Return shortcuts.
     private func installKeyEventMonitor(narcScreen: NSScreen?) {
         removeKeyEventMonitor()
 
@@ -764,7 +770,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 return true
 
-            case 18...29: // Number keys 1-0 (keyCodes 18=1, 19=2, ..., 29=0)
+            // Number keys 1–0. Listed explicitly because the surrounding
+            // keyCodes 24 (`=`) and 27 (`-`) are NOT digits and must not be
+            // swallowed — otherwise typing a `-` in the workspace terminal
+            // when the panel happens to still be visible would silently
+            // disappear.
+            case 18, 19, 20, 21, 22, 23, 25, 26, 28, 29:
                 let numberMap: [UInt16: Int] = [
                     18: 0, 19: 1, 20: 2, 21: 3, 23: 4,
                     22: 5, 26: 6, 28: 7, 25: 8, 29: 9
@@ -779,8 +790,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Local monitor: when NARC is the active app, consume the event (return nil)
-        keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        // Local monitor: when NARC is the active app, consume the event (return nil).
+        // The `event.window === panelWindow` guard is critical — without it,
+        // every keyDown into the Dashboard window would be filtered through
+        // panel-navigation logic (and Enter / `-` / `=` etc. would get eaten).
+        keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self,
+                  event.window === self.panelWindow else {
+                return event  // event is for a different window — leave it alone
+            }
             if handleKeyEvent(event) {
                 return nil // consume the event
             }
@@ -790,6 +808,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Global monitor: when another app is active, the panel is still visible
         // (floating non-activating panel). We need this to handle keyboard input
         // after the user has activated another window and then re-opened the panel.
+        // No window-target guard here because global monitor only fires for events
+        // outside NARC entirely; observation-only (cannot consume).
         globalKeyEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
             _ = handleKeyEvent(event)
         }
