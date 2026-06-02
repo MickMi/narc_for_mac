@@ -108,6 +108,20 @@ def main():
                 print(json.dumps({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": response.get("reason", "Denied via NARC")}}}))
                 sys.exit(0)
         sys.exit(0)
+    elif event == "PreToolUse":
+        # claude is about to run a tool — show "running_tool" state with tool name
+        payload["status"] = "running_tool"
+        payload["tool"] = data.get("tool_name", "")
+        payload["tool_input"] = data.get("tool_input", {})
+    elif event == "PostToolUse":
+        # tool finished — claude is back to processing (may run more tools or wrap up)
+        payload["status"] = "processing"
+        payload["tool"] = data.get("tool_name", "")
+    elif event == "UserPromptSubmit":
+        # user just sent a prompt — claude starts thinking
+        payload["status"] = "processing"
+    elif event == "PreCompact":
+        payload["status"] = "compacting"
     elif event in ("Stop", "SubagentStop"):
         payload["status"] = "waiting_for_input"
     elif event == "StopFailure":
