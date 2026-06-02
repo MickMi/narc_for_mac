@@ -113,12 +113,28 @@ struct DashboardView: View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 ForEach(terminals.sessions) { session in
+                    // Look up a pending approval whose narc_session_id matches
+                    // this tab. Strict match so external (iTerm) approvals
+                    // don't accidentally borrow a workspace tab's UI.
+                    let pendingApproval = claudeService.pendingApprovals.first {
+                        $0.narcSessionId == session.id.uuidString
+                    }
                     TerminalTabRow(
                         session: session,
                         isSelected: session.id == terminals.selectedId,
+                        approval: pendingApproval,
                         onTap: { terminals.selectedId = session.id },
                         onClose: { terminals.remove(session.id) },
-                        onRename: { newTitle in terminals.rename(id: session.id, title: newTitle) }
+                        onRename: { newTitle in terminals.rename(id: session.id, title: newTitle) },
+                        onApproveApproval: pendingApproval.map { ap in
+                            { claudeService.approve(ap) }
+                        },
+                        onDenyApproval: pendingApproval.map { ap in
+                            { claudeService.deny(ap) }
+                        },
+                        onDismissApproval: pendingApproval.map { ap in
+                            { claudeService.dismissApproval(ap) }
+                        }
                     )
                     Divider().padding(.leading, 12)
                 }
@@ -206,14 +222,26 @@ struct DashboardView: View {
 struct TerminalTabRow: View {
     let session: OwnedSession
     let isSelected: Bool
+    /// When this tab has a pending approval, the approval is threaded in here
+    /// so the row can render a ⚠️ button that pops over an inline approval
+    /// card (Allow / Deny / handle-in-terminal). nil = no popover button.
+    var approval: PendingApproval?
     var onTap: () -> Void
     var onClose: () -> Void
     var onRename: (String) -> Void
+    /// Triggered when the user taps Allow inside the popover.
+    var onApproveApproval: (() -> Void)?
+    /// Triggered when the user taps Deny inside the popover.
+    var onDenyApproval: (() -> Void)?
+    /// Triggered when the user picks "在终端处理" — closes the popover and
+    /// hands control back to the CLI prompt.
+    var onDismissApproval: (() -> Void)?
 
     @State private var isHovering = false
     @State private var isEditing = false
     @State private var editText = ""
     @State private var attentionPulse = false
+    @State private var showApprovalPopover = false
     @FocusState private var titleFieldFocused: Bool
 
     var body: some View {
@@ -238,7 +266,11 @@ struct TerminalTabRow: View {
 
                 Spacer(minLength: 0)
 
-                if isHovering && !isEditing {
+                if let approval = approval {
+                    // Approval pending → always-visible ⚠️ button so the user
+                    // can pop the inline decision card without first hovering.
+                    approvalButton(approval: approval)
+                } else if isHovering && !isEditing {
                     actionButtons
                 } else if session.hasUnseenChange && !isSelected {
                     // Unseen indicator — appears when the claude state
@@ -294,6 +326,40 @@ struct TerminalTabRow: View {
                     .strokeBorder(Color.white.opacity(0.85), lineWidth: 1)
             )
             .help("此标签页在你离开后状态有变化")
+    }
+
+    /// Always-visible ⚠️ button for tabs with a pending approval. Tapping
+    /// pops a `ApprovalPopover` anchored to the right edge of the sidebar
+    /// so the user can read the full tool / command without leaving the
+    /// Workspace and act inline.
+    private func approvalButton(approval: PendingApproval) -> some View {
+        Button {
+            showApprovalPopover.toggle()
+        } label: {
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Color.narcDanger)
+        }
+        .buttonStyle(.plain)
+        .help("查看 / 处理审批")
+        .popover(isPresented: $showApprovalPopover, arrowEdge: .trailing) {
+            ApprovalPopoverContent(
+                approval: approval,
+                projectLabel: ClaudeProjectName.from(cwd: approval.cwd),
+                onAllow: {
+                    showApprovalPopover = false
+                    onApproveApproval?()
+                },
+                onDeny: {
+                    showApprovalPopover = false
+                    onDenyApproval?()
+                },
+                onHandleInTerminal: {
+                    showApprovalPopover = false
+                    onDismissApproval?()
+                }
+            )
+        }
     }
 
     @ViewBuilder
@@ -401,31 +467,41 @@ struct TerminalTabRow: View {
     }
 
     private func claudeBadgeIcon(_ status: ClaudeStatus) -> String {
+        // 3-bucket model per product decision: processing / waiting-input /
+        // waiting-approval. Subtle differentiation inside "processing" via
+        // emoji (thinking vs tool vs compacting), but the same color.
         switch status {
         case .processing:           return "⏳"
         case .runningTool:          return "→"
+        case .compacting:           return "🗜"
         case .waitingForApproval:   return "⚠️"
         case .waitingForInput:      return "💬"
-        case .compacting:           return "🗜"
         case .ended:                return "■"
         case .unknown:              return "·"
         }
     }
 
     private func claudeBadgeText(_ claude: ClaudeSession) -> String {
+        // Subtitle reads as "what is claude doing right now" — gives the
+        // user the info they need to decide whether to interrupt.
         switch claude.status {
         case .processing:
             return "思考中"
         case .runningTool:
-            if let tool = claude.currentTool { return tool }
+            // Show the live tool name so the user sees "Bash" / "Edit: foo.swift"
+            // rather than a generic "running tool". Falls back to short label
+            // if the tool isn't known yet (race between hook events).
+            if let tool = claude.currentTool, !tool.isEmpty {
+                return Self.shortToolLabel(tool: tool, input: claude.toolInput)
+            }
             return "运行工具"
+        case .compacting:
+            return "压缩上下文"
         case .waitingForApproval:
             if let tool = claude.currentTool { return "待审批: \(tool)" }
             return "待审批"
         case .waitingForInput:
             return "等待输入"
-        case .compacting:
-            return "压缩上下文"
         case .ended:
             return "已结束"
         case .unknown:
@@ -433,13 +509,31 @@ struct TerminalTabRow: View {
         }
     }
 
+    /// Compact one-line description of a running tool. Mirrors what the
+    /// Dashboard right-pane scrollback would say.
+    private static func shortToolLabel(tool: String, input: [String: Any]?) -> String {
+        if tool == "Bash", let cmd = input?["command"] as? String {
+            let trimmed = cmd.count > 32 ? String(cmd.prefix(32)) + "…" : cmd
+            return "Bash: \(trimmed)"
+        }
+        if (tool == "Edit" || tool == "Write" || tool == "Read"),
+           let path = input?["file_path"] as? String {
+            return "\(tool): \((path as NSString).lastPathComponent)"
+        }
+        return tool
+    }
+
     private func claudeBadgeColor(_ status: ClaudeStatus) -> Color {
+        // 3-bucket color model:
+        //  - blue  = "claude is working" (processing / runningTool / compacting)
+        //  - green = "claude is waiting for you to do something light" (waitingForInput)
+        //  - red   = "claude needs explicit decision" (waitingForApproval)
+        // ended/unknown are de-emphasized (gray).
         switch status {
-        case .waitingForApproval:           return .narcDanger
-        case .processing, .runningTool:     return .narcAccent
-        case .waitingForInput:              return .narcSuccess
-        case .compacting:                   return .narcWarn
-        case .ended, .unknown:              return .narcTextFaint
+        case .waitingForApproval:                            return .narcDanger
+        case .processing, .runningTool, .compacting:         return .narcAccent
+        case .waitingForInput:                               return .narcSuccess
+        case .ended, .unknown:                               return .narcTextFaint
         }
     }
 
@@ -486,5 +580,150 @@ struct TerminalTabRow: View {
         if interval < 3600 { return "\(Int(interval / 60))m" }
         if interval < 86400 { return "\(Int(interval / 3600))h" }
         return "\(Int(interval / 86400))d"
+    }
+}
+
+// MARK: - Approval Popover
+
+/// Inline approval card popped from a tab's ⚠️ button. Shows the full tool
+/// + command/file path, plus three action buttons (Allow / Deny / handle in
+/// terminal). All three close the popover via the parent's binding.
+///
+/// `AskUserQuestion` / `Elicitation` / `SendUserMessage` are interactive
+/// tools — Allow/Deny don't apply because the actual prompt happens inside
+/// the terminal. For those we collapse to a single "去终端回答" button.
+struct ApprovalPopoverContent: View {
+    let approval: PendingApproval
+    let projectLabel: String
+    var onAllow: () -> Void
+    var onDeny: () -> Void
+    var onHandleInTerminal: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: NarcSpacing.md) {
+            header
+            commandBlock
+            buttonRow
+        }
+        .padding(NarcSpacing.lg)
+        .frame(width: 360)
+    }
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: NarcSpacing.xs) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Color.narcDanger)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("待审批")
+                    .font(.narcSubtitle)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(Color.narcText)
+                HStack(spacing: NarcSpacing.xs) {
+                    Text(projectLabel)
+                        .font(.narcCaption)
+                        .foregroundStyle(Color.narcTextMuted)
+                    Text("·")
+                        .foregroundStyle(Color.narcTextMuted)
+                    Text(approval.tool)
+                        .font(.narcCaption)
+                        .foregroundStyle(Color.narcDanger)
+                        .padding(.horizontal, NarcSpacing.xs)
+                        .padding(.vertical, 1)
+                        .background(
+                            Capsule().fill(Color.narcDanger.opacity(0.14))
+                        )
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var commandBlock: some View {
+        ScrollView {
+            Text(displayBody)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(Color.narcText)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(NarcSpacing.sm)
+                .textSelection(.enabled)
+        }
+        .frame(maxHeight: 120)
+        .background(
+            RoundedRectangle(cornerRadius: NarcRadius.sm)
+                .fill(Color.narcSurfaceMuted)
+        )
+    }
+
+    @ViewBuilder
+    private var buttonRow: some View {
+        if approval.isPermissionRequest {
+            HStack(spacing: NarcSpacing.sm) {
+                Button(action: onAllow) {
+                    Text("允许")
+                        .font(.narcCaption)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, NarcSpacing.sm)
+                        .background(Capsule().fill(Color.narcSuccess))
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.return)
+
+                Button(action: onDeny) {
+                    Text("拒绝")
+                        .font(.narcCaption)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, NarcSpacing.sm)
+                        .background(Capsule().fill(Color.narcDanger))
+                }
+                .buttonStyle(.plain)
+
+                Button(action: onHandleInTerminal) {
+                    Text("去终端处理")
+                        .font(.narcCaption)
+                        .foregroundStyle(Color.narcTextMuted)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, NarcSpacing.sm)
+                        .background(
+                            Capsule().strokeBorder(Color.narcBorder, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        } else {
+            // Interactive tools (AskUserQuestion / Elicitation / SendUserMessage)
+            // — Allow/Deny make no semantic sense, only "go answer in the terminal".
+            Button(action: onHandleInTerminal) {
+                Text("去终端回答")
+                    .font(.narcCaption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, NarcSpacing.sm)
+                    .background(Capsule().fill(Color.narcAccent))
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.return)
+        }
+    }
+
+    private var displayBody: String {
+        // Bash → full command. Edit/Write/Read → file path. Everything else
+        // → tool input as JSON-ish summary.
+        if approval.tool == "Bash", let input = approval.toolInput,
+           let cmd = input["command"] as? String {
+            return cmd
+        }
+        if let input = approval.toolInput,
+           let path = input["file_path"] as? String {
+            return path
+        }
+        if let input = approval.toolInput {
+            return input.map { "\($0.key): \($0.value)" }.joined(separator: "\n")
+        }
+        return approval.commandDescription
     }
 }
