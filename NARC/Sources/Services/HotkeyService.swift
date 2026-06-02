@@ -22,6 +22,9 @@ class HotkeyService: ObservableObject {
     /// Callback invoked when the Toggle Panel hotkey (⌃⌥N) is pressed.
     var onTogglePanelHotkeyPressed: (() -> Void)?
 
+    /// Callback invoked when the Toggle Workspace (Dashboard) hotkey (⌃⌥W) is pressed.
+    var onToggleWorkspaceHotkeyPressed: (() -> Void)?
+
     /// Callback invoked when a window layout hotkey is pressed.
     var onLayoutHotkeyPressed: ((WindowLayout) -> Void)?
 
@@ -32,10 +35,12 @@ class HotkeyService: ObservableObject {
 
     private static var pinHandler: (() -> Void)?
     private static var togglePanelHandler: (() -> Void)?
+    private static var toggleWorkspaceHandler: (() -> Void)?
     private static var layoutHandler: ((WindowLayout) -> Void)?
 
     private static let pinHotkeyID: UInt32 = 100
     private static let togglePanelHotkeyID: UInt32 = 101
+    private static let toggleWorkspaceHotkeyID: UInt32 = 102
 
     // MARK: - Accessibility Permission
 
@@ -101,6 +106,7 @@ class HotkeyService: ObservableObject {
         // Store handlers in static vars so the C callback can access them
         HotkeyService.pinHandler = { [weak self] in self?.onPinHotkeyPressed?() }
         HotkeyService.togglePanelHandler = { [weak self] in self?.onTogglePanelHotkeyPressed?() }
+        HotkeyService.toggleWorkspaceHandler = { [weak self] in self?.onToggleWorkspaceHotkeyPressed?() }
         // Layout handler does NOT use [weak self] — it must always work, even from C callbacks.
         // The onLayoutHotkeyPressed closure is set once at startup and never changes.
         let layoutCallback = self.onLayoutHotkeyPressed
@@ -123,6 +129,11 @@ class HotkeyService: ObservableObject {
 
             if id == HotkeyService.togglePanelHotkeyID {
                 DispatchQueue.main.async { HotkeyService.togglePanelHandler?() }
+                return noErr
+            }
+
+            if id == HotkeyService.toggleWorkspaceHotkeyID {
+                DispatchQueue.main.async { HotkeyService.toggleWorkspaceHandler?() }
                 return noErr
             }
 
@@ -153,6 +164,12 @@ class HotkeyService: ObservableObject {
 
         // Register Toggle Panel hotkey: ⌃⌥N
         registerHotkey(keyCode: 45, modifiers: controlOption, id: HotkeyService.togglePanelHotkeyID, label: "Toggle Panel ⌃⌥N")
+
+        // Register Toggle Workspace hotkey: ⌃⌥W (W = keyCode 13).
+        // Summons / dismisses the standalone Dashboard window — same action
+        // as right-clicking the floating widget or pressing the toolbar
+        // button in the Notification panel.
+        registerHotkey(keyCode: 13, modifiers: controlOption, id: HotkeyService.toggleWorkspaceHotkeyID, label: "Toggle Workspace ⌃⌥W")
     }
 
     /// Unregister all global hotkeys.

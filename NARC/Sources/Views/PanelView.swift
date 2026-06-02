@@ -16,6 +16,10 @@ struct PanelView: View {
     @ObservedObject var pinnedWindowService: PinnedWindowService
     var onClose: () -> Void
     var onOpenPreferences: () -> Void
+    /// Toggle the standalone Workspace (Dashboard) window. Mirrors the
+    /// `⌃⌥W` global hotkey and the right-click-on-widget gesture, so all
+    /// three entry points share identical behavior.
+    var onToggleWorkspace: () -> Void
     /// The screen where NARC's floating widget is located.
     var narcScreen: NSScreen?
     /// Keyboard selection state for ↑↓ navigation.
@@ -75,12 +79,24 @@ struct PanelView: View {
     // MARK: - Title Bar
 
     private var titleBar: some View {
-        HStack {
+        HStack(spacing: NarcSpacing.xs) {
             Text("NARC")
                 .font(.narcSubtitle)
                 .foregroundColor(.narcText)
 
             Spacer()
+
+            // Workspace toggle — mirrors ⌃⌥W and the right-click-on-widget
+            // gesture. Placed at the leftmost position of the trailing button
+            // group so it gets the most-used slot without crowding the close
+            // button.
+            Button(action: onToggleWorkspace) {
+                Image(systemName: "macwindow")
+                    .font(.narcSubtitle)
+                    .foregroundColor(.narcTextMuted)
+            }
+            .buttonStyle(.plain)
+            .help("打开 / 隐藏 Workspace（⌃⌥W）")
 
             Button(action: onOpenPreferences) {
                 Image(systemName: "gearshape")
@@ -88,6 +104,7 @@ struct PanelView: View {
                     .foregroundColor(.narcTextMuted)
             }
             .buttonStyle(.plain)
+            .help("偏好设置")
 
             Button(action: onClose) {
                 Image(systemName: "xmark")
@@ -95,7 +112,7 @@ struct PanelView: View {
                     .foregroundColor(.narcTextMuted)
             }
             .buttonStyle(.plain)
-            .padding(.leading, NarcSpacing.xs)
+            .help("关闭面板（Esc）")
         }
         .padding(.horizontal, NarcSpacing.lg)
         .padding(.vertical, NarcSpacing.md)
