@@ -57,6 +57,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyService.onTogglePanelHotkeyPressed = { [weak self] in
             self?.togglePanelAtMouseScreen()
         }
+        hotkeyService.onToggleWorkspaceHotkeyPressed = { [weak self] in
+            self?.toggleDashboard()
+        }
         hotkeyService.onLayoutHotkeyPressed = { layout in
             WindowManagerService.moveActiveWindow(to: layout)
         }
@@ -338,6 +341,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             pinnedWindowService: pinnedWindowService,
             onClose: { [weak self] in self?.hidePanel() },
             onOpenPreferences: { [weak self] in self?.openPreferences() },
+            onToggleWorkspace: { [weak self] in
+                // Hide the panel before fronting the Workspace so the user
+                // gets a clean transition rather than two overlapping windows.
+                self?.hidePanel()
+                self?.toggleDashboard()
+            },
             narcScreen: narcScreen,
             keyboardSelection: keyboardSelection
         )
