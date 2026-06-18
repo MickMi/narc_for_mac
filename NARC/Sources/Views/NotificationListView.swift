@@ -1,14 +1,22 @@
 import SwiftUI
 
-/// Notification tab content: list of monitored apps and pinned windows.
-/// Two sections: Monitoring (IM badge tracking) and Pinned (user-pinned windows).
+/// Notification tab content: list of monitored apps, external Claude events,
+/// and pinned windows. Three sections:
+/// - **Monitoring**: IM badge tracking (WeChat, WeCom, Lark, ...)
+/// - **Claude External**: pending approvals / notifications from Claude
+///   sessions that are *not* running inside a NARC workspace tab (i.e. they
+///   were launched in iTerm2 / Terminal.app / kitty / ghostty directly and
+///   are reporting via the NARC Unix socket). The list mirrors the floating
+///   widget's badge count, so the panel is no longer "less than" the badge.
+/// - **Pinned**: user-pinned windows (sticky access to a specific window).
 ///
-/// **Scope note**: Claude events live elsewhere now — external Claude (iTerm /
-/// Terminal.app sessions) are surfaced as standalone stacked toasts, and
-/// Workspace Claude lives in the Dashboard sidebar. The panel intentionally
-/// stays "ambient awareness" only.
+/// Workspace-internal Claude events (sessions NARC itself spawned in the
+/// Dashboard) still surface only in the Dashboard sidebar — this panel
+/// intentionally limits itself to *external* Claude events so we don't
+/// double-route the user.
 struct NotificationListView: View {
     @ObservedObject var appMonitor: AppMonitorService
+    @ObservedObject var claudeService: ClaudeSessionService
     @ObservedObject var pinnedWindowService: PinnedWindowService
     var onClose: () -> Void
     /// The screen where NARC's floating widget is located.
@@ -18,16 +26,22 @@ struct NotificationListView: View {
 
     var body: some View {
         let enabledStates = appMonitor.filteredStates
+        let externalEvents = ClaudeExternalEvent.collect(
+            approvals: claudeService.pendingApprovals,
+            notifications: claudeService.notifications
+        )
         let pinnedWindows = pinnedWindowService.pinnedWindows
 
-        if enabledStates.isEmpty && pinnedWindows.isEmpty {
+        if enabledStates.isEmpty && externalEvents.isEmpty && pinnedWindows.isEmpty {
             emptyState
         } else {
             // Build flat index for keyboard navigation:
-            // running monitoring apps first, then pinned windows
+            // running monitoring apps → external Claude events → pinned windows.
+            // This matches the visual section order in the body below.
             let runningStates = enabledStates.filter { $0.isRunning }
             let monitoringOffset = 0
-            let pinnedOffset = runningStates.count
+            let claudeOffset = runningStates.count
+            let pinnedOffset = claudeOffset + externalEvents.count
 
             ScrollViewReader { proxy in
                 ScrollView {
@@ -63,9 +77,45 @@ struct NotificationListView: View {
                             }
                         }
 
+                        // MARK: - Claude External Section
+                        if !externalEvents.isEmpty {
+                            if !enabledStates.isEmpty {
+                                Divider()
+                                    .padding(.vertical, 4)
+                            }
+
+                            SectionHeader(title: "Claude External", icon: "terminal.fill")
+
+                            ForEach(Array(externalEvents.enumerated()), id: \.element.id) { index, event in
+                                let kbIndex = claudeOffset + index
+                                ClaudeEventRow(
+                                    event: event,
+                                    keyboardIndex: kbIndex,
+                                    isKeyboardSelected: kbIndex == keyboardSelection.selectedIndex
+                                ) {
+                                    // Jump to the source terminal window (iTerm / Terminal.app /
+                                    // kitty / ghostty) via AppleScript. Same behavior as the
+                                    // standalone toast notifications — NARC cannot reliably
+                                    // surface an allow/deny UI for sessions it doesn't own.
+                                    TerminalJumper.jump(
+                                        tty: event.tty,
+                                        cwd: event.cwd,
+                                        projectName: event.projectName
+                                    )
+                                    onClose()
+                                }
+                                .id(kbIndex)
+
+                                if event.id != externalEvents.last?.id {
+                                    Divider()
+                                        .padding(.leading, 64)
+                                }
+                            }
+                        }
+
                         // MARK: - Pinned Section
                         if !pinnedWindows.isEmpty {
-                            if !enabledStates.isEmpty {
+                            if !enabledStates.isEmpty || !externalEvents.isEmpty {
                                 Divider()
                                     .padding(.vertical, 4)
                             }
@@ -437,6 +487,205 @@ struct AppItemRow: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(Color.narcSuccess)
             }
+        }
+    }
+}
+
+// MARK: - Claude External Event Wrapper
+
+/// Unified view-model that flattens `PendingApproval` and `ClaudeNotification`
+/// from `ClaudeSessionService` into a single row type for the panel list.
+///
+/// Only used for **external** events (those with `narcSessionId == nil`),
+/// since workspace-internal events surface in the Dashboard sidebar instead.
+/// The wrapper keeps a reference back to the originating model so the panel
+/// could later wire up allow/deny/dismiss actions without re-resolving the
+/// object from the service.
+struct ClaudeExternalEvent: Identifiable, Equatable {
+    let id: String  // Prefixed ("approval:" / "notification:") to keep ForEach keys unique
+                    // even if two source events happened to mint the same UUID.
+    let projectName: String
+    let detail: String
+    let isApproval: Bool
+    let isHighRisk: Bool
+    let toneColor: Color
+    let iconName: String
+    let tty: String?
+    let cwd: String?
+    let receivedAt: Date
+
+    /// Filter to *external* events (narcSessionId == nil) and wrap each into a
+    /// row-ready value. Approvals sort above notifications; within each
+    /// group, most-recent-first. Pinned order:
+    /// 1. High-risk approvals (e.g. `rm -rf`, `git push --force`)
+    /// 2. Other approvals
+    /// 3. Stopped notifications
+    /// 4. Error notifications
+    /// 5. Stale notifications
+    static func collect(
+        approvals: [PendingApproval],
+        notifications: [ClaudeNotification]
+    ) -> [ClaudeExternalEvent] {
+        let externalApprovals = approvals
+            .filter { $0.narcSessionId == nil }
+            .map(ClaudeExternalEvent.init(approval:))
+        let externalNotifications = notifications
+            .filter { $0.narcSessionId == nil }
+            .map(ClaudeExternalEvent.init(notification:))
+        return (externalApprovals + externalNotifications).sorted { lhs, rhs in
+            // Approvals always above notifications — they require an action.
+            if lhs.isApproval != rhs.isApproval { return lhs.isApproval }
+            // High-risk approvals rise to the top of their group.
+            if lhs.isHighRisk != rhs.isHighRisk { return lhs.isHighRisk }
+            // Within the same kind/risk class, newest first.
+            return lhs.receivedAt > rhs.receivedAt
+        }
+    }
+
+    init(approval: PendingApproval) {
+        self.id = "approval:\(approval.id)"
+        self.projectName = approval.projectName
+        self.detail = approval.commandDescription
+        self.isApproval = true
+        self.isHighRisk = approval.isHighRisk
+        // High-risk approvals get a danger tint to match ClaudeApprovalView's
+        // visual language; benign approvals use the standard warn tone.
+        self.toneColor = approval.isHighRisk ? .narcDanger : .narcWarn
+        self.iconName = "exclamationmark.triangle.fill"
+        self.tty = approval.tty
+        self.cwd = approval.cwd
+        self.receivedAt = approval.receivedAt
+    }
+
+    init(notification: ClaudeNotification) {
+        self.id = "notification:\(notification.id)"
+        self.projectName = notification.projectName
+        self.detail = notification.message
+        self.isApproval = false
+        self.isHighRisk = false
+        switch notification.type {
+        case .stopped:
+            self.toneColor = .narcInfo
+            self.iconName = "bubble.left.fill"
+        case .error:
+            self.toneColor = .narcDanger
+            self.iconName = "xmark.circle.fill"
+        case .stale:
+            self.toneColor = .narcWarn
+            self.iconName = "clock.fill"
+        }
+        self.tty = notification.tty
+        self.cwd = notification.cwd
+        self.receivedAt = notification.timestamp
+    }
+}
+
+// MARK: - Claude Event Row
+
+/// A single external Claude event row in the notification list.
+/// Visually mirrors `AppItemRow` (icon | name+detail | status), but the right
+/// rail is a tone-colored dot that turns into a "jump" hint on hover, since
+/// tapping the row invokes `TerminalJumper.jump(...)` to switch focus to
+/// the source terminal window — not NARC's own window.
+struct ClaudeEventRow: View {
+    let event: ClaudeExternalEvent
+    /// Keyboard navigation index (0-based). -1 means not navigable.
+    var keyboardIndex: Int = -1
+    /// Whether this row is currently selected via keyboard.
+    var isKeyboardSelected: Bool = false
+    var onTap: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: NarcSpacing.md) {
+            // Keyboard shortcut number badge (matches AppItemRow / PinnedWindowRow)
+            if keyboardIndex >= 0 && keyboardIndex < 10 {
+                Text("\(keyboardIndex + 1 < 10 ? keyboardIndex + 1 : 0)")
+                    .font(.narcMonoTiny)
+                    .foregroundColor(isKeyboardSelected ? .white : Color.narcTextMuted)
+                    .frame(width: NarcSize.keyBadgeSize, height: NarcSize.keyBadgeSize)
+                    .background(
+                        RoundedRectangle(cornerRadius: NarcRadius.xs)
+                            .fill(isKeyboardSelected ? Color.narcAccent : Color.narcSurfaceMuted)
+                    )
+            }
+
+            // Status icon (matches ClaudeToastView's circular tinted icon)
+            ZStack {
+                Circle()
+                    .fill(event.toneColor.opacity(0.15))
+                Image(systemName: event.iconName)
+                    .font(.system(size: 13))
+                    .foregroundStyle(event.toneColor)
+            }
+            .frame(width: NarcSize.appIconSize, height: NarcSize.appIconSize)
+
+            // Project name + detail
+            VStack(alignment: .leading, spacing: NarcSpacing.xxs) {
+                HStack(spacing: NarcSpacing.xs) {
+                    Text(event.projectName)
+                        .font(.narcSubtitle)
+                        .fontWeight(event.isHighRisk ? .bold : .medium)
+                        .foregroundStyle(Color.narcText)
+                        .lineLimit(1)
+
+                    // High-risk marker — visible at-a-glance even without hover.
+                    if event.isHighRisk {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.narcCaption)
+                            .foregroundStyle(Color.narcDanger)
+                    }
+
+                    // Approvals get an explicit "需要确认" pill so users can
+                    // tell at a glance these need action, vs. informational
+                    // notifications that don't.
+                    if event.isApproval {
+                        Text("需确认")
+                            .font(.narcMonoTiny)
+                            .foregroundStyle(Color.narcTextMuted)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(
+                                RoundedRectangle(cornerRadius: NarcRadius.xs)
+                                    .fill(Color.narcSurfaceMuted)
+                            )
+                    }
+                }
+
+                Text(event.detail)
+                    .font(.narcCaption)
+                    .foregroundStyle(Color.narcTextMuted)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            Spacer()
+
+            // Right rail: tone dot at rest, jump hint on hover
+            if isHovering {
+                Image(systemName: "arrow.up.right.square")
+                    .font(.narcCaption)
+                    .foregroundStyle(Color.narcTextMuted)
+                    .help("跳转到终端窗口")
+            } else {
+                Circle()
+                    .fill(event.toneColor)
+                    .frame(width: NarcSize.statusDotSmall, height: NarcSize.statusDotSmall)
+            }
+        }
+        .padding(.horizontal, NarcSpacing.lg)
+        .padding(.vertical, NarcSpacing.sm)
+        .background(
+            isKeyboardSelected ? Color.narcAccent.opacity(0.14) :
+            (isHovering ? Color.narcSurfaceMuted : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovering = hovering
+        }
+        .onTapGesture {
+            onTap()
         }
     }
 }

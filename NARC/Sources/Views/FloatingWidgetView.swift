@@ -115,6 +115,7 @@ struct FloatingWidgetView: View {
             }
         }
         .frame(width: floatingWidgetVisibleSize, height: floatingWidgetVisibleSize)
+        .compositingGroup()
         .scaleEffect(state == .dragging ? 1.08 : 1.0)
         .rotationEffect(.degrees(state == .dragging ? -3 : 0))
         .shadow(

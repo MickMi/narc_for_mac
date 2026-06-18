@@ -70,21 +70,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self else { return }
             switch reason {
             case .permissionRequest:
-                // Toast stack is driven by Combine subscription on
-                // claudeService.$pendingApprovals (see setupToastSync). All
-                // we still need to do here is post a system-level notification
-                // so the user can be pulled back from another app or Space.
-                self.postPermissionRequestNotification()
+                // 审批（高风险工具）：内部→侧边栏 ⚠️ popover；外部→syncToasts 弹 toast。
+                // 两者都不发系统通知、不响声（降噪）。
+                break
+            case .interactiveQuestion(let sessionId, _):
+                // 回答（阻塞型提问）：中等强度 = 响一声（按会话去重）。内外一致。
+                self.playAnswerSound(for: sessionId)
+            case .stopped:
+                // 等待输入：弱提示。内部→侧边栏静默点；外部→仅 badge 计数。
+                // 不发系统通知、不弹 toast、不响声。
+                break
             case .error:
                 self.postErrorNotification()
-            case .stopped(let sessionId):
-                // Stop events (waiting for input): no toast for workspace-
-                // internal sessions (sidebar handles them). External sessions
-                // get a toast via syncToasts. Either way post the system
-                // notification so the user can be pulled back.
-                self.postStoppedNotification(sessionId: sessionId)
-            case .stale(let sessionId):
-                self.postStaleNotification(sessionId: sessionId)
+            case .stale:
+                // 卡住：仅侧边栏体现，不打扰
+                break
             }
         }
         claudeService.startListening()
@@ -337,6 +337,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let panelContentView = PanelView(
             appMonitor: appMonitor,
+            claudeService: claudeService,
             windowManager: windowManager,
             pinnedWindowService: pinnedWindowService,
             onClose: { [weak self] in self?.hidePanel() },
@@ -472,6 +473,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// user dismisses one, etc.).
     private var toastSyncCancellables = Set<AnyCancellable>()
 
+    /// 仅"回答"态(阻塞型提问)触发的轻音效，按会话 5s 去重，避免连响成噪音。
+    private var lastAnswerSoundAt: [String: Date] = [:]
+    private func playAnswerSound(for sessionId: String) {
+        let now = Date()
+        if let last = lastAnswerSoundAt[sessionId], now.timeIntervalSince(last) < 5 { return }
+        lastAnswerSoundAt[sessionId] = now
+        if let sound = NSSound(named: "Glass") {
+            sound.play()
+        } else {
+            NSSound.beep()
+        }
+    }
+
     /// Hook the service's published arrays so toasts auto-add/auto-remove
     /// when the underlying data changes. Called once from
     /// `applicationDidFinishLaunching`.
@@ -513,7 +527,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             desired.append((key, event))
         }
 
-        for notification in claudeService.notifications.reversed() where notification.narcSessionId == nil {
+        for notification in claudeService.notifications.reversed()
+            where notification.narcSessionId == nil && notification.type == .error {
             let key = "notif:\(notification.id.uuidString)"
             let type: ClaudeToastEvent.EventType
             switch notification.type {
@@ -549,7 +564,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 toastEvents[key] = event
             } else {
                 presentToast(event: event, key: key, atIndex: index)
-                NSSound.beep()
             }
         }
     }
@@ -747,31 +761,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func postPermissionRequestNotification() {
-        guard let approval = claudeService.pendingApprovals.last else { return }
-        postNotification(
-            title: "⚠️ Claude 需要审批 — \(approval.projectName)",
-            body: "\(approval.tool): \(approval.commandDescription)",
-            tty: approval.tty,
-            cwd: approval.cwd,
-            projectName: approval.projectName,
-            sessionId: approval.sessionId
-        )
-    }
-
-    private func postStoppedNotification(sessionId: String) {
-        guard let session = claudeService.sessions[sessionId] else { return }
-        postNotification(
-            title: "💬 Claude 等待输入 — \(session.projectName ?? "?")",
-            body: "Session idle — click to jump",
-            tty: session.tty,
-            cwd: session.cwd,
-            projectName: session.projectName,
-            sessionId: sessionId,
-            sound: nil  // quiet — user is likely already in the terminal
-        )
-    }
-
     private func postErrorNotification() {
         guard let notif = claudeService.notifications.last else { return }
         postNotification(
@@ -781,18 +770,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             cwd: notif.cwd,
             projectName: notif.projectName,
             sessionId: notif.sessionId
-        )
-    }
-
-    private func postStaleNotification(sessionId: String) {
-        guard let session = claudeService.sessions[sessionId] else { return }
-        postNotification(
-            title: "⏱ Claude 长时间无响应 — \(session.projectName ?? "?")",
-            body: "Last activity: \(session.statusDescription)",
-            tty: session.tty,
-            cwd: session.cwd,
-            projectName: session.projectName,
-            sessionId: sessionId
         )
     }
 

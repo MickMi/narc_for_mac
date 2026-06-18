@@ -39,7 +39,8 @@ class ClaudeSessionService: ObservableObject {
     var onAttentionNeeded: ((AttentionReason) -> Void)?
 
     enum AttentionReason {
-        case permissionRequest
+        case permissionRequest(narcSessionId: String?)      // 审批：Bash/Edit/Write 等高风险工具
+        case interactiveQuestion(sessionId: String, narcSessionId: String?)  // 回答：AskUserQuestion/Elicitation
         case stopped(sessionId: String)
         case error(sessionId: String, message: String?)
         case stale(sessionId: String)
@@ -211,7 +212,11 @@ class ClaudeSessionService: ObservableObject {
             )
             DispatchQueue.main.async { [weak self] in
                 self?.pendingApprovals.append(approval)
-                self?.onAttentionNeeded?(.permissionRequest)
+                if approval.isPermissionRequest {
+                    self?.onAttentionNeeded?(.permissionRequest(narcSessionId: narcSessionId))
+                } else {
+                    self?.onAttentionNeeded?(.interactiveQuestion(sessionId: sessionId, narcSessionId: narcSessionId))
+                }
             }
             return  // Keep socket open for response
 

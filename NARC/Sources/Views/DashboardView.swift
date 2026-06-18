@@ -63,11 +63,6 @@ struct DashboardView: View {
 
             Spacer()
 
-            // Smart-paste hint — keeps the ⌘⇧V shortcut discoverable. Without
-            // this strip the feature is invisible (we can't add an item to the
-            // Edit menu without going Catalyst-style menu builder).
-            smartPasteHint
-
             Button(action: spawnShell) {
                 HStack(spacing: NarcSpacing.xs) {
                     Image(systemName: "plus")
@@ -83,35 +78,14 @@ struct DashboardView: View {
         }
         .padding(.horizontal, NarcSpacing.lg)
         .padding(.vertical, NarcSpacing.sm)
-    }
-
-    /// Permanent affordance reminding the user that ⌘⇧V exists and what it
-    /// does. macOS doesn't surface the shortcut anywhere else (we're not using
-    /// the Edit menu), so without this hint the feature would be undiscoverable.
-    private var smartPasteHint: some View {
-        HStack(spacing: NarcSpacing.xs) {
-            Image(systemName: "doc.on.clipboard")
-                .font(.system(size: 10))
-            Text("⌘⇧V")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .padding(.horizontal, NarcSpacing.xs)
-                .padding(.vertical, 1)
-                .background(
-                    RoundedRectangle(cornerRadius: NarcRadius.xs)
-                        .fill(Color.narcSurfaceMuted)
-                )
-            Text("智能粘贴")
-                .font(.narcCaption)
-        }
-        .foregroundStyle(Color.narcTextMuted)
-        .help("从 VS Code / Slack 粘贴代码时，⌘⇧V 自动剥掉每行最前面的公共缩进；普通 ⌘V 保持原样不变。")
+        .background(.regularMaterial)
     }
 
     // MARK: - Left Column (Tab list)
 
     private var leftColumn: some View {
         ScrollView {
-            LazyVStack(spacing: 0) {
+            LazyVStack(spacing: NarcSpacing.xxs) {
                 ForEach(terminals.sessions) { session in
                     // Look up a pending approval whose narc_session_id matches
                     // this tab. Strict match so external (iTerm) approvals
@@ -136,7 +110,7 @@ struct DashboardView: View {
                             { claudeService.dismissApproval(ap) }
                         }
                     )
-                    Divider().padding(.leading, 12)
+                    .padding(.horizontal, NarcSpacing.sm)
                 }
             }
             .padding(.vertical, NarcSpacing.xs)
@@ -242,7 +216,13 @@ struct TerminalTabRow: View {
     @State private var editText = ""
     @State private var attentionPulse = false
     @State private var showApprovalPopover = false
+    @State private var workingPulse = false
     @FocusState private var titleFieldFocused: Bool
+
+    private var isWorking: Bool {
+        guard let s = session.claude?.status else { return false }
+        return s == .processing || s == .runningTool || s == .compacting
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -256,7 +236,12 @@ struct TerminalTabRow: View {
                 Circle()
                     .fill(statusDotColor)
                     .frame(width: 8, height: 8)
+                    .opacity(isWorking ? (workingPulse ? 1.0 : 0.45) : 1.0)
+                    .animation(isWorking ? .easeInOut(duration: 1.2).repeatForever(autoreverses: true) : nil,
+                               value: workingPulse)
                     .padding(.top, 5)
+                    .onAppear { if isWorking { workingPulse = true } }
+                    .onChange(of: isWorking) { _, w in workingPulse = w }
 
                 VStack(alignment: .leading, spacing: 2) {
                     titleLine
@@ -283,7 +268,8 @@ struct TerminalTabRow: View {
             .padding(.horizontal, NarcSpacing.md)
             .padding(.vertical, NarcSpacing.sm)
         }
-        .background(rowBackground)
+        .softRowBackground(isSelected: isSelected, needsAttention: needsAttention, isHovering: isHovering)
+        .clipShape(RoundedRectangle(cornerRadius: NarcRadius.sm, style: .continuous))
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .onTapGesture {
@@ -302,17 +288,27 @@ struct TerminalTabRow: View {
     @ViewBuilder
     private var attentionBar: some View {
         if needsAttention {
+            // v5.5 — red attention bar, 3pt wide, 6pt top/bottom inset,
+            // pulsing to draw the eye to waiting-approval tabs.
             Rectangle()
                 .fill(Color.narcDanger)
                 .frame(width: 3)
+                .padding(.vertical, 6)
                 .opacity(attentionPulse ? 1.0 : 0.4)
                 .animation(
                     .easeInOut(duration: 1.0).repeatForever(autoreverses: true),
                     value: attentionPulse
                 )
+        } else if isSelected {
+            // v5.5 — accent bar for the selected row, same geometry as above
+            // but static (no pulse) and in the system accent colour.
+            Rectangle()
+                .fill(Color.narcAccent)
+                .frame(width: 3)
+                .padding(.vertical, 6)
         } else {
             // Reserve the same 3pt gutter so titles never shift horizontally
-            // when a tab toggles between attention / non-attention states.
+            // when a tab toggles between attention / selected / default states.
             Color.clear.frame(width: 3)
         }
     }
@@ -422,20 +418,6 @@ struct TerminalTabRow: View {
             }
             .buttonStyle(.plain)
             .help("关闭终端")
-        }
-    }
-
-    @ViewBuilder
-    private var rowBackground: some View {
-        if needsAttention {
-            // Pulse-ish red tint when claude needs the user (approval/error).
-            Color.narcDanger.opacity(isSelected ? 0.22 : 0.12)
-        } else if isSelected {
-            Color.narcAccent.opacity(0.18)
-        } else if isHovering {
-            Color.narcSurfaceMuted
-        } else {
-            Color.clear
         }
     }
 

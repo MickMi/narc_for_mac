@@ -4,56 +4,42 @@ import AppKit
 
 // MARK: - SwiftTerm subclass with smart-paste
 
-/// Subclass of `LocalProcessTerminalView` that adds **⌘⇧V smart paste**.
+/// Subclass of `LocalProcessTerminalView` that adds **⌘⇧C smart copy**.
 ///
-/// VS Code (and Slack / Notion / Confluence) preserve the *absolute* indent
-/// of every line when copying a code block, so pasting a function body
-/// taken from inside a class lands in the terminal as
-///
-///     ␣␣␣␣␣␣␣␣func foo() {
-///     ␣␣␣␣␣␣␣␣    return 1
-///     ␣␣␣␣␣␣␣␣}
-///
-/// — every line padded with the original 8-space indent. Re-yanking that
-/// out of a Claude prompt (or shell history) produces broken code.
-///
-/// `⌘⇧V` here strips the **minimum common leading-space prefix** of all
-/// non-blank lines before the paste reaches the PTY. `⌘V` is unchanged —
-/// users who *want* the absolute indent (rare: yaml, indented Markdown)
-/// can still get it.
+/// When the user selects text in the terminal, a small bubble appears near the
+/// selection. Tapping the bubble (or pressing ⌘⇧C) copies the selected text
+/// with common leading whitespace stripped, so code pasted from Claude's output
+/// lands clean. ⌘C still copies the original (indented) text.
 final class NarcTerminalView: LocalProcessTerminalView {
 
-    /// AppKit dispatches keyboard shortcuts through `performKeyEquivalent`
-    /// *before* `keyDown`, which means we can intercept ⌘⇧V without
-    /// fighting SwiftTerm's own key handling.
+    private var lastMouseUpInView: CGPoint = .zero
+    // Strong ref — nothing else retains the controller (its `view` is held by the
+    // superview via addSubview, but the view doesn't retain the controller back).
+    // A weak ref would let the controller dealloc immediately, breaking the
+    // "已复制" feedback / dismissal and stacking a new bubble on every selection.
+    private var bubble: SmartCopyBubbleController?
+
+    /// Intercept ⌘⇧C for smart copy. ⌘C (original copy) is unaffected.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let isCmdShiftV = mods == [.command, .shift]
-            && event.charactersIgnoringModifiers?.lowercased() == "v"
+        let isCmdShiftC = mods == [.command, .shift]
+            && event.charactersIgnoringModifiers?.lowercased() == "c"
 
-        if isCmdShiftV {
-            performSmartPaste()
+        if isCmdShiftC {
+            performSmartCopy()
             return true
         }
         return super.performKeyEquivalent(with: event)
     }
 
-    private func performSmartPaste() {
-        let pasteboard = NSPasteboard.general
-        guard let raw = pasteboard.string(forType: .string), !raw.isEmpty else { return }
+    /// Copy selected text → dedent → system clipboard.
+    private func performSmartCopy() {
+        guard let raw = getSelection(), !raw.isEmpty else { return }
         let dedented = NarcTerminalView.dedent(raw)
-
-        // Reuse SwiftTerm's existing paste flow (which handles bracketed
-        // paste / focus / multi-byte safety) by temporarily swapping the
-        // clipboard, calling super.paste, then restoring. This keeps the
-        // user's clipboard content intact for downstream apps.
-        pasteboard.clearContents()
-        pasteboard.setString(dedented, forType: .string)
-        super.paste(self)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            pasteboard.clearContents()
-            pasteboard.setString(raw, forType: .string)
-        }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(dedented, forType: .string)
+        bubble?.showCopied()
     }
 
     /// Strip the minimum common leading-space indent from every non-blank
@@ -81,6 +67,51 @@ final class NarcTerminalView: LocalProcessTerminalView {
             // Safe because every non-blank line has at least minIndent leading spaces.
             return String(line.dropFirst(minIndent))
         }.joined(separator: "\n")
+    }
+
+    // MARK: - Selection bubble
+
+    private var mouseMonitor: Any?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let _ = window {
+            if let m = mouseMonitor { NSEvent.removeMonitor(m); mouseMonitor = nil }
+            mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+                guard let self = self, let w = self.window, event.window === w else { return event }
+                self.lastMouseUpInView = self.convert(event.locationInWindow, from: nil)
+                return event
+            }
+        } else {
+            if let m = mouseMonitor { NSEvent.removeMonitor(m); mouseMonitor = nil }
+        }
+    }
+
+    override func selectionChanged(source: Terminal) {
+        super.selectionChanged(source: source)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if self.selectionActive, let s = self.getSelection(), !s.isEmpty {
+                self.showOrMoveBubble(near: self.lastMouseUpInView)
+            } else {
+                self.dismissBubble()
+            }
+        }
+    }
+
+    private func showOrMoveBubble(near point: CGPoint) {
+        let ctrl = bubble ?? {
+            let c = SmartCopyBubbleController(onCopy: { [weak self] in self?.performSmartCopy() })
+            addSubview(c.view)
+            bubble = c
+            return c
+        }()
+        ctrl.position(near: point, in: bounds)
+    }
+
+    private func dismissBubble() {
+        bubble?.view.removeFromSuperview()
+        bubble = nil
     }
 }
 

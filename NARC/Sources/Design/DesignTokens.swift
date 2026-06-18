@@ -61,16 +61,20 @@ enum NarcSpacing {
     static let xl: CGFloat = 20
     static let xxl: CGFloat = 24
     static let xxxl: CGFloat = 32
+    static let xxxxl: CGFloat = 40   // v5.5 — major visual grouping
+    static let xxxxxl: CGFloat = 48  // v5.5 — empty-state breathing room
 }
 
 // MARK: - Corner Radius
+// v5.5 softening: bumped all radii for continuous-curvature feel.
+// SwiftUI: use RoundedRectangle(cornerRadius:style: .continuous)
 
 enum NarcRadius {
-    static let xs: CGFloat = 4
-    static let sm: CGFloat = 8
-    static let md: CGFloat = 10
-    static let lg: CGFloat = 14
-    static let xl: CGFloat = 18
+    static let xs: CGFloat = 6       // was 4  → small buttons, icons, status dots
+    static let sm: CGFloat = 10      // was 8  → tab rows (core), input fields, small cards
+    static let md: CGFloat = 14      // was 10 → panels, inline cards, popovers
+    static let lg: CGFloat = 20      // was 14 → toasts, approval views
+    static let xl: CGFloat = 24      // was 18 → main floating panel
     static let pill: CGFloat = 999
 }
 
@@ -157,6 +161,88 @@ struct BreathingHalo: ViewModifier {
 extension View {
     func breathingHalo(active: Bool) -> some View {
         modifier(BreathingHalo(active: active))
+    }
+}
+
+// MARK: - Soft Row Background (v5.5 softening)
+
+/// Rounded, bordered row background for tab lists — replaces flat-colour
+/// rectangles with continuous-curvature surfaces and hairline strokes that
+/// only appear on hover/selection/attention states.
+struct SoftRowBackground: ViewModifier {
+    let isSelected: Bool
+    let needsAttention: Bool
+    let isHovering: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: NarcRadius.sm, style: .continuous)
+                    .fill(rowFill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: NarcRadius.sm, style: .continuous)
+                    .strokeBorder(rowStroke, lineWidth: 0.5)
+            )
+    }
+
+    private var rowFill: Color {
+        if needsAttention {
+            return Color.narcDanger.opacity(0.10)
+        } else if isSelected {
+            return Color.narcAccent.opacity(0.10)
+        } else if isHovering {
+            return Color.narcText.opacity(0.05)
+        }
+        return .clear
+    }
+
+    private var rowStroke: Color {
+        if needsAttention {
+            return Color.narcDanger.opacity(0.20)
+        } else if isSelected {
+            return Color.narcAccent.opacity(0.25)
+        }
+        return .clear
+    }
+}
+
+extension View {
+    func softRowBackground(isSelected: Bool, needsAttention: Bool, isHovering: Bool) -> some View {
+        modifier(SoftRowBackground(isSelected: isSelected, needsAttention: needsAttention, isHovering: isHovering))
+    }
+}
+
+// MARK: - Layered Shadow (v5.5 softening)
+
+/// Approximates CSS multi-layer shadows via overlay + shadow.
+/// SwiftUI single-shadow limit means we stack two modifiers.
+struct SoftShadow: ViewModifier {
+    /// xs / sm / md / lg
+    let level: String
+
+    func body(content: Content) -> some View {
+        switch level {
+        case "xs":
+            content.shadow(color: .black.opacity(0.04), radius: 0.5, y: 0.5)
+        case "sm":
+            content.shadow(color: .black.opacity(0.05), radius: 1.5, y: 0.5)
+                  .shadow(color: .black.opacity(0.03), radius: 2, y: 1)
+        case "md":
+            content.shadow(color: .black.opacity(0.05), radius: 3, y: 1)
+                  .shadow(color: .black.opacity(0.04), radius: 6, y: 3)
+        case "lg":
+            content.shadow(color: .black.opacity(0.05), radius: 8, y: 2)
+                  .shadow(color: .black.opacity(0.04), radius: 16, y: 6)
+        default:
+            content
+        }
+    }
+}
+
+extension View {
+    func softShadow(_ level: String) -> some View {
+        modifier(SoftShadow(level: level))
     }
 }
 

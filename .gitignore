@@ -17,6 +17,7 @@ Package.resolved
 # IDE
 .harness/
 .harness
+.harness-model.local
 .cursorrules
 .vscode/
 *.swp
