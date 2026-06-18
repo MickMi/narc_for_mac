@@ -76,13 +76,17 @@ final class TerminalSessionManager: ObservableObject {
             let key = sessions[idx].id.uuidString
             let oldStatus = sessions[idx].claude?.status
             let newClaude = byNarcId[key]
-            sessions[idx].claude = newClaude
+            // 冻结：service 删除已结束会话后 newClaude 变 nil，但 Tab 要保留"已结束"徽标。
+            let freezeEnded = (newClaude == nil && oldStatus == .ended)
+            if !freezeEnded {
+                sessions[idx].claude = newClaude
+            }
 
             // Flag tabs whose status meaningfully changed while the user was
             // looking at a different tab. We deliberately ignore transitions
             // *into* "processing" / "running tool" because those fire dozens
             // of times per turn and would constantly bounce the dot.
-            let newStatus = newClaude?.status
+            let newStatus = sessions[idx].claude?.status
             if let new = newStatus, new != oldStatus,
                sessions[idx].id != selectedId,
                new == .waitingForApproval || new == .waitingForInput || new == .ended {

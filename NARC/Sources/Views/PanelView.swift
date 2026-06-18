@@ -12,6 +12,7 @@ import SwiftUI
 ///   unseen-change red dot.
 struct PanelView: View {
     @ObservedObject var appMonitor: AppMonitorService
+    @ObservedObject var claudeService: ClaudeSessionService
     @ObservedObject var windowManager: WindowManagerService
     @ObservedObject var pinnedWindowService: PinnedWindowService
     var onClose: () -> Void
@@ -53,6 +54,7 @@ struct PanelView: View {
                 case .notifications:
                     NotificationListView(
                         appMonitor: appMonitor,
+                        claudeService: claudeService,
                         pinnedWindowService: pinnedWindowService,
                         onClose: onClose,
                         narcScreen: narcScreen,

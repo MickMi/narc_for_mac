@@ -1,0 +1,45 @@
+version: 1
+
+# === 0. Meta ===
+meta:
+  language: "zh"
+
+# === 0.5 Model（多模型协作）===
+model:
+  strong:
+    name: "claude"
+  weak:
+    name: "deepseek"
+  # 标准多模型流转：强模型出 PRD+蓝图 → 弱模型实现 → 强模型审查
+  solo_mode: false
+
+# === 1. Brain ===
+brain:
+  enabled: true
+  path: "~/.mick-brain"
+
+# === 2. Design ===
+# 本项目有独立 Design AI（design-handoff/ 下产出 .swift），AI 只出设计简报
+design:
+  mode: "designer_brief"
+  ai_tool: "generic"
+
+# === 3. Dev ===
+dev:
+  scope: "frontend_only"   # 纯客户端 macOS app，无后端
+  tech_stack:
+    language: "Swift 5"
+    framework: "SwiftUI + AppKit (NSPanel/NSHostingView)"
+    database: "无（UserDefaults 持久化）"
+    package_manager: "SPM"
+
+# === 4. Testing ===
+# UI 重客户端，关键路径手测为主
+testing:
+  mode: "smoke_only"
+  coverage_threshold: 0
+
+# === 5. Strictness ===
+strictness:
+  mode: "soft"
+  pm_max_rounds: 3
