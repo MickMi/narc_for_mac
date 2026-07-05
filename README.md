@@ -1,362 +1,461 @@
+<div align="center">
+
+[English](#english) &nbsp;&nbsp;|&nbsp;&nbsp; [中文](#中文)
+
+</div>
+
+---
+
+<a id="english"></a>
 
 # NARC for Mac
 
-**Notification & Application Resource Center** — a native macOS Dock app that unifies notification awareness, app status monitoring, window pinning, window management, and a built-in multi-terminal Claude Code workspace into a single desktop entry point.
+**Notification & Application Resource Center**
 
-> No more switching between apps to check messages or hunt for the right Claude terminal. NARC sits on your desktop, watches everything, and lets you act instantly.
+You're a developer who spends most of the day inside a terminal, but your attention is constantly pulled away — by WeChat messages, by Claude Code waiting for approval in some buried iTerm tab, by the friction of arranging windows and hunting for the right session. Each of these distractions seems small on its own. Add them up across a workday, and they're not small anymore.
 
-## Features
+NARC is a single desktop entry point that eliminates three recurring taxes on your attention.
 
-### 🛠 NARC Workspace (Embedded Multi-Terminal Dashboard)
+---
 
-- **Multiple Claude Code (or any shell) sessions in one window** — left tab list, right interactive terminal pane
-- **Real PTY-backed terminals** powered by [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) — full ANSI support, kitty keyboard protocol, OSC 7 cwd tracking
-- **Persistent across window close** — closing the Dashboard does *not* kill child processes; reopen and pick up exactly where you left off (Option A persistence)
-- **Live status badges per tab** — every tab shows the live Claude state from the hook stream:
-  - `⏳ 思考中` / `→ 工具名` / `⚠️ 待审批` / `💬 等待输入` / `🗜 压缩上下文` / `■ 已结束`
-- **Attention highlighting** — tabs flash red when Claude is waiting for permission
-- **Auto-tracked cwd + project name** via OSC 7 escape sequences
-- **Custom tab titles** — double-click to rename, or hover for a pencil button
-- **Right-click the floating widget** to summon / dismiss the Dashboard
+## The Three Attention Taxes
 
-### 🔔 Unified Notification Center
+Every developer working across IM tools, terminals, and Claude Code sessions pays three invisible taxes. You feel them as fatigue, but you don't usually name them:
 
-- Real-time monitoring of **WeChat**, **WeCom (企业微信)**, and **Lark (飞书)** message badges
-- Floating widget displays aggregated badge count with red dot indicator
-- **Claude section in the panel** — pending approvals and Stop/Error notifications get their own list with single-click dismiss and jump-to-Dashboard
-- Click any IM app row to **summon its window to your current screen** — even if it's minimized or on another display
-- Notification filter rules: mute, highlight, badge threshold, keyword matching (extensible)
+| Tax | What it costs you | How NARC eliminates it |
+|-----|-------------------|------------------------|
+| **Attention Tax**<br><sub>注意力税</sub> | Checking WeChat, WeCom, and Lark separately for new messages. Each unread badge is a micro-interrupt. Each "just checking" is a context loss. | **[Unified Notification Center](#unified-notification-center)** — one red badge aggregates all IM sources. One click reveals who needs you, no app-switching. Filter rules let you mute noise before it reaches your eyes. |
+| **Context Tax**<br><sub>上下文税</sub> | You have 4 Claude Code sessions running across iTerm tabs, Tmux panes, and VS Code terminals. Which one is waiting for permission? Which project is in tab 3? Finding the right terminal and re-establishing mental context takes 30 seconds each time — 10+ times a day. | **[NARC Workspace](#narc-workspace)** — all Claude sessions live in one window with live status badges per tab. `⏳ Thinking` / `⚠️ Approval` / `■ Ended`. Tabs flash red when Claude needs you. One click, no hunting. |
+| **Friction Tax**<br><sub>摩擦税</sub> | Dragging windows to screen edges. Switching Spaces to find that pinned IDE window. Cmd+Tab through 20 apps to reach the one you need. These micro-operations feel trivial but compound into hundreds of wasted gestures per day. | **[Window Management + Pinning](#window-management-and-pinning)** — keyboard-driven window snapping with 10 layout presets. Pin any window for instant cross-Space access via `⌃⌥P`. Two keystrokes, zero drags. |
 
-### 📌 Window Pinning (Cross-Space)
+---
 
-- **Pin any window** to the NARC panel for quick access via `⌃⌥P`
-- **Cross-Space activation** — pinned windows on other macOS Spaces are activated via AppleScript, with smooth Space switching (no animation flicker)
-- Two persistence modes:
-  - **Temporary (📌)** — cleared on restart (default)
-  - **Persistent (🔒)** — saved to disk, survives restarts
-- Uses **CGWindowID** for precise window identification (no ambiguity with multi-window apps)
-- Stable title matching — strips dynamic content (spinners, dimensions) from terminal titles
-- Real-time alive status polling and window title tracking
-- Up to **10 pinned windows** supported
-- Hover to reveal inline actions: toggle persistence, remove
+## How It Works
 
-### 🪟 Window Management (Magnet-equivalent)
+A 48pt floating circle sits at the edge of your screen — always on top, never in the way.
 
-- **10 layout presets**: Left/Right/Top/Bottom half, four corners, full screen, center
-- **Zero-delay window snapping** — single setFrame call, no correction passes or flicker
+- **Left-click** → notification panel slides out. See IM unreads, Claude pending approvals, and pinned windows — all in one list.
+- **Right-click** → the Workspace Dashboard opens. Every Claude Code session, every shell, every project — tabs on the left, live terminal on the right. Close the window and your sessions keep running.
+- **`⌃⌥` + arrow** → snap any window to a screen half, corner, or center. No drag, no delay.
+- **`⌃⌥P`** → pin the current window. Access it from the panel from any Space.
+
+<img src="Resources/demo-screenshot.png" alt="NARC floating widget, panel, and dashboard" width="800">
+
+---
+
+## What NARC Replaces
+
+| You used to… | Now you… |
+|--------------|----------|
+| ⌘Tab through 3 IM apps to check badges | Glance at one red dot |
+| Dig through iTerm tabs to find the Claude session that needs approval | See a flashing red tab badge, click once |
+| Drag every window to position it | `⌃⌥→` — done |
+| Swipe between Spaces to reach pinned reference windows | `⌃⌥P` to pin, panel click to jump — cross-Space in one gesture |
+| Run `claude` in scattered terminal tabs, forget which is which | NARC Workspace: labeled tabs, live Claude state badges, cwd tracking |
+
+---
+
+<a id="unified-notification-center"></a>
+
+## Unified Notification Center
+
+Real-time Dock badge monitoring for WeChat, WeCom, and Lark. One aggregated badge on the floating widget replaces three separate notification sources.
+
+- Click any IM row → the app window summons to your current screen (even if minimized or on another display)
+- **Claude section** — pending approvals and Stop/Error events have their own list with one-click dismiss
+- **Filter rules** — mute specific apps, set badge thresholds, match keywords (WIP)
+
+---
+
+<a id="narc-workspace"></a>
+
+## NARC Workspace
+
+An embedded multi-terminal dashboard powered by [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm). Think of it as "iTerm, but purpose-built for Claude Code workflows."
+
+- **Real PTY terminals** — full ANSI, kitty keyboard protocol, OSC 7 cwd tracking
+- **Tab persistence** — close the Dashboard window, your sessions keep running. Reopen and pick up exactly where you left off.
+- **Live state badges per tab** — `⏳ Thinking` → `→ ToolName` → `⚠️ Approval` → `💬 Waiting` → `🗜 Compressing` → `■ Ended`
+- **`NARC_SESSION_ID` env var** — hook events from Claude Code route back to the exact tab that spawned them
+- **Custom tab titles** — double-click to rename
+- **`⌘1`–`⌘9` tab switching** (v1.4), drag-reorder tabs (v1.4)
+
+---
+
+<a id="window-management-and-pinning"></a>
+
+## Window Management & Pinning
+
+Magnet-equivalent window snapping plus cross-Space window pinning — keyboard-driven, no mouse needed.
+
+### Window Snapping
+
+| Hotkey | Layout |
+|--------|--------|
+| `⌃⌥←` `⌃⌥→` | Left / Right Half |
+| `⌃⌥↑` `⌃⌥↓` | Top / Bottom Half |
+| `⌃⌥U` `⌃⌥I` `⌃⌥J` `⌃⌥K` | Four Corners |
+| `⌃⌥↩` | Full Screen |
+| `⌃⌥C` | Center |
+
+- Zero-delay, single `setFrame` call — no flicker, no correction passes
+- **Cross-screen state machine** — press the same direction again within 5s to move the window to the adjacent display
 - Properly handles `AXEnhancedUserInterface` (WeChat, Electron apps)
-- **State machine cross-screen** — press same direction within 5s to cross to adjacent display
-- **Global hotkeys** for instant window snapping:
 
-  | Hotkey | Action |
-  |--------|--------|
-  | `⌃⌥←` | Left Half |
-  | `⌃⌥→` | Right Half |
-  | `⌃⌥↑` | Top Half |
-  | `⌃⌥↓` | Bottom Half |
-  | `⌃⌥↩` | Full Screen |
-  | `⌃⌥C` | Center |
-  | `⌃⌥U` | Top Left |
-  | `⌃⌥I` | Top Right |
-  | `⌃⌥J` | Bottom Left |
-  | `⌃⌥K` | Bottom Right |
-  | `⌃⌥P` | Pin current window |
-  | `⌃⌥N` | Toggle NARC panel |
+### Window Pinning
 
-- **Multi-monitor support** with diagonal screen arrangements
+- `⌃⌥P` to pin the current window → appears in the NARC panel
+- **Cross-Space activation** — clicking a pinned window switches to its Space via AppleScript (smooth, no animation flicker)
+- Two modes: **Temporary (📌)** — cleared on restart; **Persistent (🔒)** — saved to disk
+- Uses `CGWindowID` for unambiguous window identification — works with multi-window apps
 
-### 🤖 Claude Code Integration
+---
 
-- **Real-time session monitoring** via Unix socket (`/tmp/narc-claude.sock`)
-- **Three notification surfaces** — pick the one that fits the moment:
-  - **Workspace tab badge** — every Claude session in the Dashboard shows its live state inline
-  - **Panel "Claude" section** — pending approvals and Stop/Error events with single-click dismiss
-  - **Toast banner** — for sessions running outside the Dashboard (e.g. external iTerm)
-- **Precise terminal targeting** — `NARC_SESSION_ID` env var ties hook events back to the workspace tab that spawned them; falls back to TTY device path + CWD for external terminals
-- **Quick actions on toast** — Allow/Deny permission requests without leaving your current app
-- **Hook system** — lightweight Python hook (`~/.claude/hooks/narc-hook.py`) intercepts Claude Code events
+## Keyboard Shortcuts
 
-### 🖥 Floating Widget (per design spec)
+| Shortcut | Action |
+|----------|--------|
+| `⌃⌥N` | Toggle NARC panel |
+| `↑` / `↓` | Navigate panel items |
+| `↩` | Activate selected item |
+| `1`–`0` | Quick access by index |
+| `Esc` | Close panel |
+| `⌃⌥P` | Pin current window |
+| `⌃⌥←` `⌃⌥→` `⌃⌥↑` `⌃⌥↓` | Window snapping |
 
-- Always-on-top draggable circular icon (48×48pt)
-- **`.regularMaterial` halo** with bloom + slow sonar ripple + breathing "NARC" wordmark (spec D)
-- **Soft dual-layer drop shadow** rendered in a 128×128 transparent canvas — only the central 48pt is hit-testable, surrounding shadow area is click-through
-- **Red badge** with aggregated count (IM messages + Claude pending items)
-- **Tilt + lift** when dragged
-- Click → expand the notification panel
-- Right-click → toggle the Dashboard
-- Drag anywhere on screen — panel follows; menu bar icon as fallback entry
-
-### ⌨️ Keyboard Navigation
-
-- Press `⌃⌥N` from anywhere to toggle the NARC panel
-- Use `↑` / `↓` to navigate items in the panel (auto-scrolls to selection)
-- Press `↩` to activate the selected item
-- Press `1`–`0` for quick access by index
-- Press `Esc` to close the panel
-
-## Two-Zone Activation Strategy
-
-NARC uses different activation behaviors depending on the window type:
-
-| Zone | Type | Activation Behavior | Rationale |
-|------|------|---------------------|-----------|
-| **Monitoring** | IM apps (WeChat, Lark, etc.) | Summon to current screen center | Quick message reply |
-| **Pinned** | Workspace windows (IDE, docs, etc.) | Switch to window's Space via AppleScript | Preserve workspace layout |
-| **Workspace** | Embedded NARC terminals | Right-click widget → switch tab | No external window juggling |
-
-## Requirements
-
-- **macOS 14 Sonoma** or later
-- **Accessibility permission** required (System Settings → Privacy & Security → Accessibility)
-- **Screen Recording permission** (optional, for cross-Space window detection via CGWindowList)
+---
 
 ## Installation
 
-### Build as App (Recommended)
+### Requirements
 
-Build a standard macOS `.app` bundle that you can double-click to launch, drag to the Dock, or copy to `/Applications`:
+- macOS 14 Sonoma or later
+- **Accessibility permission** (System Settings → Privacy & Security → Accessibility)
+- Screen Recording permission (optional, for cross-Space window detection)
+
+### Build from Source
 
 ```bash
-# Clone the repository
 git clone https://github.com/MickMi/narc_for_mac.git
 cd narc_for_mac
-
-# Build NARC.app (release mode) — also signs with a stable self-signed
-# identity so Accessibility permission survives rebuilds
-./scripts/build-app.sh
-
-# Launch the app
+./scripts/build-app.sh          # builds NARC.app with stable self-signed identity
 open build/NARC.app
-
-# (Optional) Install to Applications folder
-cp -R build/NARC.app /Applications/
 ```
 
-After installation, you can launch NARC like any other macOS app — from **Launchpad**, **Spotlight** (`⌘Space` → type "NARC"), or the **Applications folder**. No terminal needed.
+The build script signs with a stable `NARC Dev` identity, so Accessibility permission survives across rebuilds.
 
-### Run from Terminal (Development)
-
-If you prefer to run directly from source during development:
+### Run in Development
 
 ```bash
 swift run -c release NARC
 ```
 
-> **Note**: SwiftTerm is fetched on first build (~30s). Subsequent builds are incremental.
+> SwiftTerm is fetched on first build (~30s). Subsequent builds are incremental.
 
 ### Claude Code Hook Setup
 
-To enable Claude Code integration:
+NARC monitors Claude Code sessions via a Python hook. To enable it:
 
 ```bash
-# Copy the hook script
 cp scripts/narc-hook.py ~/.claude/hooks/narc-hook.py
 chmod +x ~/.claude/hooks/narc-hook.py
 ```
 
 Then add to `~/.claude/settings.json`:
+
 ```json
 {
   "hooks": {
     "PermissionRequest": [{ "type": "command", "command": "python3 ~/.claude/hooks/narc-hook.py" }],
-    "Stop": [{ "type": "command", "command": "python3 ~/.claude/hooks/narc-hook.py" }],
-    "SessionStart": [{ "type": "command", "command": "python3 ~/.claude/hooks/narc-hook.py" }],
-    "SessionEnd": [{ "type": "command", "command": "python3 ~/.claude/hooks/narc-hook.py" }]
+    "Stop":              [{ "type": "command", "command": "python3 ~/.claude/hooks/narc-hook.py" }],
+    "SessionStart":      [{ "type": "command", "command": "python3 ~/.claude/hooks/narc-hook.py" }],
+    "SessionEnd":        [{ "type": "command", "command": "python3 ~/.claude/hooks/narc-hook.py" }]
   }
 }
 ```
 
-The hook reads `NARC_SESSION_ID` from the environment when set (NARC injects this for terminals spawned inside the Workspace), so events route back to the exact tab that triggered them.
+Sessions spawned inside the NARC Workspace automatically receive `NARC_SESSION_ID`, so events route back to the correct tab. External terminals (iTerm, Terminal.app) are matched via TTY device path + CWD.
 
-### First Launch
-
-On first launch, NARC will prompt you to grant **Accessibility permission** (System Settings → Privacy & Security → Accessibility). After granting, restart NARC for full functionality.
-
-## Usage
-
-### Quick Start
-
-1. Run NARC — a small floating circle appears at the bottom-right of your screen, the Dashboard auto-opens on first launch
-2. **Grant Accessibility permission** when prompted (required for window management and badge reading)
-3. Click the floating widget (or press `⌃⌥N`) to expand the notification panel
-4. **Right-click** the widget to summon the Workspace Dashboard
-5. Click "+ 新建终端" in the Dashboard to start a new shell or `claude` session
-6. Use `⌃⌥` + arrow keys to snap windows to screen edges
-7. Use `⌃⌥P` to pin the current window for quick access
-
-### Workspace Dashboard
-
-- **Toolbar**: project counter + "+ 新建终端" button
-- **Left tabs**: each row shows status dot, custom or auto title, cwd (~ collapsed), creation time, and Claude state badge
-- **Right pane**: the live, interactive terminal of the selected tab (input goes to whichever tab is selected)
-- **Persistence**: closing the Dashboard window keeps PTYs alive — reopen and your tabs are still there
-- **Rename a tab**: double-click the title or click the pencil button
-- **Close a tab**: hover and click ✕ (terminates the PTY)
-
-### Notification Panel
-
-- **Claude** section (when active) — top of the list, shows pending approvals (red tint) and Stop/Error notifications. Tap row → dismiss + open Dashboard. Tap ✕ → dismiss only.
-- **Monitoring** — IM apps with running status and badge count
-  - **Green dot** = running, no new messages
-  - **Red badge** = has unread messages
-  - **Gray dot** = not running
-  - Click an app row to summon its window to your current screen
-- **Pinned** — user-pinned windows
-  - Click to activate the window (switches Space if needed)
-  - Hover to toggle persistence (📌 ↔ 🔒) or remove
-  - **Gray dot** = window/app not running
-
-### Settings
-
-- Access via the gear icon in the panel header
-- Configure which apps to monitor
-- Manage notification filter rules
-- Customize general preferences
+---
 
 ## Architecture
 
 ```
-NARC/
-├── Sources/
-│   ├── App/
-│   │   ├── NARCApp.swift              # App entry point
-│   │   └── AppDelegate.swift          # Window lifecycle, menu bar, hotkeys, dashboard summoning
-│   ├── Models/
-│   │   ├── Models.swift               # MonitoredApp, NotificationState, WindowLayout, PinnedWindow
-│   │   └── KeyboardSelection.swift    # KeyboardSelectionState, PanelItem enum
-│   ├── Services/
-│   │   ├── AppMonitorService.swift    # Dock badge polling via lsappinfo, app activation
-│   │   ├── ClaudeSessionService.swift # Unix socket listener, sessions / approvals / notifications
-│   │   ├── HotkeyService.swift        # Carbon Event hotkey registration and dispatch
-│   │   ├── PinnedWindowService.swift  # Cross-Space window pinning via AppleScript
-│   │   ├── ScreenNavigator.swift      # Multi-monitor edge detection, cross-screen navigation
-│   │   ├── TerminalSessionManager.swift # OwnedSession state, Claude state projection by NARC_SESSION_ID
-│   │   ├── WindowLayoutState.swift    # State machine for cross-screen decisions (5s TTL)
-│   │   └── WindowManagerService.swift # AX API window control, layout application
-│   ├── Utils/
-│   │   └── AXWindowHelper.swift       # Low-level AX API, AXEnhancedUserInterface handling
-│   └── Views/
-│       ├── ClaudeApprovalView.swift   # Full approval panel (panel integration)
-│       ├── ClaudeToastView.swift      # Lightweight toast notification banner
-│       ├── DashboardView.swift        # Workspace toolbar + HSplitView (tabs / pane)
-│       ├── DashboardWindow.swift      # Standalone NSWindow for the workspace
-│       ├── FloatingWidgetView.swift   # Spec-D circle + halo + bloom + ripple + wordmark + badge
-│       ├── FloatingWidgetWindow.swift # 128×128 NSPanel with central 48pt hit-test
-│       ├── NotificationListView.swift # Claude / Monitoring / Pinned sections
-│       ├── PanelView.swift            # Main expandable panel (tabs)
-│       ├── TerminalPaneView.swift     # SwiftUI wrapper around SwiftTerm + PTY plumbing
-│       ├── WindowGridView.swift       # Keyboard shortcuts reference guide
-│       └── PreferencesView.swift      # Settings panel
-├── Resources/
-│   ├── Info.plist                     # App bundle configuration
-│   └── placeholder.json
-├── Tests/
-│   └── NARCTests.swift
-└── scripts/
-    ├── build-app.sh                   # Build .app bundle + stable self-signed identity
-    └── narc-hook.py                   # Claude Code hook script (copy to ~/.claude/hooks/)
+Sources/
+├── App/           NARCApp.swift, AppDelegate.swift       — entry, lifecycle, hotkeys
+├── Models/        Models.swift, KeyboardSelection.swift  — data types
+├── Services/      AppMonitorService, ClaudeSessionService, HotkeyService,
+│                  PinnedWindowService, ScreenNavigator, TerminalSessionManager,
+│                  WindowLayoutState, WindowManagerService
+├── Utils/         AXWindowHelper.swift                   — low-level AX API
+└── Views/         Dashboard, Panel, FloatingWidget, TerminalPane,
+                   NotificationList, Preferences, ClaudeToast/Approval
 ```
 
-### Tech Stack
-
-| Component | Technology |
-|-----------|-----------|
+| Layer | Technology |
+|-------|-----------|
 | Language | Swift 5.9 |
-| UI Framework | SwiftUI + AppKit (NSPanel, NSStatusBar, NSHostingView) |
-| Embedded Terminal | [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) 1.2.x (LocalProcessTerminalView) |
+| UI | SwiftUI + AppKit (NSPanel, NSStatusBar) |
+| Embedded Terminal | [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) 1.2.x |
 | Window Control | Accessibility API (AXUIElement) |
-| Cross-Space | AppleScript (Apple Events) |
-| Badge Reading | `lsappinfo` CLI (reliable on macOS 14+) |
-| Hotkeys | Carbon Event API (RegisterEventHotKey) |
-| Claude Integration | Unix socket IPC + Python hook + `NARC_SESSION_ID` env var |
-| Build System | Swift Package Manager |
-| Min. Deployment | macOS 14 Sonoma |
+| Cross-Space | AppleScript |
+| Badge Reading | `lsappinfo` CLI |
+| Hotkeys | Carbon Event API |
+| Claude IPC | Unix socket + Python hook + `NARC_SESSION_ID` |
 
-### Key Design Decisions
-
-- **Native macOS Dock app** — `setActivationPolicy(.regular)` so it shows in the Dock and Cmd+Tab; closing all windows keeps the floating widget + menu bar item alive
-- **Not sandboxed** — full Accessibility API + PTY spawning + AppleScript privileges
-- **AppleScript for cross-Space** — `set index + activate` for zero-animation Space switching (CGS private APIs unreliable on macOS 15)
-- **PTY persistence** — `TerminalSessionManager` lives on `AppDelegate`, not `@StateObject` inside the Dashboard, so closing the window doesn't tear down child processes
-- **Hit-tested transparent canvas** — the floating widget panel is 128×128 to give the SwiftUI drop shadow room (radius 32 + offset 12), but `FirstMouseView.hitTest` restricts AppKit click delivery to the central 48pt circle so the surrounding shadow area is click-through
-- **AXEnhancedUserInterface handling** — disable before resize, Size→Position→Size order (Rectangle/Magnet pattern)
-- **Stable title matching** — strips dynamic content (spinners ⠂⠈⠐, dimensions 80×24) from terminal titles, matches by directory prefix only
-- **Stable self-signed identity** — `build-app.sh` signs with `NARC Dev` so the cdhash stays constant across rebuilds and Accessibility permission survives
-
-## Changelog
-
-### v1.3 (Current)
-
-- ✅ **NARC Workspace** — embedded multi-terminal dashboard powered by SwiftTerm; spawn shells / `claude` sessions inside NARC, switch between them with one click
-- ✅ **Tab persistence (Option A)** — closing the Dashboard window keeps PTYs alive; reopen and find your tabs intact
-- ✅ **Live Claude badges per tab** — hook events route back to the originating tab via `NARC_SESSION_ID`; tabs flash red on permission requests
-- ✅ **Custom tab titles + auto-tracked cwd** — double-click to rename, OSC 7 keeps the cwd label live
-- ✅ **Spec-D floating widget** — round `.regularMaterial` halo, bloom, slow sonar ripple, breathing "NARC" wordmark, soft dual-layer drop shadow
-- ✅ **Panel "Claude" section** — pending approvals + Stop/Error notifications now have a real UI exit; no more stuck red dots
-- ✅ **Right-click widget → Dashboard** — the workspace lives one gesture away from the floating circle
-- ✅ **128×128 transparent canvas with central hit-test** — fixes the long-standing rectangular-halo-around-the-circle bug
-- ✅ **Stable self-signed builds** — Accessibility permission no longer evaporates between rebuilds
-
-### v1.2
-
-- ✅ Claude Code Integration — real-time session monitoring with toast notifications and precise terminal jump
-- ✅ Cross-Space Window Activation — AppleScript-based Space switching for pinned windows (replaces broken CGS API)
-- ✅ Magnet-equivalent Window Management — zero-delay snapping with AXEnhancedUserInterface handling
-- ✅ State Machine Cross-Screen — press same hotkey within 5s to move window to adjacent display
-- ✅ TTY-based Terminal Targeting — click toast to jump to exact terminal tab, not random window
-- ✅ ScrollView Keyboard Following — panel auto-scrolls when navigating past visible area
-- ✅ Shortcuts Reference Tab — Window Management tab now shows hotkey reference instead of redundant buttons
-
-### v1.1
-
-- ✅ Window Pinning — pin any window via `⌃⌥P` for quick access from the NARC panel
-- ✅ Persistence modes — temporary (📌) or persistent (🔒) pinned windows
-- ✅ Keyboard navigation — `⌃⌥N` to toggle panel, `↑↓↩` to navigate and activate, `1`–`0` for quick index access
-- ✅ Two-zone activation strategy — Monitoring windows summon to current screen; Pinned windows activate in place
-- ✅ Pinned window alive polling — real-time status and title tracking for pinned windows
-
-### v1.0
-
-- ✅ Draggable floating widget with badge aggregation
-- ✅ Expandable panel with Notifications and Window Management tabs
-- ✅ Menu bar fallback entry point
-- ✅ Real-time Dock badge monitoring (WeChat, WeCom, Lark)
-- ✅ Click-to-activate with window summoning to current screen
-- ✅ Minimized window unminimize support
-- ✅ 10 window layout presets with global hotkeys
-- ✅ Multi-monitor support with cross-screen switching
-- ✅ Notification filter rules (mute, highlight, threshold, keyword)
-- ✅ Settings panel with app management and filter configuration
-- ✅ Accessibility permission auto-detection and guided setup
-
-### Known Limitations
-
-- WeCom (企业微信) badge detection relies on `lsappinfo`; WeCom uses custom Dock badge rendering which may not always be detected
-- Claude Code hook requires manual installation (copy script + edit settings.json)
-- Cross-Space window activation depends on AppleScript window title matching; very similar titles may cause ambiguity
-- Inside the embedded terminal, the full Claude Code TUI works but a few kitty-keyboard-protocol-only key combos may behave differently than in a native terminal
-- No auto-update mechanism yet (planned: Sparkle framework)
+---
 
 ## Roadmap
 
 | Version | Focus |
 |---------|-------|
-| **v1.3** ← current | NARC Workspace (embedded multi-terminal), spec-D floating widget, panel Claude exit |
-| v1.4 | Tab font size (`⌘+` / `⌘-`), `⌘1`–`⌘9` tab switching, drag-reorder tabs, scrollback search |
+| **v1.3** ← current | NARC Workspace, spec-D floating widget, Claude panel exit |
+| v1.4 | Tab font size (`⌘+`/`⌘-`), `⌘1`–`⌘9` tab switching, drag-reorder, scrollback search |
 | v1.5 | Developer ID signing + Notarization + GitHub Release CI |
 | v2.0 | IDE task monitoring (VS Code extension bridge) |
-| v2.1 | Message content preview ("who sent what") |
-| v3.0 | Plugin/extension system for third-party integrations |
+| v2.1 | Message content preview |
+| v3.0 | Plugin system for third-party integrations |
 
-## License
+### Known Limitations
 
-MIT
-
-## Contributing
-
-This project is in active development. Issues and PRs are welcome.
+- WeCom (企业微信) badge detection relies on `lsappinfo`; WeCom's custom Dock badge rendering may not always register.
+- Claude Code hook requires manual setup (copy script + edit settings.json).
+- Cross-Space window activation depends on AppleScript title matching; nearly identical window titles may cause ambiguity.
 
 ---
 
-*Built with Swift, SwiftUI, SwiftTerm, and a lot of ⌃⌥ key combos.*
+## License
+
+MIT — built with Swift, SwiftUI, [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm), and a lot of `⌃⌥` key combos.
+
+---
+
+<a id="中文"></a>
+
+# NARC for Mac
+
+**Notification & Application Resource Center（通知与应用资源中心）**
+
+你是一个大部分时间待在终端里的开发者，但注意力被不断扯开——微信消息、埋在某 iTerm 标签页里等待审批的 Claude Code、拖窗口找会话的摩擦。每一次打断单看都不大，但叠加在一个工作日里就不再是小问题。
+
+NARC 是一个桌面统一入口，专门消除反复吞噬你注意力的三类隐性成本。
+
+---
+
+## 三种注意力的税
+
+每个在 IM、终端和 Claude Code 会话间穿梭的开发者，都在缴纳三种看不见的税。你感受到的是疲劳，但很少为它们命名：
+
+| 税种 | 你在付出什么 | NARC 如何消灭它 |
+|------|------------|----------------|
+| **注意力税**<br><sub>Attention Tax</sub> | 分别检查微信、企业微信、飞书有没有新消息。每个未读角标都是一次微打断。每次"就看一眼"都是一次上下文丢失。 | **[统一通知中心](#统一通知中心)** — 一个红色角标聚合所有 IM 来源。一次点击就知道谁找你，无需切换应用。过滤规则在噪音抵达你眼睛之前就把它静音。 |
+| **上下文税**<br><sub>Context Tax</sub> | 4 个 Claude Code 会话散落在 iTerm 标签页、Tmux 窗格、VS Code 终端里。哪个在等审批？标签页 3 里是哪个项目？每次找到对应终端并重建心智上下文要花 30 秒——一天十几次。 | **[NARC 工作区](#narc-工作区)** — 所有 Claude 会话在一个窗口里，每个标签页实时状态徽章：`⏳ 思考中` / `⚠️ 待审批` / `■ 已结束`。需要你时标签页闪烁红色。一键直达，无需翻找。 |
+| **摩擦税**<br><sub>Friction Tax</sub> | 拖窗口到屏幕边缘、在 Space 之间滑来滑去找那个钉住的 IDE、Cmd+Tab 翻 20 个应用找需要的那一个。每次操作微不足道，但一天累积成百上千次无意义手势。 | **[窗口管理 + 钉选](#窗口管理与钉选)** — 纯键盘驱动窗口贴靠，10 种布局预设。`⌃⌥P` 钉选任意窗口，跨 Space 即时跳转。两次按键，零次拖拽。 |
+
+---
+
+## 使用方式
+
+一个 48pt 的浮动圆圈常驻屏幕边缘——始终置顶，从不碍事。
+
+- **左键** → 通知面板滑出。IM 未读、Claude 待审批、钉选窗口，一览无余。
+- **右键** → 工作区仪表盘打开。每个 Claude Code 会话、每个 Shell、每个项目——左侧标签页，右侧实时终端。关闭窗口，会话继续运行。
+- **`⌃⌥` + 方向键** → 将任意窗口贴靠至半屏、角落或居中。不拖拽，零延迟。
+- **`⌃⌥P`** → 钉选当前窗口。从任意 Space 通过面板直达。
+
+<img src="Resources/demo-screenshot.png" alt="NARC 浮动组件、面板和仪表盘" width="800">
+
+---
+
+## NARC 替代了什么
+
+| 以前你要… | 现在你… |
+|----------|--------|
+| ⌘Tab 切 3 个 IM 应用检查角标 | 看一眼红色角标 |
+| 翻 iTerm 标签页找等审批的 Claude 会话 | 看到闪烁红色标签徽章，点一下 |
+| 拖每个窗口调整位置 | `⌃⌥→` — 完成 |
+| 在 Space 之间划触摸板找钉住的参考窗口 | `⌃⌥P` 钉选，面板点击跳转——一个手势跨 Space |
+| 在散落终端标签页里跑 `claude`，分不清哪个是哪个 | NARC 工作区：命名标签页、实时 Claude 状态、工作目录追踪 |
+
+---
+
+<a id="统一通知中心"></a>
+
+## 统一通知中心
+
+实时 Dock 角标监控：微信、企业微信、飞书。一个聚合角标替代三个分散的通知源。
+
+- 点击任意 IM 行 → 应用窗口召唤至当前屏幕（即使已最小化或在其他显示器上）
+- **Claude 专区** — 待审批和停止/错误通知独立列表，一键关闭
+- **过滤规则** — 静音特定应用、设置角标阈值、关键词匹配（开发中）
+
+---
+
+<a id="narc-工作区"></a>
+
+## NARC 工作区
+
+基于 [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) 的嵌入式多终端仪表盘。可以理解为"专为 Claude Code 工作流打造的 iTerm"。
+
+- **真实 PTY 终端** — 完整 ANSI、kitty 键盘协议、OSC 7 工作目录追踪
+- **标签页持久化** — 关闭仪表盘窗口，会话继续运行。重新打开从上次离开的位置继续
+- **实时状态徽章** — `⏳ 思考中` → `→ 工具名` → `⚠️ 待审批` → `💬 等待输入` → `🗜 压缩上下文` → `■ 已结束`
+- **`NARC_SESSION_ID` 环境变量** — Claude Code 的 Hook 事件精准路由回发起会话的标签页
+- **自定义标签标题** — 双击重命名
+- **`⌘1`–`⌘9` 标签页切换**（v1.4）、拖拽排序（v1.4）
+
+---
+
+<a id="窗口管理与钉选"></a>
+
+## 窗口管理与钉选
+
+媲美 Magnet 的键盘贴靠 + 跨 Space 窗口钉选——纯键盘驱动，无需鼠标。
+
+### 窗口贴靠
+
+| 快捷键 | 布局 |
+|--------|------|
+| `⌃⌥←` `⌃⌥→` | 左/右半屏 |
+| `⌃⌥↑` `⌃⌥↓` | 上/下半屏 |
+| `⌃⌥U` `⌃⌥I` `⌃⌥J` `⌃⌥K` | 四角 |
+| `⌃⌥↩` | 全屏 |
+| `⌃⌥C` | 居中 |
+
+- 零延迟，单次 `setFrame` 调用——无闪烁、无校正回弹
+- **跨屏状态机** — 5 秒内再次按同方向键，窗口移至相邻显示器
+- 正确处理 `AXEnhancedUserInterface`（微信、Electron 应用）
+
+### 窗口钉选
+
+- `⌃⌥P` 钉选当前窗口 → 出现在 NARC 面板中
+- **跨 Space 激活** — 点击钉选窗口通过 AppleScript 切换至其所在 Space（平滑无动画闪烁）
+- 两种模式：**临时 (📌)** — 重启清除；**持久 (🔒)** — 存盘保留
+- 使用 `CGWindowID` 精准识别窗口——多窗口应用无歧义
+
+---
+
+## 快捷键一览
+
+| 快捷键 | 操作 |
+|--------|------|
+| `⌃⌥N` | 切换 NARC 面板 |
+| `↑` / `↓` | 导航面板项目 |
+| `↩` | 激活选中项 |
+| `1`–`0` | 按索引快速访问 |
+| `Esc` | 关闭面板 |
+| `⌃⌥P` | 钉选当前窗口 |
+| `⌃⌥←` `⌃⌥→` `⌃⌥↑` `⌃⌥↓` | 窗口贴靠 |
+
+---
+
+## 安装
+
+### 系统要求
+
+- macOS 14 Sonoma 或更高版本
+- **辅助功能权限**（系统设置 → 隐私与安全性 → 辅助功能）
+- 屏幕录制权限（可选，用于跨 Space 窗口检测）
+
+### 从源码构建
+
+```bash
+git clone https://github.com/MickMi/narc_for_mac.git
+cd narc_for_mac
+./scripts/build-app.sh          # 构建 NARC.app，含稳定自签名身份
+open build/NARC.app
+```
+
+构建脚本使用固定的 `NARC Dev` 身份签名，因此重新构建后辅助功能权限不会丢失。
+
+### 开发环境运行
+
+```bash
+swift run -c release NARC
+```
+
+> SwiftTerm 首次构建时获取（约 30 秒），后续为增量编译。
+
+### Claude Code Hook 配置
+
+NARC 通过 Python Hook 监控 Claude Code 会话。启用方式：
+
+```bash
+cp scripts/narc-hook.py ~/.claude/hooks/narc-hook.py
+chmod +x ~/.claude/hooks/narc-hook.py
+```
+
+然后在 `~/.claude/settings.json` 中添加：
+
+```json
+{
+  "hooks": {
+    "PermissionRequest": [{ "type": "command", "command": "python3 ~/.claude/hooks/narc-hook.py" }],
+    "Stop":              [{ "type": "command", "command": "python3 ~/.claude/hooks/narc-hook.py" }],
+    "SessionStart":      [{ "type": "command", "command": "python3 ~/.claude/hooks/narc-hook.py" }],
+    "SessionEnd":        [{ "type": "command", "command": "python3 ~/.claude/hooks/narc-hook.py" }]
+  }
+}
+```
+
+NARC 工作区内生成的会话会自动注入 `NARC_SESSION_ID`，事件精准路由回对应标签页。外部终端（iTerm、Terminal.app）通过 TTY 设备路径 + 工作目录匹配。
+
+---
+
+## 架构
+
+```
+Sources/
+├── App/           NARCApp.swift, AppDelegate.swift       — 入口、生命周期、快捷键
+├── Models/        Models.swift, KeyboardSelection.swift  — 数据类型
+├── Services/      AppMonitorService, ClaudeSessionService, HotkeyService,
+│                  PinnedWindowService, ScreenNavigator, TerminalSessionManager,
+│                  WindowLayoutState, WindowManagerService
+├── Utils/         AXWindowHelper.swift                   — 底层 AX API
+└── Views/         Dashboard, Panel, FloatingWidget, TerminalPane,
+                   NotificationList, Preferences, ClaudeToast/Approval
+```
+
+| 层级 | 技术 |
+|------|------|
+| 语言 | Swift 5.9 |
+| UI | SwiftUI + AppKit (NSPanel, NSStatusBar) |
+| 嵌入式终端 | [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) 1.2.x |
+| 窗口控制 | Accessibility API (AXUIElement) |
+| 跨 Space | AppleScript |
+| 角标读取 | `lsappinfo` CLI |
+| 快捷键 | Carbon Event API |
+| Claude 通信 | Unix Socket + Python Hook + `NARC_SESSION_ID` |
+
+---
+
+## 路线图
+
+| 版本 | 重点 |
+|------|------|
+| **v1.3** ← 当前 | NARC 工作区、D 规范浮动组件、面板 Claude 出口 |
+| v1.4 | 标签页字号调节、`⌘1`–`⌘9` 切换、拖拽排序、回滚搜索 |
+| v1.5 | Developer ID 签名 + 公证 + GitHub Release CI |
+| v2.0 | IDE 任务监控（VS Code 扩展桥接） |
+| v2.1 | 消息内容预览 |
+| v3.0 | 第三方集成插件系统 |
+
+### 已知限制
+
+- 企业微信角标检测依赖 `lsappinfo`；企业微信的自定义 Dock 角标渲染可能无法始终检测到。
+- Claude Code Hook 需要手动安装（复制脚本 + 编辑 settings.json）。
+- 跨 Space 窗口激活依赖 AppleScript 标题匹配；高度相似的窗口标题可能产生歧义。
+
+---
+
+## 许可证
+
+MIT — 基于 Swift、SwiftUI、[SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) 及大量 `⌃⌥` 组合键构建。
+
+---
+
+<div align="center">
+
+[↑ Back to top / 回到顶部](#)
+
+</div>
