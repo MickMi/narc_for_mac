@@ -27,3 +27,12 @@ Package.resolved
 MEMORY.md
 TODO.md
 .VSCodeCounter/
+.prompts/
+.prompts
+AGENTS.md
+CLAUDE.md
+.windsurfrules
+.clinerules
+.github/copilot-instructions.md
+.trae/rules.md
+.harness-runtime/

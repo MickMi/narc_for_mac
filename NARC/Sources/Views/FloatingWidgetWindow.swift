@@ -1,5 +1,17 @@
 import Cocoa
 
+enum WidgetPointerInteractionPolicy {
+    static let dragThreshold: CGFloat = 5
+
+    /// A press remains a tap regardless of duration until pointer movement
+    /// crosses the drag threshold. This keeps deliberate and accessibility-
+    /// assisted clicks from being silently discarded.
+    static func isTap(duration: TimeInterval, distance: CGFloat, isDragging: Bool) -> Bool {
+        _ = duration
+        return !isDragging && distance < dragThreshold
+    }
+}
+
 /// A transparent NSView that accepts the first mouse click even when the window is inactive,
 /// AND restricts the window's hit-test region to the visible 48pt circle area in the
 /// center of the panel. The 40pt of transparent padding around the circle (which exists
@@ -8,6 +20,7 @@ import Cocoa
 /// from whatever app is below.
 private final class FirstMouseView: NSView {
     /// Side length of the visible widget in the center of the canvas.
+    /// Set by FloatingWidgetWindow when the widget size changes.
     var visibleSize: CGFloat = 48
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
@@ -18,15 +31,15 @@ private final class FirstMouseView: NSView {
     /// Clicks in the outer transparent shadow region pass through to the
     /// window/app below.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // `point` is in the superview's coordinate system. The contentView
-        // has no superview, so it's already in window coords.
         let local = superview.map { convert(point, from: $0) } ?? point
         let inset = (bounds.width - visibleSize) / 2
+        // Guard against negative insets (visibleSize > bounds).
+        let effectiveInset = max(0, inset)
         let visibleRect = NSRect(
-            x: bounds.minX + inset,
-            y: bounds.minY + inset,
-            width: visibleSize,
-            height: visibleSize
+            x: bounds.minX + effectiveInset,
+            y: bounds.minY + effectiveInset,
+            width: bounds.width - effectiveInset * 2,
+            height: bounds.height - effectiveInset * 2
         )
         guard visibleRect.contains(local) else { return nil }
         return super.hitTest(point)
@@ -52,15 +65,27 @@ private final class FirstMouseView: NSView {
 /// When the app is not the frontmost application, the first click on a `nonactivatingPanel`
 /// is consumed by the system to activate the window, and SwiftUI's `.onTapGesture` never fires.
 ///
-/// Solution: We intercept `mouseDown` at the AppKit level and detect short clicks (< 0.3s)
-/// that don't move significantly (< 5pt). This bypasses SwiftUI's gesture system entirely
+/// Solution: We intercept `mouseDown` at the AppKit level and detect clicks that do not
+/// move significantly (< 5pt). This bypasses SwiftUI's gesture system entirely
 /// for the initial tap, ensuring the first click always works.
 final class FloatingWidgetWindow: NSPanel {
 
-    /// Side length of the full panel (visible widget + transparent shadow padding).
-    static let canvasSize: CGFloat = 128
-    /// Side length of the visible (clickable) widget area.
-    static let widgetSize: CGFloat = 48
+    /// Visible circle diameter, read from UserDefaults so callers always get
+    /// the current value even before the window is created.
+    static var widgetSize: CGFloat {
+        switch UserDefaults.standard.string(forKey: "widgetSize") ?? "Medium" {
+        case "Small": return 40
+        case "Large": return 58
+        default:      return 48
+        }
+    }
+
+    /// Total canvas side length (visible circle + 80pt shadow padding).
+    static var canvasSize: CGFloat { widgetSize + 80 }
+
+    /// Per-instance copy, updated when the window is resized.
+    var visibleSize: CGFloat = FloatingWidgetWindow.widgetSize
+    var canvasSize: CGFloat { visibleSize + 80 }
 
     /// Called whenever the window is moved (e.g. by dragging).
     var onWindowMoved: (() -> Void)?
@@ -71,8 +96,9 @@ final class FloatingWidgetWindow: NSPanel {
     var onWidgetTapped: (() -> Void)?
 
     /// Called when the widget is right-clicked (or Ctrl+clicked).
-    /// Used to summon the Claude Dashboard window.
-    var onWidgetRightClicked: (() -> Void)?
+    /// Passes the triggering NSEvent so the handler can position a popup menu
+    /// at the click location.
+    var onWidgetRightClicked: ((NSEvent) -> Void)?
 
     /// Called when a drag gesture starts (mouse moved > 5pt while held).
     /// Spec §2: idle/hasNotification → dragging.
@@ -94,11 +120,13 @@ final class FloatingWidgetWindow: NSPanel {
     private var isDragging: Bool = false
 
     init() {
+        self.visibleSize = Self.widgetSize
+        let canvas = Self.canvasSize
         super.init(
             contentRect: NSRect(
                 x: 0, y: 0,
-                width: FloatingWidgetWindow.canvasSize,
-                height: FloatingWidgetWindow.canvasSize
+                width: canvas,
+                height: canvas
             ),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -161,7 +189,7 @@ final class FloatingWidgetWindow: NSPanel {
                 let here = event.locationInWindow
                 let dx = here.x - downLocation.x
                 let dy = here.y - downLocation.y
-                if sqrt(dx * dx + dy * dy) >= 5.0 {
+                if sqrt(dx * dx + dy * dy) >= WidgetPointerInteractionPolicy.dragThreshold {
                     isDragging = true
                     onDragStart?()
                 }
@@ -178,8 +206,11 @@ final class FloatingWidgetWindow: NSPanel {
                 let dy = upLocation.y - downLocation.y
                 let distance = sqrt(dx * dx + dy * dy)
 
-                // Short click (< 0.3s) with minimal movement (< 5pt) = tap
-                if elapsed < 0.3 && distance < 5.0 {
+                if WidgetPointerInteractionPolicy.isTap(
+                    duration: elapsed,
+                    distance: distance,
+                    isDragging: isDragging
+                ) {
                     onWidgetTapped?()
                 }
             }
@@ -189,9 +220,9 @@ final class FloatingWidgetWindow: NSPanel {
             super.sendEvent(event)
 
         case .rightMouseDown:
-            // Right-click (or Ctrl+left-click on trackpads) summons the dashboard.
+            // Right-click (or Ctrl+left-click on trackpads) shows a context menu.
             // macOS auto-translates Ctrl+leftMouseDown into rightMouseDown for us.
-            onWidgetRightClicked?()
+            onWidgetRightClicked?(event)
             super.sendEvent(event)
 
         default:
@@ -205,5 +236,20 @@ final class FloatingWidgetWindow: NSPanel {
 
     @objc private func windowDidMoveNotification() {
         onWindowMoved?()
+    }
+
+    /// Update the window frame and hit-test region when the widget size preset changes.
+    func applyWidgetSize(_ newVisibleSize: CGFloat) {
+        visibleSize = newVisibleSize
+        let newCanvas = newVisibleSize + 80
+        var frame = self.frame
+        let centerX = frame.midX
+        let centerY = frame.midY
+        frame.size = NSSize(width: newCanvas, height: newCanvas)
+        frame.origin.x = centerX - newCanvas / 2
+        frame.origin.y = centerY - newCanvas / 2
+        setFrame(frame, display: true, animate: false)
+        // contentView is always a FirstMouseView (see the custom setter).
+        (contentView as? FirstMouseView)?.visibleSize = newVisibleSize
     }
 }

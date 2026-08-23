@@ -128,10 +128,10 @@ flowchart TB
 ## 🚀 部署拓扑
 
 - **平台**: macOS 14 Sonoma+ (原生 Swift/SwiftUI)
-- **分发方式**: Developer ID 签名 + Apple Notarization + GitHub Releases
-- **不上架 Mac App Store**（避免沙盒限制，保留 Accessibility API 完整能力）
-- **CI/CD**: GitHub Actions (build → sign → notarize → release)
-- **自动更新**: Sparkle framework (未来考虑)
+- **交付方式**: GitHub 源码一条命令，本机生成并放置 `~/Applications/NARC.app`
+- **本地 Bundle**: 自动 ad-hoc 签名与严格校验；用户无需证书、付费开发者账号或单独签名步骤
+- **明确排除**: DMG、PKG、预编译 App ZIP、GitHub Release 安装包、Developer ID、公证和自动更新框架
+- **权限边界**: Assistant 与应用级 Badge 无需 Accessibility；窗口操作按需请求 macOS 授权
 
 ## 📐 架构决策记录 (ADR) 索引
 | # | 日期 | 决策 | 原因 | 状态 |
@@ -145,7 +145,7 @@ flowchart TB
 | 7 | 2026-04-14 | 确立"单仓库双职能"模型 (Harness + Brain 合并)（取代 ADR-003） | 避免双仓库同步复杂度，统一管理 | ✅ 生效 |
 | 8 | 2026-04-14 | 多平台写入策略 (IDE/CLI/Webhook) | 支持从 Cursor/Trae/Claude Web/ChatGPT 等多源写入 | ✅ 生效 |
 | 9 | 2026-04-15 | 采用原生 macOS (Swift/SwiftUI) 技术栈 | 系统集成最深，Accessibility API 完整支持，性能最优 | ✅ 生效 |
-| 10 | 2026-04-15 | 不上架 Mac App Store，GitHub Releases 分发 | 避免沙盒限制，保留窗口管理和进程监控的完整能力 | ✅ 生效 |
+| 10 | 2026-04-15 | ~~不在 App Store 上架，改用 GitHub Releases 分发~~ → 被 ADR-018 取代 | 原方案会引入预编译产物与签名发布链 | ❌ 废弃 |
 | 11 | 2026-04-15 | MVP 阶段 IM 监控采用 Dock Badge 方案 | 最轻量，无需 hack IM App 内部；架构预留通知中心拦截扩展点 | ✅ 生效 |
 | 12 | 2026-04-15 | IDE 任务状态监控延后至 P2 | MVP 聚焦核心三大功能，IDE 桥接方案待 MVP 验证后再定 | ✅ 生效 |
 | 13 | 2026-04-15 | 插件/扩展机制延后，但架构预留扩展点 | MVP 先跑通核心功能，避免过早抽象 | ✅ 生效 |
@@ -153,3 +153,4 @@ flowchart TB
 | 15 | 2026-04-22 | macOS 原生全屏（绿色按钮）自动退出后再应用布局 | 原生全屏窗口在独立 Space 中，AX API 无法直接操控；先退出全屏等动画完成再 apply | ✅ 生效 |
 | 16 | 2026-04-22 | AXWindowHelper.setFrame 采用验证+重试+波动检测机制 | Electron 等应用异步处理 resize，需要多次重试并检测尺寸稳定/波动状态 | ✅ 生效 |
 | 17 | 2026-04-22 | 面板呼出跟随鼠标所在屏幕（右下角） | 用户按 ⌃⌥N 时面板出现在当前工作屏幕的右下角，而非浮窗所在屏幕 | ✅ 生效 |
+| 18 | 2026-08-23 | GitHub 源码一条命令本地准备，不发布安装包 | 降低获取、维护和签名成本；保留本地 App Bundle 以满足 macOS 集成 | ✅ 生效 |

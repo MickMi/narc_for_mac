@@ -16,6 +16,18 @@ struct DashboardView: View {
     @ObservedObject var claudeService: ClaudeSessionService
     @ObservedObject var terminals: TerminalSessionManager
 
+    @AppStorage("terminalFontSize") private var terminalFontSize: Double = 13
+
+    @State private var diffFile: FileChange?
+    @State private var diffRows: [DiffRow] = []
+    @State private var diffAdded: Int = 0
+    @State private var diffRemoved: Int = 0
+    @State private var diffEmptyMessage: String? = nil
+    @State private var diffLoading: Bool = false
+    @State private var fileStats: [String: (added: Int, removed: Int)] = [:]
+    @State private var showFileChanges = false
+    @State private var showDiffDrawer = false
+
     var body: some View {
         VStack(spacing: 0) {
             toolbar
@@ -30,19 +42,178 @@ struct DashboardView: View {
         }
         .frame(minWidth: 760, minHeight: 480)
         .background(Color.narcBackground)
+        .overlay(alignment: .topLeading) {
+            // ⌘1–⌘9 tab switching — hidden buttons in the view hierarchy
+            // so SwiftUI routes keyboard shortcuts to the correct action.
+            ForEach(Array(terminals.sessions.prefix(9).enumerated()), id: \.element.id) { idx, session in
+                Button(action: { terminals.selectedId = session.id }) {}
+                    .keyboardShortcut(KeyEquivalent(Character("\(idx + 1)")), modifiers: .command)
+                    .opacity(0).frame(width: 0, height: 0)
+            }
+        }
         .onChange(of: terminals.sessions.map(\.id)) { _, _ in
-            // Auto-select the first session when none is selected, or pick the
-            // newest one if our selection just got removed.
             if terminals.selectedId == nil
                 || !terminals.sessions.contains(where: { $0.id == terminals.selectedId }) {
                 terminals.selectedId = terminals.sessions.last?.id
             }
         }
         .onAppear {
-            // Cold start: if we have sessions but no selection, default to last.
             if terminals.selectedId == nil {
                 terminals.selectedId = terminals.sessions.last?.id
             }
+        }
+        .onChange(of: diffFile?.path) { _, newPath in
+            if let file = diffFile {
+                loadDiff(for: file)
+                if newPath != nil { showDiffDrawer = true }
+            } else {
+                diffRows = []
+                diffAdded = 0
+                diffRemoved = 0
+                diffEmptyMessage = nil
+                showDiffDrawer = false
+            }
+        }
+        .onChange(of: terminals.selectedId) { _, _ in
+            showFileChanges = false
+            showDiffDrawer = false
+            diffFile = nil
+            refreshFileStats()
+        }
+        .onChange(of: selectedSession?.touchedFiles.count) { _, _ in
+            refreshFileStats()
+        }
+    }
+
+    /// Run `git diff` for the given file.
+    ///
+    /// Strategy (in order):
+    /// 1. Locate the git repo root from the file's parent directory — this is
+    ///    more reliable than `selectedSession?.cwd` which may point to a
+    ///    non-git directory (e.g. home dir after `cd ~`).
+    /// 2. `git diff HEAD -- <path>` captures staged + unstaged changes.
+    /// 3. If that produces nothing, check `git status --porcelain` for
+    ///    untracked / staged-new / working-tree-modified states, and fall
+    ///    back to `git diff --no-index -- /dev/null <path>`.
+    /// 4. If the repo has no commits yet (orphan branch), `HEAD` won't
+    ///    resolve — fall back to comparing against /dev/null directly.
+    private func loadDiff(for file: FileChange) {
+        diffLoading = true
+        diffRows = []; diffAdded = 0; diffRemoved = 0; diffEmptyMessage = nil
+        let path = file.path
+        // Resolve git repo root from the file's location, not from terminal cwd.
+        let fileDir = (path as NSString).deletingLastPathComponent
+        let repoRoot = Self.gitRepoRoot(near: fileDir)
+        DispatchQueue.global(qos: .userInitiated).async {
+            func git(_ args: [String]) -> String {
+                let t = Process()
+                t.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                if let root = repoRoot {
+                    t.arguments = ["-C", root] + args
+                } else {
+                    t.arguments = args
+                    t.currentDirectoryURL = URL(fileURLWithPath: fileDir)
+                }
+                let pipe = Pipe(); t.standardOutput = pipe; t.standardError = FileHandle.nullDevice
+                do { try t.run(); t.waitUntilExit() } catch { return "" }
+                return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            }
+
+            // 1) staged + unstaged relative to HEAD (tracks both tracked & staged-new files)
+            var raw = git(["diff", "HEAD", "--", path])
+            let headCheck = git(["rev-parse", "--verify", "HEAD"])
+            let noHead = headCheck.isEmpty
+
+            // 2) If HEAD diff is empty, try other approaches
+            if raw.isEmpty {
+                let status = git(["status", "--porcelain", "--", path])
+                // Untracked / staged-new / working-tree-modified / no-HEAD → full file
+                if noHead
+                    || status.hasPrefix("??")
+                    || status.hasPrefix("A")
+                    || status.hasPrefix(" M")
+                    || status.hasPrefix("M ") {
+                    raw = git(["diff", "--no-index", "--", "/dev/null", path])
+                }
+            }
+
+            let parsed = DiffParser.parse(raw)
+            DispatchQueue.main.async {
+                diffRows = parsed.rows
+                diffAdded = parsed.added
+                diffRemoved = parsed.removed
+                if parsed.rows.isEmpty {
+                    diffEmptyMessage = raw.isEmpty
+                        ? "该文件不在 Git 仓库中，或 git 命令执行失败"
+                        : "该文件相对工作区暂无差异（可能已提交或被还原）"
+                } else {
+                    diffEmptyMessage = nil
+                }
+                diffLoading = false
+            }
+        }
+    }
+
+    /// Find the git repository root nearest to the given directory.
+    private static func gitRepoRoot(near dir: String) -> String? {
+        let t = Process()
+        t.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        t.arguments = ["-C", dir, "rev-parse", "--show-toplevel"]
+        let pipe = Pipe(); t.standardOutput = pipe; t.standardError = FileHandle.nullDevice
+        do { try t.run(); t.waitUntilExit() } catch { return nil }
+        guard t.terminationStatus == 0,
+              let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !out.isEmpty else { return nil }
+        return out
+    }
+
+    /// Refresh per-file +/- line counts via a single `git diff --numstat HEAD` call.
+    /// Uses the same git-repo-root discovery strategy as `loadDiff`.
+    private func refreshFileStats() {
+        // Find a representative directory to locate the git repo: the first
+        // touched file's parent, falling back to the selected session's cwd.
+        let probeDir: String? = selectedSession?.touchedFiles.first.map {
+            ($0.path as NSString).deletingLastPathComponent
+        } ?? selectedSession?.cwd
+        guard let probeDir = probeDir,
+              let repoRoot = Self.gitRepoRoot(near: probeDir) else {
+            fileStats = [:]
+            return
+        }
+        DispatchQueue.global(qos: .utility).async {
+            func git(_ args: [String]) -> String {
+                let t = Process()
+                t.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                t.arguments = ["-C", repoRoot] + args
+                let pipe = Pipe(); t.standardOutput = pipe; t.standardError = FileHandle.nullDevice
+                do { try t.run(); t.waitUntilExit() } catch { return "" }
+                return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            }
+            var stats: [String: (added: Int, removed: Int)] = [:]
+            let raw = git(["diff", "--numstat", "HEAD"])
+            for line in raw.components(separatedBy: "\n") {
+                let parts = line.split(separator: "\t")
+                guard parts.count == 3,
+                      let add = Int(parts[0]), let del = Int(parts[1]) else { continue }
+                let path = String(parts[2])
+                stats[path] = (added: add, removed: del)
+            }
+            // Also handle untracked files: count all lines as "added"
+            let statusRaw = git(["status", "--porcelain"])
+            for line in statusRaw.components(separatedBy: "\n") {
+                guard line.hasPrefix("??") || line.hasPrefix("A") else { continue }
+                let relPath = String(line.dropFirst(3))
+                if stats[relPath] == nil {
+                    let absPath = repoRoot + "/" + relPath
+                    if let data = try? Data(contentsOf: URL(fileURLWithPath: absPath)),
+                       let content = String(data: data, encoding: .utf8) {
+                        let lineCount = content.components(separatedBy: "\n").count - 1
+                        stats[relPath] = (added: max(lineCount, 0), removed: 0)
+                    }
+                }
+            }
+            DispatchQueue.main.async { fileStats = stats }
         }
     }
 
@@ -62,6 +233,64 @@ struct DashboardView: View {
                 .foregroundStyle(Color.narcTextMuted)
 
             Spacer()
+
+            // ── 变更文件 ──
+            let fileCount = selectedSession?.touchedFiles.count ?? 0
+            if fileCount > 0 {
+                Button(action: { showFileChanges.toggle() }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 11))
+                        Text("变更文件")
+                            .font(.narcCaption)
+                        Text("\(fileCount)")
+                            .font(.narcMonoTiny)
+                            .foregroundColor(.narcAccent)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.narcAccent.opacity(0.12)))
+                    }
+                    .foregroundColor(.narcTextMuted)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Capsule().strokeBorder(Color.narcBorder, lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $showFileChanges, arrowEdge: .bottom) {
+                    FileChangePopover(
+                        files: selectedSession?.touchedFiles.reversed() ?? [],
+                        selectedPath: diffFile?.path,
+                        fileStats: fileStats,
+                        onFileTap: { file in
+                            showFileChanges = false
+                            diffFile = file
+                            showDiffDrawer = true
+                        }
+                    )
+                }
+            }
+
+            // ── 差异对比 ──
+            if diffFile != nil {
+                Button(action: { showDiffDrawer.toggle() }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 11))
+                        Text("差异对比")
+                            .font(.narcCaption)
+                    }
+                    .foregroundColor(showDiffDrawer ? .white : .narcTextMuted)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule().fill(showDiffDrawer ? Color.narcAccent : .clear)
+                    )
+                    .overlay(
+                        Capsule().strokeBorder(showDiffDrawer ? Color.clear : Color.narcBorder, lineWidth: 0.5)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
 
             Button(action: spawnShell) {
                 HStack(spacing: NarcSpacing.xs) {
@@ -83,66 +312,264 @@ struct DashboardView: View {
 
     // MARK: - Left Column (Tab list)
 
-    private var leftColumn: some View {
-        ScrollView {
-            LazyVStack(spacing: NarcSpacing.xxs) {
-                ForEach(terminals.sessions) { session in
-                    // Look up a pending approval whose narc_session_id matches
-                    // this tab. Strict match so external (iTerm) approvals
-                    // don't accidentally borrow a workspace tab's UI.
-                    let pendingApproval = claudeService.pendingApprovals.first {
-                        $0.narcSessionId == session.id.uuidString
-                    }
-                    TerminalTabRow(
-                        session: session,
-                        isSelected: session.id == terminals.selectedId,
-                        approval: pendingApproval,
-                        onTap: { terminals.selectedId = session.id },
-                        onClose: { terminals.remove(session.id) },
-                        onRename: { newTitle in terminals.rename(id: session.id, title: newTitle) },
-                        onApproveApproval: pendingApproval.map { ap in
-                            { claudeService.approve(ap) }
-                        },
-                        onDenyApproval: pendingApproval.map { ap in
-                            { claudeService.deny(ap) }
-                        },
-                        onDismissApproval: pendingApproval.map { ap in
-                            { claudeService.dismissApproval(ap) }
-                        }
-                    )
-                    .padding(.horizontal, NarcSpacing.sm)
-                }
+    /// Estimated row height used for drag-reorder target-index calculation.
+    /// Chrome-style drag: the whole row is draggable, the original becomes
+    /// transparent, a same-size floating preview follows the mouse, and other
+    /// rows animate aside to show the insertion point.
+    private static let tabRowHeight: CGFloat = 56
+    /// Measured width of the VStack content area, so the floating drag preview
+    /// matches the exact width of the tab rows (not the full ZStack).
+    @State private var listContentWidth: CGFloat = 200
+
+    private var tabDragPreviewWidth: CGFloat {
+        min(max(120, listContentWidth - NarcSpacing.lg), 260)
+    }
+
+    /// Helper that creates a TerminalTabRow with the shared wiring so the
+    /// left column and the floating drag preview always look identical.
+    private func makeTabRow(session: OwnedSession, idx _: Int) -> some View {
+        let pendingApproval = claudeService.pendingApprovals.first {
+            $0.narcSessionId == session.id.uuidString
+        }
+        return TerminalTabRow(
+            session: session,
+            isSelected: session.id == terminals.selectedId,
+            approval: pendingApproval,
+            onTap: { terminals.selectedId = session.id },
+            onClose: { terminals.remove(session.id) },
+            onRename: { newTitle in terminals.rename(id: session.id, title: newTitle) },
+            onApproveApproval: pendingApproval.map { ap in
+                { claudeService.approve(ap) }
+            },
+            onDenyApproval: pendingApproval.map { ap in
+                { claudeService.deny(ap) }
+            },
+            onDismissApproval: pendingApproval.map { ap in
+                { claudeService.dismissApproval(ap) }
             }
-            .padding(.vertical, NarcSpacing.xs)
+        )
+        .padding(.horizontal, NarcSpacing.sm)
+    }
+
+    /// Vertical offset applied to a non-dragged row to create the insertion
+    /// gap. When the user drags a tab over position `dropTargetIndex`, rows
+    /// between the source and target shift by one row height.
+    private func dragGapOffset(for idx: Int) -> CGFloat {
+        guard let dragId = terminals.draggingSessionId,
+              let sourceIdx = terminals.sessions.firstIndex(where: { $0.id == dragId }),
+              let target = terminals.dropTargetIndex,
+              sourceIdx != target
+        else { return 0 }
+
+        if target < sourceIdx {
+            // Dragging upward — rows in [target, sourceIdx-1] shift down
+            return (idx >= target && idx < sourceIdx) ? Self.tabRowHeight : 0
+        } else {
+            // Dragging downward — rows in [sourceIdx+1, target] shift up
+            return (idx > sourceIdx && idx <= target) ? -Self.tabRowHeight : 0
+        }
+    }
+
+    private var leftColumn: some View {
+        ZStack {
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(Array(terminals.sessions.enumerated()), id: \.element.id) { idx, session in
+                        let isDragging = terminals.draggingSessionId == session.id
+
+                        makeTabRow(session: session, idx: idx)
+                            .opacity(isDragging ? 0.25 : 1.0)
+                            .offset(y: isDragging ? 0 : dragGapOffset(for: idx))
+                            .zIndex(isDragging ? 100 : 0)
+                            .gesture(
+                                DragGesture(minimumDistance: 6)
+                                    .onChanged { value in
+                                        if terminals.draggingSessionId == nil {
+                                            terminals.beginDrag(session.id)
+                                        }
+                                        let raw = (CGFloat(idx) * Self.tabRowHeight + value.translation.height)
+                                            / Self.tabRowHeight
+                                        let clamped = max(
+                                            0,
+                                            min(CGFloat(terminals.sessions.count - 1), raw.rounded())
+                                        )
+                                        terminals.updateDrag(
+                                            translation: value.translation,
+                                            targetIndex: Int(clamped)
+                                        )
+                                    }
+                                    .onEnded { value in
+                                        let moved = abs(value.translation.height) >= 4
+                                            || abs(value.translation.width) >= 10
+                                        terminals.endDrag(commit: moved)
+                                    }
+                            )
+                            .animation(.narcSnap, value: terminals.dropTargetIndex)
+                    }
+                }
+                .padding(.vertical, NarcSpacing.xs)
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.onAppear {
+                            listContentWidth = geo.size.width
+                        }.onChange(of: geo.size.width) { _, w in
+                            listContentWidth = w
+                        }
+                    }
+                )
+            }
+
+            // Floating drag preview — rendered at the ZStack level so it
+            // overlays the ScrollView and is never clipped by the content area.
+            // Constrained to the measured VStack width so the preview doesn't
+            // expand to fill the ZStack (TerminalTabRow has Spacer() inside).
+            if let draggingId = terminals.draggingSessionId,
+               let draggedIdx = terminals.sessions.firstIndex(where: { $0.id == draggingId })
+            {
+                makeTabRow(session: terminals.sessions[draggedIdx], idx: draggedIdx)
+                    .frame(width: tabDragPreviewWidth, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .opacity(0.92)
+                    .softShadow("lg")
+                    .offset(terminals.draggingTranslation)
+                    .allowsHitTesting(false)
+            }
         }
         .background(Color.narcBackground.opacity(0.6))
     }
 
-    // MARK: - Right Column (Active terminal)
+    // MARK: - Right Column (Active terminal + file panel + diff overlay)
+
+    private var selectedSession: OwnedSession? {
+        terminals.sessions.first { $0.id == terminals.selectedId }
+    }
 
     @ViewBuilder
     private var rightColumn: some View {
         if terminals.sessions.isEmpty {
             emptyState
         } else {
-            ZStack {
-                ForEach(terminals.sessions) { session in
-                    TerminalPaneView(
-                        executable: session.executable,
-                        args: session.args,
-                        cwd: session.cwd,
-                        narcSessionId: session.id.uuidString,
-                        isSelected: session.id == terminals.selectedId,
-                        onExit: { _ in terminals.markDead(session.id) },
-                        onTitleChange: { title in terminals.updateAutoTitle(id: session.id, title: title) },
-                        onCwdChange: { cwd in terminals.updateCwd(id: session.id, cwd: cwd) }
-                    )
-                    .opacity(session.id == terminals.selectedId ? 1 : 0)
-                    .allowsHitTesting(session.id == terminals.selectedId)
+            terminalPane
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.narcBackground)
+                .overlay(alignment: .trailing) {
+                    if diffFile != nil, showDiffDrawer {
+                        diffDrawer
+                            .frame(width: 460)
+                            .background(Color.narcBackground)
+                            .overlay(Rectangle().frame(width: 0.5).foregroundColor(.narcBorder), alignment: .leading)
+                            .shadow(color: .black.opacity(0.12), radius: 16, x: -4)
+                            .transition(.move(edge: .trailing))
+                    }
                 }
-            }
-            .background(Color.narcBackground)
+                .animation(.narcSoft, value: showDiffDrawer)
         }
+    }
+
+    /// The terminal ZStack (factored out so it can be used in both layouts).
+    /// Each session's PTY runs continuously in a ZStack; only the selected one
+    /// is visible and interactive. The explicit `.frame(maxWidth:maxHeight:)`
+    /// is critical — without it the ZStack sizes to its children's intrinsic
+    /// sizes, which for an NSViewRepresentable-backed terminal can collapse to
+    /// zero and disable scrolling entirely.
+    private var terminalPane: some View {
+        ZStack {
+            ForEach(terminals.sessions) { session in
+                TerminalPaneView(
+                    executable: session.executable,
+                    args: session.args,
+                    cwd: session.cwd,
+                    narcSessionId: session.id.uuidString,
+                    isSelected: session.id == terminals.selectedId,
+                    fontSize: terminalFontSize,
+                    onExit: { _ in terminals.markDead(session.id) },
+                    onTitleChange: { title in terminals.updateAutoTitle(id: session.id, title: title) },
+                    onCwdChange: { cwd in terminals.updateCwd(id: session.id, cwd: cwd) },
+                    onRegisterTerminate: { callback in
+                        terminals.registerTerminateCallback(for: session.id, callback)
+                    },
+                    sessionLogURL: TerminalSessionManager.logURL(for: session.id)
+                )
+                .opacity(session.id == terminals.selectedId ? 1 : 0)
+                .allowsHitTesting(session.id == terminals.selectedId)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Right-side diff overlay drawer.
+    private var diffDrawer: some View {
+        VStack(spacing: 0) {
+            // ── Header ──
+            HStack(spacing: NarcSpacing.sm) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .foregroundColor(.narcAccent)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text((diffFile?.path as NSString?)?.lastPathComponent ?? "")
+                        .font(.narcCaption).fontWeight(.medium).foregroundColor(.narcText).lineLimit(1)
+                    Text(breadcrumb(diffFile?.path))
+                        .font(.system(size: 10, design: .monospaced)).foregroundColor(.narcTextFaint)
+                        .lineLimit(1).truncationMode(.head)
+                }
+                Spacer()
+                if diffAdded > 0 { summaryPill("+\(diffAdded)", .narcSuccess) }
+                if diffRemoved > 0 { summaryPill("−\(diffRemoved)", .narcDanger) }
+                Button {
+                    if let p = diffFile?.path { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
+                } label: {
+                    Image(systemName: "arrow.up.forward.app")
+                }
+                .buttonStyle(.plain).help("在编辑器打开")
+                Button { showDiffDrawer = false } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain).help("关闭")
+            }
+            .padding(.horizontal, NarcSpacing.md).padding(.vertical, NarcSpacing.sm)
+            .background(Color.narcSurfaceMuted.opacity(0.6))
+            Divider()
+
+            // ── Body ──
+            if diffLoading {
+                VStack {
+                    Spacer()
+                    ProgressView().scaleEffect(0.7)
+                    Text("读取 git diff…").font(.narcCaption).foregroundColor(.narcTextMuted)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let msg = diffEmptyMessage {
+                VStack(spacing: NarcSpacing.sm) {
+                    Spacer()
+                    Image(systemName: "doc.text").font(.system(size: 28)).foregroundColor(.narcTextFaint)
+                    Text(msg).font(.narcCaption).foregroundColor(.narcTextMuted).multilineTextAlignment(.center)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                DiffRowsView(rows: diffRows)
+            }
+        }
+    }
+
+    // MARK: - Diff Helpers
+
+    private func breadcrumb(_ path: String?) -> String {
+        guard let path = path else { return "" }
+        let dir = (path as NSString).deletingLastPathComponent
+        let home = NSHomeDirectory()
+        if dir == home { return "~" }
+        if dir.hasPrefix(home + "/") { return "~" + dir.dropFirst(home.count) }
+        return dir
+    }
+
+    private func summaryPill(_ text: String, _ color: Color) -> some View {
+        Text(text)
+            .font(.narcMonoTiny)
+            .foregroundColor(color)
+            .padding(.horizontal, NarcSpacing.xs)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(color.opacity(0.12)))
     }
 
     // MARK: - Empty State
@@ -707,5 +1134,292 @@ struct ApprovalPopoverContent: View {
             return input.map { "\($0.key): \($0.value)" }.joined(separator: "\n")
         }
         return approval.commandDescription
+    }
+}
+
+// MARK: - File Change Popover
+
+/// Popover content listing files Claude has touched in the current session.
+/// Each row shows the tool icon + file path. Click a row to open its diff.
+struct FileChangePopover: View {
+    let files: [FileChange]
+    var selectedPath: String? = nil
+    var fileStats: [String: (added: Int, removed: Int)] = [:]
+    var onFileTap: ((FileChange) -> Void)? = nil
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack(spacing: NarcSpacing.xs) {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 11))
+                    .foregroundColor(.narcTextMuted)
+                Text("最近文件变更")
+                    .font(.narcCaption)
+                    .fontWeight(.medium)
+                    .foregroundColor(.narcText)
+                Spacer()
+                Text("\(files.count)")
+                    .font(.narcMonoTiny)
+                    .foregroundColor(.narcTextMuted)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.narcSurfaceMuted))
+            }
+            .padding(.horizontal, NarcSpacing.md)
+            .padding(.vertical, NarcSpacing.sm - 2)
+
+            Divider()
+
+            if files.isEmpty {
+                VStack(spacing: NarcSpacing.xs) {
+                    Spacer()
+                    Text("暂无文件变更")
+                        .font(.narcCaption)
+                        .foregroundColor(.narcTextMuted)
+                    Text("Claude 执行 Edit / Write 后这里会列出改动的文件")
+                        .font(.system(size: 10))
+                        .foregroundColor(.narcTextFaint)
+                    Spacer()
+                }
+                .frame(height: 100)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(files.enumerated()), id: \.offset) { idx, change in
+                            FileChangeRow(
+                                change: change,
+                                isSelected: selectedPath == change.path,
+                                added: fileStats[change.path]?.added,
+                                removed: fileStats[change.path]?.removed
+                            )
+                            .contentShape(Rectangle())
+                            .onTapGesture { onFileTap?(change) }
+                            if idx < files.count - 1 {
+                                Divider()
+                                    .padding(.leading, 36)
+                            }
+                        }
+                    }
+                    .padding(.vertical, NarcSpacing.xxs)
+                }
+                .frame(maxHeight: 360)
+            }
+        }
+        .frame(width: 320)
+    }
+}
+
+private struct FileChangeRow: View {
+    let change: FileChange
+    var isSelected: Bool = false
+    var added: Int? = nil
+    var removed: Int? = nil
+
+    private var toolIcon: Image {
+        switch change.tool {
+        case "Edit":  return Image(systemName: "pencil")
+        case "Write": return Image(systemName: "plus.square")
+        case "Read":  return Image(systemName: "eye")
+        default:      return Image(systemName: "arrow.right")
+        }
+    }
+
+    private var fileName: String {
+        (change.path as NSString).lastPathComponent
+    }
+
+    private var directory: String {
+        let dir = (change.path as NSString).deletingLastPathComponent
+        let home = NSHomeDirectory()
+        if dir == home { return "~" }
+        if dir.hasPrefix(home + "/") { return "~" + dir.dropFirst(home.count) }
+        return dir
+    }
+
+    var body: some View {
+        HStack(spacing: NarcSpacing.sm) {
+            toolIcon
+                .font(.system(size: 12))
+                .foregroundColor(isSelected ? .narcAccent : .narcTextMuted)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(fileName)
+                    .font(.narcCaption)
+                    .foregroundColor(.narcText)
+                    .lineLimit(1)
+                Text(directory)
+                    .font(.system(size: 10))
+                    .foregroundColor(.narcTextMuted)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+            }
+
+            Spacer()
+
+            // Diff stat pills
+            if let added = added, added > 0 {
+                Text("+\(added)")
+                    .font(.narcMonoTiny)
+                    .foregroundColor(.narcSuccess)
+                    .padding(.horizontal, NarcSpacing.xs)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.narcSuccess.opacity(0.12)))
+            }
+            if let removed = removed, removed > 0 {
+                Text("−\(removed)")
+                    .font(.narcMonoTiny)
+                    .foregroundColor(.narcDanger)
+                    .padding(.horizontal, NarcSpacing.xs)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.narcDanger.opacity(0.12)))
+            }
+
+            Button(action: {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: change.path)])
+            }) {
+                Image(systemName: "arrow.up.forward.square")
+                    .font(.system(size: 11))
+                    .foregroundColor(.narcTextMuted)
+            }
+            .buttonStyle(.plain)
+            .help("在 Finder 中显示")
+        }
+        .padding(.horizontal, NarcSpacing.md)
+        .padding(.vertical, NarcSpacing.xs + 1)
+        .softRowBackground(isSelected: isSelected, needsAttention: false, isHovering: false)
+    }
+}
+
+// MARK: - Diff Row Types & Parser
+
+struct DiffRow: Identifiable {
+    enum Kind { case context, add, del, gap }
+    let id = UUID()
+    let kind: Kind
+    let oldNum: Int?
+    let newNum: Int?
+    let text: String
+}
+
+enum DiffParser {
+    static func parse(_ raw: String) -> (rows: [DiffRow], added: Int, removed: Int) {
+        var rows: [DiffRow] = []; var added = 0; var removed = 0
+        var oldLine = 0; var newLine = 0; var lastNew = 0; var seenHunk = false
+        for line in raw.components(separatedBy: "\n") {
+            if line.hasPrefix("diff ") || line.hasPrefix("index ") || line.hasPrefix("--- ")
+               || line.hasPrefix("+++ ") || line.hasPrefix("new file") || line.hasPrefix("deleted file")
+               || line.hasPrefix("similarity ") || line.hasPrefix("rename ") || line.hasPrefix("\\ ") { continue }
+            if line.hasPrefix("@@") {
+                let (a, c) = hunkStarts(line)
+                if seenHunk { let gap = c - lastNew - 1
+                    if gap > 0 { rows.append(DiffRow(kind: .gap, oldNum: nil, newNum: nil, text: "\(gap) 行未改动")) } }
+                oldLine = a; newLine = c; seenHunk = true; continue
+            }
+            guard seenHunk else { continue }
+            if line.hasPrefix("+") {
+                rows.append(DiffRow(kind: .add, oldNum: nil, newNum: newLine, text: String(line.dropFirst())))
+                newLine += 1; lastNew = newLine - 1; added += 1
+            } else if line.hasPrefix("-") {
+                rows.append(DiffRow(kind: .del, oldNum: oldLine, newNum: nil, text: String(line.dropFirst())))
+                oldLine += 1; removed += 1
+            } else {
+                let t = line.hasPrefix(" ") ? String(line.dropFirst()) : line
+                rows.append(DiffRow(kind: .context, oldNum: oldLine, newNum: newLine, text: t))
+                oldLine += 1; newLine += 1; lastNew = newLine - 1
+            }
+        }
+        return (rows, added, removed)
+    }
+
+    private static func hunkStarts(_ s: String) -> (Int, Int) {
+        var o = 0, n = 0
+        for p in s.split(separator: " ") {
+            if p.hasPrefix("-") { o = Int(p.dropFirst().split(separator: ",").first ?? "") ?? 0 }
+            else if p.hasPrefix("+") { n = Int(p.dropFirst().split(separator: ",").first ?? "") ?? 0 }
+        }
+        return (o, n)
+    }
+}
+
+// MARK: - Diff Rows View
+
+struct DiffRowsView: View {
+    let rows: [DiffRow]
+
+    var body: some View {
+        ScrollView([.vertical, .horizontal]) {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(rows) { row in
+                    DiffRowCell(row: row)
+                }
+            }
+        }
+        .background(Color.narcBackground)
+    }
+}
+
+private struct DiffRowCell: View {
+    let row: DiffRow
+
+    var body: some View {
+        switch row.kind {
+        case .gap:
+            HStack(spacing: 0) {
+                Rectangle().fill(Color.narcBorder).frame(height: 1).frame(width: 36)
+                Text(row.text)
+                    .font(.narcMonoSmall)
+                    .foregroundColor(.narcTextFaint)
+                Rectangle().fill(Color.narcBorder).frame(height: 1)
+            }
+            .padding(.vertical, 2)
+            .padding(.horizontal, NarcSpacing.sm)
+            .background(Color.narcSurfaceMuted.opacity(0.5))
+
+        case .context:
+            HStack(spacing: 0) {
+                lineNumView(row.oldNum).frame(width: 38, alignment: .trailing)
+                lineNumView(row.newNum).frame(width: 38, alignment: .trailing)
+                Text(row.text)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.narcText)
+            }
+            .padding(.horizontal, 2)
+
+        case .add:
+            HStack(spacing: 0) {
+                Color.clear.frame(width: 38)
+                lineNumView(row.newNum).frame(width: 38, alignment: .trailing)
+                Text("+")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.narcSuccess)
+                Text(row.text)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.narcSuccess)
+            }
+            .padding(.horizontal, 2)
+            .background(Color.narcSuccess.opacity(0.10))
+
+        case .del:
+            HStack(spacing: 0) {
+                lineNumView(row.oldNum).frame(width: 38, alignment: .trailing)
+                Color.clear.frame(width: 38)
+                Text("−")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.narcDanger)
+                Text(row.text)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.narcDanger)
+            }
+            .padding(.horizontal, 2)
+            .background(Color.narcDanger.opacity(0.10))
+        }
+    }
+
+    private func lineNumView(_ num: Int?) -> some View {
+        Text(num.map(String.init) ?? "")
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundColor(.narcTextFaint)
     }
 }
