@@ -1,17 +1,21 @@
-version: 1
+version: 2
 
 # === 0. Meta ===
 meta:
   language: "zh"
+  project_version: "v1.3"           # 当前发布版本
+  last_updated: "2026-07-01"
 
-# === 0.5 Model（多模型协作）===
-model:
-  strong:
-    name: "claude"
-  weak:
-    name: "deepseek"
-  # 标准多模型流转：强模型出 PRD+蓝图 → 弱模型实现 → 强模型审查
-  solo_mode: false
+# === 0.5 Model Routing（可选，不是项目状态）===
+model_routing:
+  default: "single_agent"
+  policy: "Harness 约束开发质量和交接纪律；是否使用强弱模型切换只是调度策略，不写入项目事实。"
+  optional_roles:
+    pm: "需求澄清 / PRD"
+    blueprint: "实现蓝图 / 侵入评估"
+    executor: "按已确认范围实现"
+    reviewer: "审查缺陷 / 风险 / 验证"
+    qa: "验收路径 / 发布前检查"
 
 # === 1. Brain ===
 brain:
@@ -19,27 +23,109 @@ brain:
   path: "~/.mick-brain"
 
 # === 2. Design ===
-# 本项目有独立 Design AI（design-handoff/ 下产出 .swift），AI 只出设计简报
 design:
-  mode: "designer_brief"
-  ai_tool: "generic"
+  mode: "designer_brief"            # 本项目有独立 Design AI（Open Design）
+  ai_tool: "generic"                # Design AI 产出 → design-handoff/ 目录
+  handoff_dir: "design-handoff/"    # Design AI 交接目录
+  token_owner: "Design"             # Token 冲突时以 Sources/Design/DesignTokens.swift 为准
 
 # === 3. Dev ===
 dev:
-  scope: "frontend_only"   # 纯客户端 macOS app，无后端
+  scope: "frontend_only"            # 纯客户端 macOS app，无后端
   tech_stack:
-    language: "Swift 5"
+    language: "Swift 5.9"
     framework: "SwiftUI + AppKit (NSPanel/NSHostingView)"
-    database: "无（UserDefaults 持久化）"
+    database: "无（UserDefaults + JSONEncoder 持久化）"
     package_manager: "SPM"
+    terminal: "SwiftTerm 1.2.x"
+  build: "swift build"
+  app_build: "bash scripts/build-app.sh"
 
 # === 4. Testing ===
-# UI 重客户端，关键路径手测为主
 testing:
-  mode: "smoke_only"
+  mode: "smoke_only"                # UI 重客户端，关键路径手测为主
   coverage_threshold: 0
+  manual_checklist:                 # 每次合并前的手测清单
+    - "swift build 通过"
+    - "悬浮窗拖拽无灰底"
+    - "badge 计数准确（仅统计 external approval + error）"
+    - "终端 Tab 增删切无回归"
+    - "智能复制 (⌘⇧C) 可用 + 气泡反馈正常"
 
 # === 5. Strictness ===
 strictness:
   mode: "soft"
-  pm_max_rounds: 3
+  pm_max_rounds: 3                  # PM 需求审查最多 3 轮追问
+
+# === 6. Pipeline（Agent 流水线）===
+pipeline:
+  phases:
+    - id: pm
+      agent: "pm_agent"
+      prompt_file: ".prompts/pm_agent.md"
+      output: ["docs/PRD-{feature}.md", "docs/architecture.md", "TODO.md"]
+      gate: "用户确认需求确认清单"
+
+    - id: design                    # 仅 UI 相关特性触发
+      agent: "design_agent"
+      trigger: "PRD 涉及 UI/视觉变更"
+      output: ["docs/design/{feature}-design-brief.md"]
+      handoff: "design-handoff/ 目录（Design AI 独立产出 .swift）"
+
+    - id: blueprint
+      agent: "pm_agent"
+      prompt_file: ".prompts/pm_agent.md"
+      output: ["docs/blueprint-{feature}.md"]
+      gate: "蓝图已确认（含侵入评估 + 文件清单）"
+
+    - id: executor
+      agent: "executor_agent"
+      prompt_file: ".prompts/executor_agent.md"
+      input: "docs/blueprint-{feature}.md"
+      rule: "只实现蓝图范围内的文件改动，不自行扩展设计"
+
+    - id: review
+      agent: "reviewer_agent"
+      prompt_file: ".prompts/reviewer_agent.md"
+      input: ["docs/blueprint-{feature}.md", "docs/PRD-{feature}.md"]
+      output: ["docs/reviews/{feature}-{date}.md"]
+      rule: "对照蓝图判定项 + PRD 验收标准逐条审查"
+
+    - id: qa
+      agent: "pm_agent"
+      input: "docs/reviews/{feature}-{date}.md"
+      rule: "确认 Must Fix 已修 + 编译通过 → 标记完成"
+
+# === 7. 已知约束（从已完成特性中提炼）===
+constraints:
+  swift_term:
+    - "getSelection()/selectionActive 是 public，cellDimension 是 internal — 不要碰 internal API"
+    - "mouseUp/resignFirstResponder 未标记 open，不能重写 — 用 NSEvent.addLocalMonitorForEvents 替代"
+    - "SwiftTerm 视图坐标系可能是 flipped，UI 定位需实测确认"
+  model_routing:
+    - "不要在项目状态里硬编码强弱模型；只记录当前需要的角色和交付物"
+    - "无论使用哪个模型，都必须遵守同一套先读后改、证据分层、范围收敛和验证闭环"
+    - "蓝图必须精确到文件/行为边界；执行阶段禁止自行扩展范围"
+  swiftui_macos:
+    - ".regularMaterial 在缩放/旋转变换下会产生灰底方块 — 弃用材质，改纯色填充"
+    - ".compositingGroup() 会把毛玻璃栅格化成可见方块 — 不要与 material 叠加使用"
+    - "NSPanel 的 hit-test 区域与 SwiftUI frame 不一致 — 需手动配置"
+  applescript:
+    - "Cross-Space 窗口激活用 AppleScript，有 ~200ms 延迟 — 不可用于实时交互"
+    - "CGWindowID 在多窗口应用中是最可靠的窗口标识"
+
+# === 8. 当前阶段状态 ===
+phase_status:
+  completed:
+    - feature: "claude-tab-monitor"
+      date: "2026-06-10"
+      review: "docs/reviews/claude-tab-monitor-2026-06-10.md"
+      verdict: "✅ 9/9 通过，已合并"
+    - feature: "workspace-ux-polish"
+      date: "2026-06-18"
+      review: "docs/reviews/smart-copy-drag-fix-2026-06-18.md"
+      verdict: "✅ #3 通过 + #2 修复后合并"
+  in_progress: null
+  next:
+    - "手测已修改但未验收的 Workspace / Panel / Tab 体验修复"
+    - "重新定义 diff / 文件改动 / app 内回合卡片需求"

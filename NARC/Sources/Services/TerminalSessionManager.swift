@@ -24,6 +24,9 @@ struct OwnedSession: Identifiable, Equatable {
     /// Set by TerminalSessionManager subscribing to ClaudeSessionService and
     /// matching by NARC_SESSION_ID. nil means "no claude detected in this tab".
     var claude: ClaudeSession?
+    /// Files Claude has touched in this session (Edit / Write / Read).
+    /// Populated from ClaudioSession.fileHistory via applyClaudeUpdates.
+    var touchedFiles: [FileChange] = []
     /// True when this tab's claude state changed while the user wasn't looking
     /// at it — driving the small red dot in the sidebar so the user can scan
     /// "what happened while I was on another tab". Cleared automatically when
@@ -53,6 +56,25 @@ final class TerminalSessionManager: ObservableObject {
     /// Subscription to ClaudeSessionService, used to enrich tabs with claude state.
     private var claudeSubscription: AnyCancellable?
 
+    /// Per-session callbacks that terminate the underlying PTY process.
+    /// Registered by TerminalPaneView and invoked by `terminateAll()`.
+    private var terminateCallbacks: [UUID: () -> Void] = [:]
+
+    // MARK: - Session Logging
+
+    private static let sessionLogDir: URL = {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".narc/sessions")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    /// The log file URL for a given session. The file is created lazily when
+    /// the first data arrives.
+    static func logURL(for sessionId: UUID) -> URL {
+        sessionLogDir.appendingPathComponent("\(sessionId.uuidString).log")
+    }
+
     init(claudeService: ClaudeSessionService = .shared) {
         // Watch the shared claude state and project it onto our tabs by
         // matching NARC_SESSION_ID. Whenever a hook event arrives we re-fan
@@ -80,6 +102,7 @@ final class TerminalSessionManager: ObservableObject {
             let freezeEnded = (newClaude == nil && oldStatus == .ended)
             if !freezeEnded {
                 sessions[idx].claude = newClaude
+                sessions[idx].touchedFiles = newClaude?.fileHistory ?? []
             }
 
             // Flag tabs whose status meaningfully changed while the user was
@@ -129,7 +152,64 @@ final class TerminalSessionManager: ObservableObject {
     /// Remove a session from the list. The pane view's `onExit` should already
     /// have fired (or will fire when SwiftUI unmounts the pane and SIGHUP propagates).
     func remove(_ id: UUID) {
+        terminateCallbacks.removeValue(forKey: id)
         sessions.removeAll { $0.id == id }
+    }
+
+    /// Reorder sessions (drag-to-reorder in the tab list).
+    func moveSession(from source: IndexSet, to destination: Int) {
+        sessions.move(fromOffsets: source, toOffset: destination)
+    }
+
+    // MARK: - Chrome-style Drag State
+
+    /// The session currently being dragged, if any. nil when idle.
+    @Published var draggingSessionId: UUID? = nil
+    /// Current translation of the drag gesture (relative to the row's origin).
+    @Published var draggingTranslation: CGSize = .zero
+    /// The index where the dragged item would be inserted. nil when not hovering
+    /// over a valid drop position.
+    @Published var dropTargetIndex: Int? = nil
+
+    func beginDrag(_ id: UUID) {
+        draggingSessionId = id
+        draggingTranslation = .zero
+    }
+
+    func updateDrag(translation: CGSize, targetIndex: Int?) {
+        draggingTranslation = translation
+        dropTargetIndex = targetIndex
+    }
+
+    func endDrag(commit: Bool) {
+        if commit,
+           let id = draggingSessionId,
+           let target = dropTargetIndex,
+           let from = sessions.firstIndex(where: { $0.id == id }) {
+            if target != from {
+                let s = sessions.remove(at: from)
+                sessions.insert(s, at: target)
+            }
+        }
+        draggingSessionId = nil
+        draggingTranslation = .zero
+        dropTargetIndex = nil
+    }
+
+    /// Register a closure that terminates the underlying PTY process for a session.
+    /// Called by TerminalPaneView when the view appears.
+    func registerTerminateCallback(for sessionId: UUID, _ callback: @escaping () -> Void) {
+        terminateCallbacks[sessionId] = callback
+    }
+
+    /// Kill all terminal processes. Called when the user chooses "关闭终端" in
+    /// the Workspace close-confirmation alert.
+    func terminateAll() {
+        for (_, callback) in terminateCallbacks {
+            callback()
+        }
+        terminateCallbacks.removeAll()
+        sessions.removeAll()
     }
 
     /// User explicitly renamed the tab. Persists across PTY title changes.

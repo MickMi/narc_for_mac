@@ -1,8 +1,123 @@
 import Cocoa
 import Combine
 
+/// Reads Dock badge values from LaunchServices while handling apps that expose
+/// more than one application serial number (ASN) for the same bundle ID.
+struct DockBadgeReader {
+    typealias Runner = ([String]) -> String?
+
+    private let runLSAppInfo: Runner
+
+    init(runLSAppInfo: @escaping Runner) {
+        self.runLSAppInfo = runLSAppInfo
+    }
+
+    init() {
+        self.runLSAppInfo = Self.runSystemLSAppInfo
+    }
+
+    /// Returns nil only when LaunchServices cannot provide a trustworthy value.
+    /// Duplicate app registrations represent one app, so their values are never added.
+    func badgeCount(for bundleID: String) -> Int? {
+        let directArguments = ["info", "-only", "StatusLabel", bundleID]
+        if let directCount = Self.parseBadgeCount(runLSAppInfo(directArguments)) {
+            return directCount
+        }
+
+        guard let listOutput = runLSAppInfo(["list"]) else { return nil }
+        let applicationIdentifiers = Self.applicationIdentifiers(
+            in: listOutput,
+            matching: bundleID
+        )
+        guard !applicationIdentifiers.isEmpty else { return nil }
+
+        let counts = applicationIdentifiers.compactMap { identifier in
+            Self.parseBadgeCount(
+                runLSAppInfo(["info", "-only", "StatusLabel", identifier])
+            )
+        }
+        return counts.max()
+    }
+
+    private static func parseBadgeCount(_ output: String?) -> Int? {
+        guard let output,
+              let labelRange = output.range(of: "\"label\"=") else {
+            return nil
+        }
+        let afterLabel = output[labelRange.upperBound...]
+        guard afterLabel.first == "\"" else { return nil }
+
+        let valueStart = afterLabel.index(after: afterLabel.startIndex)
+        guard let valueEnd = afterLabel[valueStart...].firstIndex(of: "\"") else {
+            return nil
+        }
+
+        let value = String(afterLabel[valueStart..<valueEnd])
+        if value.isEmpty { return 0 }
+        return Int(value) ?? 1
+    }
+
+    private static func applicationIdentifiers(
+        in listOutput: String,
+        matching bundleID: String
+    ) -> [String] {
+        var currentIdentifier: String?
+        var matches: [String] = []
+        var seen = Set<String>()
+
+        for rawLine in listOutput.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(rawLine)
+            if let range = line.range(
+                of: #"ASN:0x[0-9A-Fa-f]+-0x[0-9A-Fa-f]+"#,
+                options: .regularExpression
+            ) {
+                currentIdentifier = String(line[range])
+            }
+
+            guard line.contains("bundleID=\"\(bundleID)\""),
+                  let identifier = currentIdentifier,
+                  seen.insert(identifier).inserted else {
+                continue
+            }
+            matches.append(identifier)
+        }
+
+        return matches
+    }
+
+    private static func runSystemLSAppInfo(arguments: [String]) -> String? {
+        runProcess(
+            executableURL: URL(fileURLWithPath: "/usr/bin/lsappinfo"),
+            arguments: arguments
+        )
+    }
+
+    static func runProcess(executableURL: URL, arguments: [String]) -> String? {
+        let task = Process()
+        task.executableURL = executableURL
+        task.arguments = arguments
+
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+
+        do {
+            try task.run()
+        } catch {
+            return nil
+        }
+
+        // Drain stdout while the process is still running. Waiting first can deadlock
+        // when `lsappinfo list` fills the pipe buffer before it can exit.
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0 else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+}
+
 /// Service that monitors running applications for Dock badge changes.
-/// Uses NSWorkspace notifications + periodic polling of Dock badge via Accessibility API.
+/// Uses NSWorkspace notifications + periodic polling of Dock badge via LaunchServices.
 class AppMonitorService: ObservableObject {
 
     // MARK: - Published State
@@ -25,6 +140,7 @@ class AppMonitorService: ObservableObject {
     private var timer: Timer?
     private var cancellables = Set<AnyCancellable>()
     private let pollingInterval: TimeInterval = 2.0
+    private let dockBadgeReader = DockBadgeReader()
 
     /// Default apps to monitor (can be customized via preferences).
     private let defaultMonitoredApps: [MonitoredApp] = [
@@ -37,8 +153,59 @@ class AppMonitorService: ObservableObject {
     // MARK: - Init
 
     init() {
-        notificationStates = defaultMonitoredApps.map { NotificationState(app: $0) }
+        notificationStates = Self.loadMonitoredApps().map { NotificationState(app: $0) }
         loadFilters()
+    }
+
+    // MARK: - Monitored App Management
+
+    /// Toggle whether an app is monitored.
+    func toggleApp(bundleID: String) {
+        guard let idx = notificationStates.firstIndex(where: { $0.app.bundleID == bundleID }) else { return }
+        notificationStates[idx].app.isEnabled.toggle()
+        saveMonitoredApps()
+    }
+
+    /// Add a new app to the monitoring list.
+    func addApp(_ app: MonitoredApp) {
+        guard !notificationStates.contains(where: { $0.app.bundleID == app.bundleID }) else { return }
+        notificationStates.append(NotificationState(app: app))
+        saveMonitoredApps()
+    }
+
+    /// Remove an app from the monitoring list.
+    func removeApp(bundleID: String) {
+        notificationStates.removeAll { $0.app.bundleID == bundleID }
+        saveMonitoredApps()
+    }
+
+    private func saveMonitoredApps() {
+        let apps = notificationStates.map { $0.app }
+        if let data = try? JSONEncoder().encode(apps) {
+            UserDefaults.standard.set(data, forKey: "narc.monitoredApps")
+        }
+    }
+
+    private static func loadMonitoredApps() -> [MonitoredApp] {
+        guard let data = UserDefaults.standard.data(forKey: "narc.monitoredApps"),
+              let saved = try? JSONDecoder().decode([MonitoredApp].self, from: data),
+              !saved.isEmpty else {
+            return [
+                MonitoredApp(id: "com.tencent.xinWeChat", displayName: "WeChat", category: .im, isEnabled: true),
+                MonitoredApp(id: "com.tencent.WeWorkMac", displayName: "WeCom", category: .im, isEnabled: true),
+                MonitoredApp(id: "com.electron.lark", displayName: "Lark", category: .im, isEnabled: true),
+            ]
+        }
+        var merged = saved
+        let requiredDefaults = [
+            MonitoredApp(id: "com.tencent.xinWeChat", displayName: "WeChat", category: .im, isEnabled: true),
+            MonitoredApp(id: "com.tencent.WeWorkMac", displayName: "WeCom", category: .im, isEnabled: true),
+            MonitoredApp(id: "com.electron.lark", displayName: "Lark", category: .im, isEnabled: true),
+        ]
+        for app in requiredDefaults where !merged.contains(where: { $0.bundleID == app.bundleID }) {
+            merged.append(app)
+        }
+        return merged
     }
 
     // MARK: - Filter Rules
@@ -170,12 +337,13 @@ class AppMonitorService: ObservableObject {
 
                     state.isRunning = isRunning
 
-                    if isRunning {
-                        let badge = badgeMap[state.app.bundleID] ?? 0
+                    if isRunning, let badge = badgeMap[state.app.bundleID] {
                         if badge != state.badgeCount {
                             print("[NARC] \(state.app.displayName): badge changed \(state.badgeCount) → \(badge)")
                         }
                         state.badgeCount = badge
+                    } else if isRunning {
+                        print("[NARC] ⚠️ \(state.app.displayName): Dock badge unavailable; keeping \(state.badgeCount)")
                     } else {
                         state.badgeCount = 0
                     }
@@ -195,51 +363,11 @@ class AppMonitorService: ObservableObject {
     private func readAllDockBadges(for bundleIDs: [String]) -> [String: Int] {
         var result: [String: Int] = [:]
         for bundleID in bundleIDs {
-            result[bundleID] = readDockBadge(for: bundleID)
-        }
-        return result
-    }
-
-    /// Read the Dock badge count for a given app using `lsappinfo`.
-    /// This is more reliable than Accessibility API on macOS 14+/15+ where
-    /// AXStatusLabel on Dock items is no longer populated.
-    private func readDockBadge(for bundleID: String) -> Int {
-        let task = Process()
-        task.launchPath = "/usr/bin/lsappinfo"
-        task.arguments = ["info", "-only", "StatusLabel", bundleID]
-
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = FileHandle.nullDevice
-
-        do {
-            try task.run()
-            task.waitUntilExit()
-        } catch {
-            return 0
-        }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8) else { return 0 }
-
-        // Output format: "StatusLabel"={ "label"="3" }
-        // or:            "StatusLabel"={ "label"="" }
-        // or:            "StatusLabel"={ "label"=kCFNULL }
-        // Extract the value between the last pair of quotes after "label"=
-        guard let labelRange = output.range(of: "\"label\"=") else { return 0 }
-        let afterLabel = String(output[labelRange.upperBound...])
-
-        // Check for quoted value: "label"="123"
-        if afterLabel.hasPrefix("\"") {
-            let inner = afterLabel.dropFirst() // remove leading "
-            if let endQuote = inner.firstIndex(of: "\"") {
-                let value = String(inner[inner.startIndex..<endQuote])
-                if value.isEmpty { return 0 }
-                return Int(value) ?? (value.isEmpty ? 0 : 1)
+            if let badgeCount = dockBadgeReader.badgeCount(for: bundleID) {
+                result[bundleID] = badgeCount
             }
         }
-
-        return 0
+        return result
     }
 
     // MARK: - App Activation
@@ -254,6 +382,12 @@ class AppMonitorService: ObservableObject {
     func activateApp(bundleID: String, summonToScreen targetScreen: NSScreen? = nil) {
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else {
             print("[NARC] ⚠️ App not running: \(bundleID)")
+            return
+        }
+
+        if DevRuntimeOptions.noAX {
+            print("[NARC] 🧪 Activating \(app.localizedName ?? bundleID) without AX window management.")
+            app.activate()
             return
         }
 

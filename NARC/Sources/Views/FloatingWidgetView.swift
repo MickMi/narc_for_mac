@@ -20,29 +20,24 @@ final class WidgetDragState: ObservableObject {
 // MARK: - 3. Container — projects app data sources onto FloatingWidgetState
 
 /// Wraps the spec-compliant `FloatingWidgetView` and computes its state from
-/// the project's data sources (IM badge counts + Claude pending events + drag).
+/// the project's data sources (monitored app badge counts + drag).
 struct FloatingWidgetContainer: View {
     @ObservedObject var appMonitor: AppMonitorService
-    @ObservedObject var claudeService: ClaudeSessionService
     @ObservedObject var dragState: WidgetDragState
+    @AppStorage("widgetSize") private var widgetSize = "Medium"
 
     var body: some View {
-        FloatingWidgetView(state: computedState)
+        FloatingWidgetView(
+            state: computedState,
+            widgetSize: widgetSize
+        )
     }
 
     private var computedState: FloatingWidgetState {
         if dragState.isDragging { return .dragging }
-        let imCount = appMonitor.totalBadgeCount
-        // Only count *external* Claude events (running outside the workspace,
-        // typically in iTerm / Terminal.app). Workspace-internal events surface
-        // via the Dashboard sidebar's own attention machinery — putting them
-        // in the floating-widget badge would double-count and route the user
-        // to the wrong place when they tap.
-        let externalClaudeCount = claudeService.pendingApprovals.filter { $0.narcSessionId == nil }.count
-            + claudeService.notifications.filter { $0.narcSessionId == nil }.count
-        let total = imCount + externalClaudeCount
-        if total > 0 {
-            return .hasNotification(count: total)
+        let badgeCount = appMonitor.totalBadgeCount
+        if badgeCount > 0 {
+            return .hasNotification(count: badgeCount)
         }
         return .idle
     }
@@ -50,46 +45,45 @@ struct FloatingWidgetContainer: View {
 
 // MARK: - 4. Public View (spec §6)
 
-/// Total canvas size including transparent shadow padding.
-///
-/// SwiftUI's `.shadow(radius: 32, y: 12)` is rendered into the host's backing
-/// layer. When the host (`NSHostingView`) is sized exactly to the visible
-/// widget (48×48), the layer clips the shadow at the frame boundary, leaving
-/// a hard rectangular halo right at the edge of the circle — the exact bug
-/// the user kept reporting as "圆角方块/方框". Giving the canvas a 40pt
-/// transparent margin on each side lets the shadow render fully and the
-/// rounded "cushion" effect from the spec actually shows up.
-let floatingWidgetCanvasSize: CGFloat = 128
-let floatingWidgetVisibleSize: CGFloat = 48
+/// Canvas size for a given visible circle size. Includes transparent padding
+/// so SwiftUI's drop shadow (radius 32) doesn't clip at the frame edge.
+private func widgetCanvasSize(visible: CGFloat) -> CGFloat {
+    // 80pt padding (40pt each side) gives radius-32 shadow room to breathe.
+    visible + 80
+}
+
+/// Visible circle diameter for a given widget size preset.
+private func widgetVisibleSize(for preset: String) -> CGFloat {
+    switch preset {
+    case "Small":  return 40
+    case "Large":  return 58
+    default:       return 48   // Medium (default)
+    }
+}
 
 struct FloatingWidgetView: View {
     let state: FloatingWidgetState
+    var widgetSize: String = "Medium"
+
+    private var visibleSize: CGFloat { widgetVisibleSize(for: widgetSize) }
+    private var canvasSize: CGFloat { widgetCanvasSize(visible: visibleSize) }
 
     var body: some View {
         widget
-            // Outer canvas — only used to give the inner shadow breathing room.
-            // The widget itself stays 48pt; the surrounding 40pt is fully
-            // transparent and click-through (see FloatingWidgetWindow.hitTest).
             .frame(
-                width: floatingWidgetCanvasSize,
-                height: floatingWidgetCanvasSize,
+                width: canvasSize,
+                height: canvasSize,
                 alignment: .center
             )
     }
 
     private var widget: some View {
         ZStack(alignment: .topTrailing) {
-            // Root is a real Circle view filled with .regularMaterial — this
-            // guarantees there is no square chrome anywhere. (Spec §6 used
-            // `.background(.regularMaterial, in: Circle())` on a generic ZStack
-            // which on some macOS versions leaks the material outside the
-            // intended Circle bounds, producing a rounded-rect halo around the
-            // widget. A real Circle as the root avoids that entirely.)
             Circle()
-                .fill(.regularMaterial)
-                .frame(width: floatingWidgetVisibleSize, height: floatingWidgetVisibleSize)
+                .fill(Color(NSColor.windowBackgroundColor))
+                .frame(width: visibleSize, height: visibleSize)
                 .overlay {
-                    HaloInnerView(state: state)
+                    HaloInnerView(state: state, visibleSize: visibleSize)
                         .clipShape(Circle())
                 }
                 .overlay {
@@ -114,23 +108,18 @@ struct FloatingWidgetView: View {
                     )
             }
         }
-        .frame(width: floatingWidgetVisibleSize, height: floatingWidgetVisibleSize)
-        .compositingGroup()
+        .frame(width: visibleSize, height: visibleSize)
         .scaleEffect(state == .dragging ? 1.08 : 1.0)
         .rotationEffect(.degrees(state == .dragging ? -3 : 0))
-        .shadow(
-            color: .black.opacity(state == .dragging ? 0.18 : 0),
-            radius: state == .dragging ? 28 : 0,
-            y: state == .dragging ? 12 : 0
-        )
         .animation(.easeOut(duration: 0.2), value: state)
     }
 }
 
-// MARK: - 5. Halo Inner (bloom + ripple + wordmark)
+// MARK: - 5. Halo Inner (bloom + ripple + mark)
 
 private struct HaloInnerView: View {
     let state: FloatingWidgetState
+    let visibleSize: CGFloat
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -143,7 +132,10 @@ private struct HaloInnerView: View {
             }
 
             if state != .dragging {
-                WordmarkView(reduceMotion: reduceMotion)
+                FloatingMarkView(
+                    reduceMotion: reduceMotion,
+                    visibleSize: visibleSize
+                )
             }
         }
     }
@@ -158,13 +150,12 @@ private struct BloomView: View {
     @State private var breathing = false
 
     var body: some View {
-        // 36×36 inset 6pt from 48pt frame
         Circle()
             .fill(
                 RadialGradient(
                     colors: [
-                        Color.accentColor.opacity(1.0),
-                        Color.accentColor.opacity(0.14),
+                        Color.narcAccent.opacity(1.0),
+                        Color.narcAccent.opacity(0.14),
                         .clear
                     ],
                     center: .center,
@@ -192,13 +183,9 @@ private struct RippleView: View {
     @State private var animating = false
 
     var body: some View {
-        // Period: 7s. Start at scale 0.7 / opacity 0 → 3.6 / 0.
-        // At 20% mark opacity peaks at 0.30, at 60% it's 0.10, then fades to 0.
-        // SwiftUI can't easily express keyframe opacity stops pre-iOS 17,
-        // so we approximate with a single 7s ease-out arc.
         Circle()
             .strokeBorder(
-                Color.accentColor.opacity(animating ? 0 : 0.30),
+                Color.narcAccent.opacity(animating ? 0 : 0.30),
                 lineWidth: animating ? 0.4 : 1
             )
             .frame(width: 8, height: 8)
@@ -216,21 +203,26 @@ private struct RippleView: View {
     }
 }
 
-// MARK: - 8. Wordmark (NARC with subtle opacity breathing)
+// MARK: - 8. Brand mark (N with subtle opacity breathing)
 
-private struct WordmarkView: View {
+private struct FloatingMarkView: View {
     let reduceMotion: Bool
+    let visibleSize: CGFloat
     @State private var breathing = false
     @Environment(\.colorScheme) private var scheme
 
     private var lowOpacity: Double { scheme == .dark ? 0.86 : 0.78 }
     private var highOpacity: Double { 1.0 }
+    private var fontSize: CGFloat { visibleSize * 0.34 }
 
     var body: some View {
-        Text("NARC")
-            .font(.system(size: 7.5, weight: .semibold, design: .default))
-            .tracking(-0.3)                       // letter-spacing -0.04em ≈ -0.3pt at 7.5pt
+        Text("N")
+            .font(.system(size: fontSize, weight: .heavy, design: .default))
             .foregroundStyle(.primary)
+            // System text metrics include descender space that the capital N
+            // never occupies. Lift the visible glyph by half a point so its
+            // optical center matches the circle and the generated Dock mark.
+            .offset(y: -0.5)
             .opacity(reduceMotion ? lowOpacity : (breathing ? highOpacity : lowOpacity))
             .animation(
                 reduceMotion

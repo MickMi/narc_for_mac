@@ -18,7 +18,7 @@ struct MonitoredApp: Identifiable, Codable, Equatable {
 
 /// Runtime notification state for a monitored app.
 class NotificationState: ObservableObject, Identifiable {
-    let app: MonitoredApp
+    var app: MonitoredApp
 
     @Published var badgeCount: Int = 0
     @Published var isRunning: Bool = false

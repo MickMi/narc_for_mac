@@ -48,7 +48,9 @@ class ClaudeSessionService: ObservableObject {
 
     // MARK: - Init
 
-    private init() {}
+    private init() {
+        // No-op: notification engine removed (was dead code — publish-only, no consumers).
+    }
 
     // MARK: - Lifecycle
 
@@ -158,8 +160,10 @@ class ClaudeSessionService: ObservableObject {
 
         print("[NARC] 🔌 Received: event=\(event) status=\(status) session=\(sessionId.prefix(8))")
 
-        // Build / update session, preserving recentEvents from the previous record
-        let previousEvents = self.sessions[sessionId]?.recentEvents ?? []
+        // Build / update session, preserving recentEvents + fileHistory from the previous record
+        let previous = self.sessions[sessionId]
+        let previousEvents = previous?.recentEvents ?? []
+        var fileHistory = previous?.fileHistory ?? []
         let newEvent = ClaudeEvent(
             timestamp: Date(),
             event: event,
@@ -172,6 +176,25 @@ class ClaudeSessionService: ObservableObject {
             updatedEvents = Array(updatedEvents.suffix(12))
         }
 
+        // Track file changes from Edit / Write / Read tool invocations.
+        // Dedup by path (most recent tool wins) and cap at 20 entries.
+        // Resolve relative paths against the session cwd so the diff drawer
+        // always receives an absolute path it can feed to `git diff`.
+        if let t = tool, let input = toolInput, let rawPath = input["file_path"] as? String,
+           (t == "Edit" || t == "Write" || t == "Read") {
+            let path: String
+            if rawPath.hasPrefix("/") {
+                path = rawPath
+            } else if let cwd = cwd {
+                path = (cwd as NSString).appendingPathComponent(rawPath)
+            } else {
+                path = rawPath
+            }
+            fileHistory.removeAll { $0.path == path }
+            fileHistory.append(FileChange(path: path, tool: t, timestamp: Date()))
+            if fileHistory.count > 20 { fileHistory = Array(fileHistory.suffix(20)) }
+        }
+
         let session = ClaudeSession(
             sessionId: sessionId,
             status: ClaudeStatus(rawValue: status) ?? .unknown,
@@ -181,7 +204,8 @@ class ClaudeSessionService: ObservableObject {
             tty: tty,
             narcSessionId: narcSessionId,
             lastUpdated: Date(),
-            recentEvents: updatedEvents
+            recentEvents: updatedEvents,
+            fileHistory: fileHistory
         )
 
         DispatchQueue.main.async { [weak self] in
@@ -372,6 +396,13 @@ class ClaudeSessionService: ObservableObject {
 
 // MARK: - Models
 
+/// A file that Claude touched via Edit / Write / Read tools.
+struct FileChange: Equatable {
+    let path: String
+    let tool: String
+    let timestamp: Date
+}
+
 struct ClaudeSession {
     let sessionId: String
     var status: ClaudeStatus
@@ -386,6 +417,8 @@ struct ClaudeSession {
     var lastUpdated: Date
     /// Ring buffer of recent hook events. Capped at 12 entries by the service.
     var recentEvents: [ClaudeEvent] = []
+    /// Files Claude has touched (Edit / Write / Read). Capped at 20, deduped by path.
+    var fileHistory: [FileChange] = []
 
     var statusDescription: String {
         switch status {

@@ -4,23 +4,15 @@ import SwiftUI
 /// Contains two tabs: Notifications and Window Management.
 ///
 /// **Scope note**: this panel only surfaces NARC's "ambient awareness" data —
-/// IM badges and pinned windows. Claude Code events (both external iTerm
-/// sessions and Workspace tabs) are handled separately:
-/// - External Claude → standalone stacked toast notifications (each event
-///   gets its own dismissable popup that jumps to the source terminal window).
-/// - Workspace Claude → the Dashboard sidebar's per-tab attention bar +
-///   unseen-change red dot.
+/// IM badges and pinned windows.
 struct PanelView: View {
     @ObservedObject var appMonitor: AppMonitorService
-    @ObservedObject var claudeService: ClaudeSessionService
     @ObservedObject var windowManager: WindowManagerService
     @ObservedObject var pinnedWindowService: PinnedWindowService
     var onClose: () -> Void
     var onOpenPreferences: () -> Void
-    /// Toggle the standalone Workspace (Dashboard) window. Mirrors the
-    /// `⌃⌥W` global hotkey and the right-click-on-widget gesture, so all
-    /// three entry points share identical behavior.
-    var onToggleWorkspace: () -> Void
+    var onOpenAssistant: () -> Void = {}
+    var onOpenQuickCapture: () -> Void = {}
     /// The screen where NARC's floating widget is located.
     var narcScreen: NSScreen?
     /// Keyboard selection state for ↑↓ navigation.
@@ -54,7 +46,6 @@ struct PanelView: View {
                 case .notifications:
                     NotificationListView(
                         appMonitor: appMonitor,
-                        claudeService: claudeService,
                         pinnedWindowService: pinnedWindowService,
                         onClose: onClose,
                         narcScreen: narcScreen,
@@ -88,17 +79,21 @@ struct PanelView: View {
 
             Spacer()
 
-            // Workspace toggle — mirrors ⌃⌥W and the right-click-on-widget
-            // gesture. Placed at the leftmost position of the trailing button
-            // group so it gets the most-used slot without crowding the close
-            // button.
-            Button(action: onToggleWorkspace) {
-                Image(systemName: "macwindow")
+            Button(action: onOpenQuickCapture) {
+                Image(systemName: "square.and.pencil")
                     .font(.narcSubtitle)
                     .foregroundColor(.narcTextMuted)
             }
             .buttonStyle(.plain)
-            .help("打开 / 隐藏 Workspace（⌃⌥W）")
+            .help("Quick Capture（⌃⌥Q）")
+
+            Button(action: onOpenAssistant) {
+                Image(systemName: "sparkles")
+                    .font(.narcSubtitle)
+                    .foregroundColor(.narcTextMuted)
+            }
+            .buttonStyle(.plain)
+            .help("打开 Assistant")
 
             Button(action: onOpenPreferences) {
                 Image(systemName: "gearshape")

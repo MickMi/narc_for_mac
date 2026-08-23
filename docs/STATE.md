@@ -1,52 +1,53 @@
-# STATE — 接力棒
+# STATE - trusted handoff
 
-> 任何 AI 打开本项目，先读这里的 ENTRY POINT 块，再按角色契约行动。
+> 任何 AI 打开本项目，先读这里。这里不记录强/弱模型身份，只记录可信事实、当前边界、待验证项和下一步。
 
-## 🎯 ENTRY POINT
-- **当前阶段** → workspace-ux-polish 三轨已完成、审查通过、已合并到 main
-- **执行方** → —（等待下一轮 PM）
-- **本侧模型** → strong（见 `.harness-model.local`）
-- **PRD** → `docs/PRD-workspace-ux-polish.md`（✅ 已锁定）
+## ENTRY POINT
+- 当前阶段: Evidence Reset 后的重建期。
+- `plan.md`: 当前不存在；不进入 Executor plan 模式。
+- Harness 定位: 开发规范、证据纪律、边界控制、验证闭环和交接格式。模型强弱切换只是可选调度策略，不是项目状态。
+- 工作树状态: 当前有大量既有未提交改动。不要回滚用户或历史改动；只改当前任务明确范围。
 
-### 三轨结果（互不依赖）
-| 轨 | 交付物（入口文件） | 状态 |
-|----|------|------|
-| #1 Dashboard 软化 | `docs/design/workspace-softening-design-brief.md` | ✅ Design AI 产出 + 接线（DesignTokens v5.5 + DESIGN.md + DashboardView） |
-| #2 智能复制气泡 | `docs/blueprint-smart-copy.md` | ✅ 实现 + 审查（修复 weak→strong 引用 bug + monitor 去重） |
-| #3 拖拽灰底修复 | `docs/blueprint-widget-drag-fix.md` | ✅ 实现 + 审查通过（compositingGroup） |
-- 审查报告：`docs/reviews/smart-copy-drag-fix-2026-06-18.md`
+## 当前可信事实
+- 已归档一批不可信中间产物到 `docs/archive/stale-harness-v1/`，仅隔离，不删除。
+- 当前业务视角功能清单记录在 `docs/FEATURES.md`；它只描述用户可见能力状态，不作为 bug backlog 或实现计划。
+- 高频 UI / Workspace / terminal 验证可使用 `NARC_DEV_NO_AX=1` 开发模式，跳过权限弹窗、Accessibility 检查、AX pin/布局热键、窗口吸附、AX 窗口控制和系统通知授权；常驻监控与 `⌃⌥N` / `⌃⌥W` 保持可用。
+- 需要验证标记窗口 / AX 热键 / 窗口管理时，优先使用 `bash scripts/dev-run-terminal-host.sh debug`。该模式通过 `swift run` 以终端托管 raw executable 运行，隐藏 Dock 图标，不使用 `.app` bundle 身份，保留 `⌃⌥P`、`⌃⌥N`、`⌃⌥W` 和布局热键。
+- 以下历史文档仍可作为背景参考，但不是当前 bug 修复的自动指令:
+  - `docs/PRD-claude-tab-monitor.md`
+  - `docs/blueprint-claude-tab-monitor.md`
+  - `docs/reviews/claude-tab-monitor-2026-06-10.md`
+  - `docs/PRD-workspace-ux-polish.md`
+  - `docs/blueprint-smart-copy.md`
+  - `docs/blueprint-widget-drag-fix.md`
+  - `docs/reviews/smart-copy-drag-fix-2026-06-18.md`
+- `docs/archive/stale-harness-v1/` 内文档来自旧 Harness 中间状态，后续不得直接当作执行蓝图。
 
-## 📌 下一轮待办（backlog — 用户指定）
-1. **悬浮窗外部通知降噪（用户 2026-06-18 指定）**：`Claude External` 列表 + 悬浮窗 badge **不要**把"等待输入"(Stop) 计入/展示，**只保留需要用户操作的动作**（审批 / 出错）。
-   - 落点：`FloatingWidgetContainer.computedState`（badge 计数）+ 面板 `Claude External` 列表（`PanelView`/`NotificationListView`）都要过滤掉 `.stopped` 类型，只留 approval + `.error`。
-   - 现状：上一轮只在 `syncToasts` 过滤了外部 toast，badge 与面板列表仍统计 `.stopped` → 截图里外部两条"会话等待输入"仍占了 badge(6) 和列表。
-2. **智能复制气泡失焦消失**：本轮故意未加 `resignFirstResponder` dismiss（怕在点气泡触发 onTap 前就移除气泡）。下一轮用更安全的钩子（如 windowDidResignKey / pane isSelected 变化）实现切 Tab/失焦消气泡。
+## 已修改但待真实手测
+- Workspace / Claude Code 内容区滚轮: `TerminalPaneView.swift` 已改为 normal shell 走 SwiftTerm scrollback，alternate-screen TUI 在启用 mouse reporting 时接收 mouse wheel 事件；禁止转译为上/下箭头。
+- Panel 快捷键: `AppDelegate.swift` 已去掉启动时无条件打开 Workspace，避免唤起 quick panel 时顺手弹出 Workspace。
+- Workspace Tab 拖拽预览: `DashboardView.swift` 已限制拖拽浮层宽度，避免撑满整个列表。
+- 以上三项已通过 `swift build --disable-sandbox` 编译验证，但仍需要在真实 app 中手测。
 
-## 📋 流程状态（当前特性：workspace-ux-polish）
-| # | 阶段 | 状态 |
-|---|------|------|
-| 1 | PM — PRD | ✅ 已锁定 |
-| 2 | Designer — 软化简报（#1） | ✅ 简报已出，待 Design AI 实现 |
-| 3 | Blueprint — #2 / #3 | ✅ 两份蓝图已出（Confirmed） |
-| 4 | Executor — 实现 | ⏳ 三轨并行中 |
-| 5 | Reviewer — 审查 | ⬜ |
-| 6 | QA — 验收 | ⬜ |
+## 当前已知产品问题
+- diff / 文件改动体验还没有重新定义清楚，暂不继续按旧蓝图实现。
+- app 内“回合卡片”目前没有数据模型和 UI。现有链路是 `ClaudeSessionService.fileHistory -> OwnedSession.touchedFiles -> FileChangePopover`，属于会话累计文件列表，不是按 Claude 每轮分组。
+- “回合”边界需要先定义: 例如从用户发送输入开始，到 Claude Stop / 等待输入 / 需要审批 / 出错为止，还是以工具调用批次为边界。
+- 默认入口需要更清楚地暴露“打开文件”和“对比 diff”，并考虑左右分屏 diff，而不是当前右侧抽屉。
 
----
-## 📦 已完成特性归档
-### claude-tab-monitor（2026-06-10 ✅ 审查通过）
-多终端 Claude 状态监控 + 悬浮窗降噪。报告：`docs/reviews/claude-tab-monitor-2026-06-10.md`。代码改动未提交。
+## 已隔离的旧中间产物
+- `docs/archive/stale-harness-v1/PRD-backlog-v14-v15.md`
+- `docs/archive/stale-harness-v1/PRD-diff-drawer.md`
+- `docs/archive/stale-harness-v1/PRD-next-round.md`
+- `docs/archive/stale-harness-v1/blueprint-backlog-v14-v15.md`
+- `docs/archive/stale-harness-v1/blueprint-diff-drawer.md`
+- `docs/archive/stale-harness-v1/reviews/backlog-v14-v15-2026-06-23.md`
 
-## 📝 流程日志
-- 2026-06-10 引入 harness 脚手架；标记本侧为强模型；补 `.harness-config.yaml`。
-- 2026-06-10 完成 v1.3 进度 review，结论：不推倒重来，做增量。
-- 2026-06-10 PM 与用户对齐五态分级 + 内外分流；`docs/PRD-claude-tab-monitor.md` 已锁定。
-- 2026-06-10 产出 `docs/blueprint-claude-tab-monitor.md`（4 文件改动 + 侵入评估）。
-- 2026-06-10 蓝图已确认（含降噪分流决策），交接弱模型实现。
-- 2026-06-10 弱模型完成 4 文件实现；强模型审查通过（9/9 判定项，编译过），见 `docs/reviews/claude-tab-monitor-2026-06-10.md`。
-- 2026-06-10 新特性 workspace-ux-polish：PRD 锁定；核实 SwiftTerm 选区接口（getSelection/selectionActive public、cellDimension internal）；同时产出 #1 设计简报 + #2/#3 两份蓝图，三轨并行分发。
-- 2026-06-10 #3 拖拽灰底修复：`FloatingWidgetView.swift` 加 `.compositingGroup()`，编译过。
-- 2026-06-10 #2 智能复制气泡：`NarcTerminalView` 翻转为 ⌘⇧C 智能复制 + 选区气泡；新建 `SmartCopyBubble.swift`；移除 `DashboardView` 智能粘贴提示条。`mouseUp`/`resignFirstResponder` 不能重写（SwiftTerm 未标记 open），改用 `NSEvent.addLocalMonitorForEvents` 捕获鼠标位置。编译过。
+## 下一步建议
+1. 用 `bash scripts/dev-run-no-ax.sh debug` 做高频 UI / Workspace / terminal 手测；需要验证全局热键/窗口管理/标记窗口时，用 `bash scripts/dev-run-terminal-host.sh debug`。
+2. 重新写一个很小的 PRD: `diff / 文件改动 / app 内回合卡片`。
+3. PRD 里必须先确认“每一轮”的产品边界，再实现数据模型和 UI。
 
-## 🎯 当前特性
-`workspace-ux-polish` — Dashboard 软化 + 智能复制气泡 + 拖拽灰底修复
+## 回合卡片要求
+- 只要本回合有交付物、状态变化、归档、文件改动、卡点或阶段推进，最终回复必须输出回合卡片。
+- 如果没有回合卡片，应视为没有完整遵守 Harness 交接约束。

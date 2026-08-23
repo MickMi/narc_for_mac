@@ -15,11 +15,12 @@ BUNDLE_ID="com.mickmi.narc"
 echo "🔨 Building NARC (${BUILD_CONFIG})..."
 
 # Step 1: Build with Swift Package Manager
+SWIFT_BUILD_FLAGS="${SWIFT_BUILD_FLAGS:-}"
 if [ "$BUILD_CONFIG" = "release" ]; then
-    swift build -c release --package-path "$PROJECT_DIR"
+    swift build $SWIFT_BUILD_FLAGS -c release --package-path "$PROJECT_DIR"
     BUILD_DIR="${PROJECT_DIR}/.build/release"
 else
-    swift build --package-path "$PROJECT_DIR"
+    swift build $SWIFT_BUILD_FLAGS --package-path "$PROJECT_DIR"
     BUILD_DIR="${PROJECT_DIR}/.build/debug"
 fi
 
@@ -53,33 +54,31 @@ if [ -d "$RESOURCE_BUNDLE" ]; then
     cp -R "$RESOURCE_BUNDLE" "${APP_BUNDLE}/Contents/Resources/"
 fi
 
-# Step 6.5: Re-sign with a stable self-signed identity so macOS Accessibility
-# authorization survives rebuilds. ad-hoc / linker-signed binaries are indexed
-# by cdhash in TCC.db; every swift build mutates the binary so the cdhash
-# changes and the user has to re-authorize. Signing with a persistent identity
-# (whose Designated Requirement stays constant) lets TCC match across rebuilds.
-#
-# Set NARC_SIGN_IDENTITY to override; default 'NARC Dev' (created via Keychain
-# Assistant > Create a Certificate, type: Code Signing, self-signed).
-SIGN_IDENTITY="${NARC_SIGN_IDENTITY:-NARC Dev}"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "\"$SIGN_IDENTITY\""; then
-    echo "🔏 Signing with stable identity: $SIGN_IDENTITY"
-    codesign --force --deep \
-        --sign "$SIGN_IDENTITY" \
-        --identifier "$BUNDLE_ID" \
-        --options runtime \
-        "$APP_BUNDLE"
-    echo "✓ Signed — Accessibility / Notifications authorization will persist across rebuilds"
+# Step 7 (was after sign — moved BEFORE so codesign seals the icon too):
+# Generate + copy app icon. Doing this AFTER codesign would invalidate the
+# signature ("a sealed resource is missing or invalid: file added").
+echo "🎨 Generating app icon..."
+swift "${SCRIPT_DIR}/generate-icon.swift"
+
+if [ -f "${PROJECT_DIR}/build/NARC.icns" ]; then
+    cp "${PROJECT_DIR}/build/NARC.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
+    echo "✓ App icon copied"
 else
-    echo "⚠️  Stable signing identity '$SIGN_IDENTITY' not found in Keychain."
-    echo "   Falling back to ad-hoc — you will need to re-authorize Accessibility on every rebuild."
-    echo "   To fix: Keychain Access > Certificate Assistant > Create a Certificate"
-    echo "           Name=$SIGN_IDENTITY, Identity=Self Signed Root, Type=Code Signing"
+    echo "⚠️  Icon generation failed — app will show default folder icon"
 fi
 
-# Step 7: Generate a simple app icon (using system icon as placeholder)
-# For a proper icon, replace with an .icns file
-# We'll create a minimal icns from the SF Symbol later if needed
+# Step 8: Apply a local ad-hoc signature LAST so macOS can validate the complete
+# bundle. This is an automatic build detail: users never need a certificate,
+# signing identity, paid developer account, or separate signing command.
+echo "🔏 Finalizing local app bundle..."
+codesign --force --deep \
+    --sign - \
+    --identifier "$BUNDLE_ID" \
+    "$APP_BUNDLE"
+
+# Every branch must produce a valid, sealed bundle. Do not print success when
+# codesign only appeared to run or a resource changed after signing.
+codesign --verify --deep --strict "$APP_BUNDLE"
 
 echo ""
 echo "✅ Successfully built: ${APP_BUNDLE}"
@@ -90,9 +89,13 @@ echo ""
 echo "🚀 To run:"
 echo "   open ${APP_BUNDLE}"
 echo ""
-echo "📋 To install (copy to /Applications):"
-echo "   cp -R ${APP_BUNDLE} /Applications/"
-echo "   open /Applications/${APP_NAME}.app"
+echo "🧪 Dev no-AX mode (no permission prompts; panel/quick-capture hotkeys only):"
+echo "   NARC_DEV_NO_AX=1 ${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+echo "   or: bash ${SCRIPT_DIR}/dev-run-no-ax.sh ${BUILD_CONFIG}"
 echo ""
-echo "⚠️  Remember to grant Accessibility permission after first launch:"
-echo "   System Settings → Privacy & Security → Accessibility → NARC ✅"
+echo "🧪 Terminal-host AX dev mode (no Dock icon; pinning/hotkeys enabled):"
+echo "   bash ${SCRIPT_DIR}/dev-run-terminal-host.sh debug"
+echo ""
+echo "📋 Normal local setup:"
+echo "   bash ${SCRIPT_DIR}/install.sh"
+echo "   Window-management tools may request Accessibility permission when used."
