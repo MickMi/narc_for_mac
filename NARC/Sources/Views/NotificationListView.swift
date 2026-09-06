@@ -8,8 +8,8 @@ struct NotificationListView: View {
     @ObservedObject var appMonitor: AppMonitorService
     @ObservedObject var pinnedWindowService: PinnedWindowService
     var onClose: () -> Void
-    /// The screen where NARC's floating widget is located.
-    var narcScreen: NSScreen?
+    /// Resolves the floating widget's current screen at action time.
+    var narcScreenProvider: () -> NSScreen?
     /// Keyboard selection state for ↑↓ navigation.
     @ObservedObject var keyboardSelection: KeyboardSelectionState
 
@@ -30,6 +30,19 @@ struct NotificationListView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 0) {
+                        if appMonitor.isBadgeStatusUncertain {
+                            Label(
+                                "部分未读暂不可确认，显示上次可信结果",
+                                systemImage: "exclamationmark.triangle.fill"
+                            )
+                            .font(.narcCaption)
+                            .foregroundStyle(Color.narcWarn)
+                            .padding(.horizontal, NarcSpacing.lg)
+                            .padding(.vertical, NarcSpacing.sm)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.narcWarn.opacity(0.08))
+                        }
+
                         // MARK: - Monitoring Section
                         if !enabledStates.isEmpty {
                             SectionHeader(title: "Monitoring", icon: "bell.fill")
@@ -43,12 +56,15 @@ struct NotificationListView: View {
                                 AppItemRow(
                                     state: state,
                                     filterAction: filterAction,
+                                    isBadgeUncertain: appMonitor.uncertainBundleIDs.contains(
+                                        state.app.bundleID
+                                    ),
                                     keyboardIndex: kbIndex,
                                     isKeyboardSelected: kbIndex >= 0 && kbIndex == keyboardSelection.selectedIndex
                                 ) {
                                     appMonitor.activateApp(
                                         bundleID: state.app.bundleID,
-                                        summonToScreen: narcScreen
+                                        summonToScreen: narcScreenProvider()
                                     )
                                     onClose()
                                 }
@@ -81,7 +97,7 @@ struct NotificationListView: View {
                                     onTap: {
                                         pinnedWindowService.activatePinnedWindow(
                                             pinned,
-                                            summonToScreen: narcScreen
+                                            summonToScreen: narcScreenProvider()
                                         )
                                         onClose()
                                     },
@@ -103,7 +119,7 @@ struct NotificationListView: View {
                     }
                     .padding(.vertical, 4)
                 }
-                .onChange(of: keyboardSelection.selectedIndex) { newIndex in
+                .onChange(of: keyboardSelection.selectedIndex) { _, newIndex in
                     if newIndex >= 0 {
                         withAnimation(.narcEase) {
                             proxy.scrollTo(newIndex, anchor: .center)
@@ -303,6 +319,7 @@ struct PinnedWindowRow: View {
 struct AppItemRow: View {
     @ObservedObject var state: NotificationState
     var filterAction: NotificationFilter.FilterAction = .normal
+    var isBadgeUncertain = false
     /// Keyboard navigation index (0-based). -1 means not navigable.
     var keyboardIndex: Int = -1
     /// Whether this row is currently selected via keyboard.
@@ -411,6 +428,19 @@ struct AppItemRow: View {
             Circle()
                 .fill(Color.narcTextFaint)
                 .frame(width: NarcSize.keyBadgeSize, height: NarcSize.keyBadgeSize)
+        } else if isBadgeUncertain {
+            Text(BadgePresentation.resolve(
+                count: state.badgeCount,
+                isUncertain: true
+            ).text ?? "?")
+            .font(.narcMonoSmall)
+            .foregroundStyle(Color.narcWarn)
+            .padding(.horizontal, NarcSpacing.xs)
+            .frame(minWidth: 22, minHeight: 22)
+            .background(Color.narcWarn.opacity(0.14))
+            .clipShape(Capsule())
+            .help("未读暂不可确认，已保留上次可信结果")
+            .accessibilityLabel("未读暂不可确认，已保留上次可信结果")
         } else if state.hasNewNotification {
             // Accent badge with count
             ZStack {

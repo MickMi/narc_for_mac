@@ -2,11 +2,12 @@ import SwiftUI
 
 struct AssistantHubView: View {
     @ObservedObject var store: AssistantStore
-    let onQuickCapture: () -> Void
+    @ObservedObject var captureState: InboxCaptureState
 
-    @State private var selectedSection: Section = .todos
+    @State private var selectedSection: Section = .inbox
 
     private enum Section: String, CaseIterable, Identifiable {
+        case inbox = "Inbox"
         case todos = "Todo"
         case notes = "Notes"
 
@@ -14,6 +15,7 @@ struct AssistantHubView: View {
 
         var icon: String {
             switch self {
+            case .inbox: return "tray"
             case .todos: return "checkmark.circle"
             case .notes: return "note.text"
             }
@@ -28,10 +30,21 @@ struct AssistantHubView: View {
 
             Group {
                 switch selectedSection {
+                case .inbox:
+                    QuickCaptureView(
+                        store: store,
+                        captureState: captureState
+                    )
                 case .todos:
-                    TodoListView(store: store, onCreate: onQuickCapture)
+                    TodoListView(
+                        store: store,
+                        onCreate: { selectedSection = .inbox }
+                    )
                 case .notes:
-                    NotesListView(store: store, onCreate: onQuickCapture)
+                    NotesListView(
+                        store: store,
+                        onCreate: { selectedSection = .inbox }
+                    )
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -57,12 +70,14 @@ struct AssistantHubView: View {
 
             Spacer()
 
-            Button(action: onQuickCapture) {
-                Label("Quick Capture", systemImage: "plus")
+            Button {
+                selectedSection = .inbox
+            } label: {
+                Label("随手记", systemImage: "plus")
                     .font(.narcBody)
             }
             .buttonStyle(.borderedProminent)
-            .accessibilityLabel("打开 Quick Capture")
+            .accessibilityLabel("打开随手箱")
         }
         .padding(.horizontal, NarcSpacing.xl)
         .padding(.vertical, NarcSpacing.lg)
@@ -113,6 +128,8 @@ struct AssistantHubView: View {
 
     private func count(for section: Section) -> Int {
         switch section {
+        case .inbox:
+            return store.inboxItems.count
         case .todos:
             return store.incompleteTodos.count
         case .notes:

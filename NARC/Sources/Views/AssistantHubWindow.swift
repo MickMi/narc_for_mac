@@ -4,7 +4,7 @@ import SwiftUI
 /// Standard resizable window for the built-in personal assistant pages.
 @MainActor
 final class AssistantHubWindow: NSWindow {
-    init(store: AssistantStore, onQuickCapture: @escaping () -> Void) {
+    init(store: AssistantStore, captureState: InboxCaptureState) {
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 540),
             styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
@@ -22,7 +22,7 @@ final class AssistantHubWindow: NSWindow {
         contentView = NSHostingView(
             rootView: AssistantHubView(
                 store: store,
-                onQuickCapture: onQuickCapture
+                captureState: captureState
             )
         )
     }

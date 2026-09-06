@@ -11,6 +11,8 @@ final class PanelWindow: NSPanel {
     /// Called on every mouseDown inside this panel (before SwiftUI handles it).
     var onMouseDown: (() -> Void)?
 
+    override var canBecomeKey: Bool { true }
+
     override func sendEvent(_ event: NSEvent) {
         if event.type == .leftMouseDown || event.type == .rightMouseDown {
             onMouseDown?()

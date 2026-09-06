@@ -8,7 +8,8 @@ import Cocoa
 /// - Key: CGWindowID (stable per-window identifier)
 /// - TTL: 5 seconds — if user presses same key within 5s → cross screen;
 ///   after 5s → re-apply layout (matches user intuition)
-/// - Thread safety: main-thread only (all hotkey callbacks are on main)
+/// - Thread safety: protected by a lock so test and callback concurrency cannot
+///   corrupt the per-window dictionary.
 final class WindowLayoutState {
 
     static let shared = WindowLayoutState()
@@ -20,6 +21,7 @@ final class WindowLayoutState {
     }
 
     private var states: [CGWindowID: Entry] = [:]
+    private let stateLock = NSLock()
 
     /// How long a layout record stays valid for cross-screen decisions.
     private let ttl: TimeInterval = 5.0
@@ -31,13 +33,17 @@ final class WindowLayoutState {
     /// Record that a layout was just applied to a window.
     func record(windowID: CGWindowID, layout: WindowLayout, screen: NSScreen) {
         let displayID = Self.displayID(for: screen)
+        stateLock.lock()
+        defer { stateLock.unlock() }
         states[windowID] = Entry(layout: layout, screenDisplayID: displayID, timestamp: Date())
-        pruneStale()
+        pruneStaleLocked()
     }
 
     /// Should we cross to the adjacent screen?
     /// True when: same window + same layout + same screen + within TTL.
     func shouldCrossScreen(windowID: CGWindowID, layout: WindowLayout, screen: NSScreen) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         guard let entry = states[windowID] else { return false }
 
         // Expired?
@@ -51,11 +57,19 @@ final class WindowLayoutState {
 
     /// Remove state for a specific window (e.g., window closed).
     func invalidate(windowID: CGWindowID) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         states.removeValue(forKey: windowID)
     }
 
     /// Remove all expired entries.
     func pruneStale() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        pruneStaleLocked()
+    }
+
+    private func pruneStaleLocked() {
         let now = Date()
         states = states.filter { now.timeIntervalSince($0.value.timestamp) <= 30.0 }
     }

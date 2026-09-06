@@ -98,6 +98,7 @@ else
 fi
 
 printf '\n只需记住：\n'
-printf '  1. 点击桌面悬浮 N：查看消息和窗口\n'
-printf '  2. 按 ⌃⌥Q：快速记录 Todo 或 Note\n'
-printf '  3. 首次使用窗口快捷键时，按引导开启辅助功能权限\n'
+printf '  1. 按 ⌃⌥N：把悬浮 N 召回鼠标所在屏幕\n'
+printf '  2. 点击桌面悬浮 N：随手记录、查看未读和窗口\n'
+printf '  3. 按 ⌃⌥Q：先存入随手箱，再转 Todo 或 Note\n'
+printf '  4. 首次使用窗口快捷键时，按引导开启辅助功能权限\n'

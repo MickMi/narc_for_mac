@@ -1,18 +1,23 @@
 import Cocoa
 import SwiftUI
 import Combine
-import UserNotifications
+@preconcurrency import UserNotifications
 
 /// AppDelegate handles app lifecycle, floating window, and menu bar setup.
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Properties
 
     private var floatingWindow: FloatingWidgetWindow?
     private var statusBarItem: NSStatusItem?
+    private var statusBarMenu: NSMenu?
     private var panelWindow: NSPanel?
+    private var panelScreenFrame: NSRect?
     private var keyEventMonitor: Any?
     private var globalKeyEventMonitor: Any?
+    private var accessibilityExplanationIsVisible = false
+    private var statusBarCancellables = Set<AnyCancellable>()
 
     private let appMonitor = AppMonitorService()
     private let windowManager = WindowManagerService()
@@ -20,6 +25,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let hotkeyService = HotkeyService()
     private let moduleRegistry = ModuleRegistry()
     @MainActor private lazy var assistantStore = AssistantStore()
+    @MainActor private lazy var inboxCaptureState: InboxCaptureState = {
+        InboxCaptureState(
+            store: assistantStore,
+            onCaptureCompleted: { [weak self] in
+                OnboardingPresentationPolicy.markFirstCaptureCompleted()
+                self?.onboardingWindow?.dismiss()
+            }
+        )
+    }()
     @MainActor private var quickCaptureWindow: QuickCaptureWindow?
     @MainActor private var assistantHubWindow: AssistantHubWindow?
     @MainActor private var onboardingWindow: OnboardingWindow?
@@ -32,132 +46,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Flipped by FloatingWidgetWindow's onDragStart / onDragEnd callbacks.
     private let widgetDragState = WidgetDragState()
 
-    // MARK: - App Lifecycle
-
-    /// Checks all required system permissions on startup. If any are missing,
-    /// shows a single consolidated alert explaining what won't work and how to
-    /// fix it. Runs once per launch, before any features initialize.
-    private func checkRequiredPermissions() {
-        // UNUserNotificationCenter.current() crashes if the process has no
-        // bundle identifier (e.g. `swift run`). Guard early — the system-
-        // notifications setup method below does the same.
-        let notificationsAvailable = Bundle.main.bundleIdentifier != nil
-
-        // Brief delay then check all permissions and alert if any are missing.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self = self else { return }
-
-            let missingAccess = !AXIsProcessTrusted()
-
-            guard notificationsAvailable else {
-                // No bundle ID — skip notification checks entirely.
-                if missingAccess {
-                    if DevRuntimeOptions.terminalHost {
-                        print("[NARC] ⚠️ Terminal-host dev mode needs Accessibility on the terminal app launching NARC.")
-                        print("[NARC]    Grant Accessibility to Terminal / iTerm / Codex, then restart this script.")
-                    } else {
-                        self.showPermissionsAlert(missingAccessibility: true, missingNotifications: false)
-                    }
-                } else {
-                    print("[NARC] ✅ Accessibility OK (notifications unavailable — no bundle ID)")
-                }
-                return
-            }
-
-            let noteCenter = UNUserNotificationCenter.current()
-            noteCenter.getNotificationSettings { settings in
-                let missingNotifs = (settings.authorizationStatus == .denied)
-
-                guard missingAccess || missingNotifs else {
-                    print("[NARC] ✅ All permissions OK")
-                    return
-                }
-
-                DispatchQueue.main.async {
-                    self.showPermissionsAlert(
-                        missingAccessibility: missingAccess,
-                        missingNotifications: missingNotifs
-                    )
-                }
-            }
-
-            // Always request notification auth on launch.
-            noteCenter.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
-                print("[NARC] 🔔 Notification permission granted=\(granted)")
-            }
-        }
-    }
-
-    /// Show a single alert listing missing permissions and their impact.
-    private func showPermissionsAlert(missingAccessibility: Bool, missingNotifications: Bool) {
-        let alert = NSAlert()
-        alert.messageText = "NARC 需要系统权限"
-        alert.alertStyle = .warning
-
-        var lines: [String] = []
-        if missingAccessibility {
-            lines.append("⚠️ 辅助功能 — 未授权")
-            lines.append("  影响：窗口管理、钉选和相关快捷键")
-        }
-        if missingNotifications {
-            lines.append("⚠️ 通知 — 未授权")
-            lines.append("  影响：Claude 事件横幅提醒")
-        }
-        alert.informativeText = """
-            以下权限未授权，部分功能将无法正常工作：
-
-            \(lines.joined(separator: "\n"))
-
-            打开系统设置 → 隐私与安全性，找到 NARC 并开启对应权限。
-            """
-
-        alert.addButton(withTitle: "打开系统设置")
-        alert.addButton(withTitle: "稍后设置")
-
-        if alert.runModal() == .alertFirstButtonReturn {
-            // Open Privacy & Security → Accessibility (the most critical one)
-            if missingAccessibility {
-                NSWorkspace.shared.open(
-                    URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-                )
-            } else {
-                // If only notifications missing, open Notifications prefs
-                NSWorkspace.shared.open(
-                    URL(string: "x-apple.systempreferences:com.apple.preference.notifications")!
-                )
-            }
-        }
-    }
-
-    // MARK: - Menu Bar
+    // MARK: - App Lifecycle and Menu Bar
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("[NARC] 🚀 App launching...")
 
+        // NARC is intentionally a status-bar + floating-widget app. Windows
+        // still activate when needed, but there is no persistent Dock icon.
+        NSApp.setActivationPolicy(.accessory)
         if DevRuntimeOptions.terminalHost {
-            // Terminal-host dev mode mirrors the early high-frequency workflow:
-            // no Dock icon, but keep AX-powered hotkeys and window pinning.
-            NSApp.setActivationPolicy(.accessory)
             print("[NARC] 🧪 Terminal-host dev mode — Dock icon hidden; AX features remain enabled.")
         } else {
-            // Regular Dock app — reopening from the Dock fronts Assistant.
-            NSApp.setActivationPolicy(.regular)
+            print("[NARC] Status-bar mode — Dock icon hidden; floating widget remains available.")
         }
-
-        let shouldPresentOnboarding = OnboardingPresentationPolicy.shouldPresent(
-            hasCompleted: UserDefaults.standard.bool(
-                forKey: OnboardingPresentationPolicy.completionKey
-            )
-        )
 
         if DevRuntimeOptions.noAX {
             print("[NARC] 🧪 NARC_DEV_NO_AX=1 — skipping permission prompts and AX-dependent startup paths.")
-        } else if !shouldPresentOnboarding {
-            // Existing users keep the consolidated permission check. First-run
-            // users get the guide instead of stacked alerts and System Settings.
-            // Show a clear alert once so the user knows what to fix, rather than
-            // silently failing for feature after feature.
-            checkRequiredPermissions()
         }
 
         print("[NARC] Setting up menu bar icon...")
@@ -170,31 +74,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         appMonitor.startMonitoring()
 
         hotkeyService.onPinHotkeyPressed = { [weak self] in
-            guard let self = self else { return }
-            let success = self.pinnedWindowService.pinCurrentWindow()
-            if success {
-                self.showPinFeedback()
-            }
+            self?.handlePinHotkey()
         }
-        hotkeyService.onTogglePanelHotkeyPressed = { [weak self] in
-            self?.togglePanelAtMouseScreen()
+        hotkeyService.onSummonWidgetHotkeyPressed = { [weak self] in
+            self?.summonFloatingWidgetToMouseScreen()
         }
         hotkeyService.onQuickCaptureHotkeyPressed = { [weak self] in
             Task { @MainActor in
                 self?.showQuickCapture()
             }
         }
-        hotkeyService.onLayoutHotkeyPressed = { layout in
-            WindowManagerService.moveActiveWindow(to: layout)
+        hotkeyService.onLayoutHotkeyPressed = { [weak self] layout in
+            self?.handleLayoutHotkey(layout)
         }
         if DevRuntimeOptions.noAX {
             print("[NARC] 🧪 Registering panel/quick-capture hotkeys for dev no-AX mode.")
             hotkeyService.registerDevNoAXHotkeys()
         } else {
             print("[NARC] Registering global hotkeys...")
-            hotkeyService.registerGlobalHotkeys(
-                promptForAccessibility: !shouldPresentOnboarding
-            )
+            hotkeyService.registerGlobalHotkeys(promptForAccessibility: false)
         }
 
         // Start Claude Code session monitoring
@@ -231,10 +129,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if DevRuntimeOptions.noAX {
             print("[NARC] 🧪 System notification authorization disabled for dev no-AX mode.")
         } else {
-            // Register for macOS system notifications (for click-to-jump support)
-            setupSystemNotifications(
-                requestAuthorization: !shouldPresentOnboarding
-            )
+            // Register the delegate only. Authorization is requested lazily on
+            // the first real notification delivery attempt.
+            setupSystemNotifications()
         }
 
         // Listen for preferences-triggered actions
@@ -245,13 +142,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
-        if shouldPresentOnboarding, !DevRuntimeOptions.noAX {
-            Task { @MainActor in
-                showOnboarding(force: false)
-            }
-        }
-
-        print("[NARC] ✅ App launch complete. Look for the floating widget (bottom-right) and menu bar icon.")
+        print("[NARC] ✅ App launch complete. Use the menu bar or ⌃⌥N to summon the floating widget.")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -265,14 +156,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    /// Dock icon clicked (or `open -a NARC` while already running). If no window
-    /// is visible, open Assistant. Otherwise let macOS handle un-minimize.
+    /// Reopening an accessory app should return its attention anchor even
+    /// though the always-visible widget makes `hasVisibleWindows` true.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        if !hasVisibleWindows {
-            Task { @MainActor in
-                showAssistantHub()
-            }
-        }
+        summonFloatingWidgetToMouseScreen()
         return true
     }
 
@@ -303,10 +190,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.image?.size = NSSize(width: 18, height: 18)
             button.action = #selector(menuBarIconClicked)
             button.target = self
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            button.toolTip = "NARC — 左键召回悬浮球，右键打开菜单"
         }
 
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Show NARC", action: #selector(showFloatingWidget), keyEquivalent: ""))
+        let summonItem = NSMenuItem(
+            title: "召回悬浮球",
+            action: #selector(showFloatingWidget),
+            keyEquivalent: ""
+        )
+        summonItem.target = self
+        summonItem.image = NSImage(systemSymbolName: "scope", accessibilityDescription: nil)
+        menu.addItem(summonItem)
         menu.addItem(NSMenuItem.separator())
         let guideItem = NSMenuItem(
             title: "User Guide",
@@ -315,12 +211,60 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
         guideItem.target = self
         menu.addItem(guideItem)
-        menu.addItem(NSMenuItem(title: "Preferences...", action: #selector(openPreferences), keyEquivalent: ","))
-        menu.addItem(NSMenuItem(title: "About NARC", action: #selector(showAbout), keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit NARC", action: #selector(quitApp), keyEquivalent: "q"))
 
-        statusBarItem?.menu = menu
+        let preferencesItem = NSMenuItem(
+            title: "Preferences...",
+            action: #selector(openPreferences),
+            keyEquivalent: ","
+        )
+        preferencesItem.target = self
+        menu.addItem(preferencesItem)
+
+        let aboutItem = NSMenuItem(
+            title: "About NARC",
+            action: #selector(showAbout),
+            keyEquivalent: ""
+        )
+        aboutItem.target = self
+        menu.addItem(aboutItem)
+        menu.addItem(NSMenuItem.separator())
+
+        let quitItem = NSMenuItem(
+            title: "Quit NARC",
+            action: #selector(quitApp),
+            keyEquivalent: "q"
+        )
+        quitItem.target = self
+        menu.addItem(quitItem)
+
+        statusBarMenu = menu
+
+        Publishers.CombineLatest(
+            appMonitor.$totalBadgeCount,
+            appMonitor.$isBadgeStatusUncertain
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] count, isUncertain in
+            self?.updateStatusBarBadge(count: count, isUncertain: isUncertain)
+        }
+        .store(in: &statusBarCancellables)
+    }
+
+    private func updateStatusBarBadge(count: Int, isUncertain: Bool) {
+        guard let button = statusBarItem?.button else { return }
+        let presentation = BadgePresentation.resolve(
+            count: count,
+            isUncertain: isUncertain
+        )
+        button.imagePosition = .imageLeft
+        button.title = presentation.text.map { " \($0)" } ?? ""
+        button.toolTip = presentation.isUncertain
+            ? "NARC — 未读暂不可确认；左键召回，右键打开菜单"
+            : "NARC — 左键召回悬浮球，右键打开菜单"
+        button.setAccessibilityLabel(
+            presentation.text.map { "NARC，应用级未读 \($0)" }
+                ?? "NARC"
+        )
     }
 
     // MARK: - Floating Widget
@@ -339,7 +283,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // hard rectangular halo around the circle (the "方框" bug).
         let canvas = FloatingWidgetWindow.canvasSize
         let widgetSide = FloatingWidgetWindow.widgetSize
-        let widgetInset = (canvas - widgetSide) / 2  // 40pt
 
         let hostingView = NSHostingView(rootView: widgetView)
         hostingView.frame = NSRect(x: 0, y: 0, width: canvas, height: canvas)
@@ -354,25 +297,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let mouseLocation = NSEvent.mouseLocation
         let activeScreen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main
         let screenFrame = activeScreen?.visibleFrame ?? .zero
-        let defaultX = screenFrame.maxX - widgetSide - 40 - widgetInset
-        let defaultY = screenFrame.minY + 100 - widgetInset
+        let defaultFrame = FloatingWidgetPlacement.defaultFrame(
+            in: screenFrame,
+            windowSize: NSSize(width: canvas, height: canvas),
+            visibleSize: widgetSide
+        )
         let savedOrigin = UserDefaults.standard.string(forKey: "widgetOrigin")
         let origin: NSPoint
         if let saved = savedOrigin {
             let parts = saved.split(separator: ",").compactMap { Double($0) }
             if parts.count == 2 {
                 let savedPoint = NSPoint(x: parts[0], y: parts[1])
-                // Only use saved position if it's on a visible screen
-                if NSScreen.screens.contains(where: { $0.visibleFrame.insetBy(dx: -50, dy: -50).contains(savedPoint) }) {
-                    origin = savedPoint
+                let savedFrame = NSRect(
+                    origin: savedPoint,
+                    size: NSSize(width: canvas, height: canvas)
+                )
+                let visibleWidget = FloatingWidgetPlacement.visibleWidgetRect(
+                    in: savedFrame,
+                    visibleSize: widgetSide
+                )
+                let center = NSPoint(x: visibleWidget.midX, y: visibleWidget.midY)
+                if let savedScreen = NSScreen.screens.first(where: { $0.frame.contains(center) }) {
+                    origin = FloatingWidgetPlacement.clampedFrame(
+                        savedFrame,
+                        to: savedScreen.visibleFrame,
+                        visibleSize: widgetSide
+                    ).origin
                 } else {
-                    origin = NSPoint(x: defaultX, y: defaultY)
+                    origin = defaultFrame.origin
                 }
             } else {
-                origin = NSPoint(x: defaultX, y: defaultY)
+                origin = defaultFrame.origin
             }
         } else {
-            origin = NSPoint(x: defaultX, y: defaultY)
+            origin = defaultFrame.origin
         }
 
         // Spec §7: window configuration is fully encapsulated in FloatingWidgetWindow.init().
@@ -420,7 +378,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { [weak self] _ in
             let newSize = FloatingWidgetWindow.widgetSize
-            self?.floatingWindow?.applyWidgetSize(newSize)
+            Task { @MainActor [weak self] in
+                self?.floatingWindow?.applyWidgetSize(newSize)
+            }
         }
     }
 
@@ -438,55 +398,67 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Toggle panel from hotkey (⌃⌥N) — panel appears on the screen where the mouse cursor is.
-    private func togglePanelAtMouseScreen() {
-        if let panel = panelWindow, panel.isVisible {
+    /// Summon the attention anchor to the mouse's display. Unlike a toggle,
+    /// repeated invocations always leave both the widget and panel visible.
+    private func summonFloatingWidgetToMouseScreen() {
+        guard let window = floatingWindow else { return }
+
+        let screens = NSScreen.screens
+        let mouseLocation = NSEvent.mouseLocation
+        let targetIndex = FloatingWidgetPlacement.targetScreenIndex(
+            containing: mouseLocation,
+            screenFrames: screens.map(\.frame)
+        )
+        guard let targetScreen = targetIndex.map({ screens[$0] }) ?? NSScreen.main else {
+            return
+        }
+
+        let targetFrame = FloatingWidgetPlacement.summonedFrame(
+            currentFrame: window.frame,
+            targetVisibleFrame: targetScreen.visibleFrame,
+            visibleSize: window.visibleSize
+        )
+        if targetFrame.origin != window.frame.origin {
+            window.setFrameOrigin(targetFrame.origin)
+        }
+        window.orderFrontRegardless()
+
+        let action = FloatingPanelSummonAction.resolve(
+            panelIsVisible: panelWindow?.isVisible == true,
+            panelIsOnTargetScreen: panelScreenFrame == targetScreen.frame
+        )
+        switch action {
+        case .present:
+            showPanel()
+        case .keepVisible:
+            repositionPanel()
+            NSApp.activate(ignoringOtherApps: true)
+            panelWindow?.makeKeyAndOrderFront(nil)
+        case .replace:
             hidePanel()
-        } else {
-            showPanelAtMouseScreen()
+            showPanel()
         }
     }
 
     /// Calculate the panel frame relative to the current floating widget position.
     private func panelFrame() -> NSRect {
         guard let widgetFrame = floatingWindow?.frame else { return .zero }
-
-        // Use the screen where the widget is located, not always the main screen
-        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(widgetFrame.origin) }) ?? NSScreen.main else { return .zero }
-
-        let screenFrame = screen.visibleFrame
-
-        // The widget panel is 128×128 with a 40pt transparent padding around
-        // the visible 48pt circle. To place the popup adjacent to the visible
-        // circle (not the invisible frame edge), strip the inset.
-        let widgetInset = (FloatingWidgetWindow.canvasSize - FloatingWidgetWindow.widgetSize) / 2
-        let visibleTop = widgetFrame.maxY - widgetInset
-        let visibleBottom = widgetFrame.minY + widgetInset
-
-        // Default: panel above the widget, centered horizontally
-        var panelX = widgetFrame.midX - panelWidth / 2
-        var panelY = visibleTop + 8
-
-        // If panel would go above the screen, show it below the widget
-        if panelY + panelHeight > screenFrame.maxY {
-            panelY = visibleBottom - panelHeight - 8
+        guard let screen = currentFloatingWidgetScreen() else {
+            return .zero
         }
 
-        // Clamp horizontal position to screen bounds
-        panelX = max(screenFrame.minX + 4, min(panelX, screenFrame.maxX - panelWidth - 4))
-
-        return NSRect(x: panelX, y: panelY, width: panelWidth, height: panelHeight)
+        return FloatingPanelPlacement.frame(
+            adjacentTo: widgetFrame,
+            visibleWidgetSize: floatingWindow?.visibleSize ?? FloatingWidgetWindow.widgetSize,
+            panelSize: NSSize(width: panelWidth, height: panelHeight),
+            targetVisibleFrame: screen.visibleFrame
+        )
     }
 
-    /// Calculate the panel frame at the bottom-right of the given screen.
-    private func panelFrameOnScreen(_ screen: NSScreen) -> NSRect {
-        let screenFrame = screen.visibleFrame
-
-        // Position at bottom-right corner with some padding
-        let panelX = screenFrame.maxX - panelWidth - 20
-        let panelY = screenFrame.minY + 20
-
-        return NSRect(x: panelX, y: panelY, width: panelWidth, height: panelHeight)
+    private func currentFloatingWidgetScreen() -> NSScreen? {
+        guard let widgetFrame = floatingWindow?.frame else { return NSScreen.main }
+        let widgetCenter = NSPoint(x: widgetFrame.midX, y: widgetFrame.midY)
+        return NSScreen.screens.first(where: { $0.frame.contains(widgetCenter) }) ?? NSScreen.main
     }
 
     /// Shared keyboard selection state for the panel.
@@ -495,24 +467,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Show panel near the floating widget (triggered by widget click).
     private func showPanel() {
-        guard let widgetFrame = floatingWindow?.frame else { return }
+        guard floatingWindow != nil else { return }
 
         let frame = panelFrame()
 
-        // Determine which screen the NARC widget is on
-        let narcScreen = NSScreen.screens.first(where: { $0.frame.contains(widgetFrame.origin) }) ?? NSScreen.main
+        // Resolve the current screen again for every action so dragging the
+        // widget across displays cannot leave stale window-routing context.
+        let narcScreen = currentFloatingWidgetScreen()
 
         presentPanel(frame: frame, narcScreen: narcScreen)
-    }
-
-    /// Show panel on the screen where the mouse cursor is (triggered by ⌃⌥N hotkey).
-    private func showPanelAtMouseScreen() {
-        let mouseLocation = NSEvent.mouseLocation
-        let mouseScreen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main
-
-        let frame = panelFrameOnScreen(mouseScreen!)
-
-        presentPanel(frame: frame, narcScreen: mouseScreen)
     }
 
     /// Shared panel creation logic.
@@ -527,6 +490,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             appMonitor: appMonitor,
             windowManager: windowManager,
             pinnedWindowService: pinnedWindowService,
+            assistantStore: assistantStore,
+            inboxCaptureState: inboxCaptureState,
             onClose: { [weak self] in self?.hidePanel() },
             onOpenPreferences: { [weak self] in self?.openPreferences() },
             onOpenAssistant: { [weak self] in
@@ -535,13 +500,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.showAssistantHub()
                 }
             },
-            onOpenQuickCapture: { [weak self] in
-                self?.hidePanel()
-                Task { @MainActor in
-                    self?.showQuickCapture()
-                }
+            narcScreenProvider: { [weak self] in
+                self?.currentFloatingWidgetScreen()
             },
-            narcScreen: narcScreen,
             keyboardSelection: keyboardSelection
         )
 
@@ -562,7 +523,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel.level = .floating
         panel.hasShadow = true
         panel.isMovable = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
 
         // When the user clicks anywhere in the panel, they've shown intent to
         // interact — un-gate keyboard navigation so ↑↓/numbers/Enter work.
@@ -570,8 +531,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.keyboardSelection.wantsKeyboardNavigation = true
         }
 
-        panel.orderFrontRegardless()
         self.panelWindow = panel
+        self.panelScreenFrame = narcScreen?.frame
 
         // CRITICAL: Make NARC the active app so the LOCAL key event monitor can
         // intercept and CONSUME keyboard events (return nil). Without this,
@@ -580,9 +541,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // This means Enter/Tab would both trigger NARC's action AND be sent to
         // the editor, causing unwanted edits.
         NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
 
         // Install key event monitor for panel keyboard navigation
-        installKeyEventMonitor(narcScreen: narcScreen)
+        installKeyEventMonitor()
     }
 
     /// Update the panel position to follow the floating widget.
@@ -590,12 +552,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let panel = panelWindow, panel.isVisible else { return }
         let frame = panelFrame()
         panel.setFrame(frame, display: true, animate: false)
+        panelScreenFrame = currentFloatingWidgetScreen()?.frame
     }
 
     private func hidePanel() {
         removeKeyEventMonitor()
         panelWindow?.orderOut(nil)
         panelWindow = nil
+        panelScreenFrame = nil
     }
 
     // MARK: - Personal Assistant
@@ -605,7 +569,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard moduleRegistry.module(id: "assistant") != nil else { return }
 
         if quickCaptureWindow == nil {
-            quickCaptureWindow = QuickCaptureWindow(store: assistantStore)
+            quickCaptureWindow = QuickCaptureWindow(
+                store: assistantStore,
+                captureState: inboxCaptureState,
+                onOpenAssistant: { [weak self] in
+                    self?.showAssistantHub()
+                }
+            )
         }
         quickCaptureWindow?.present()
     }
@@ -617,11 +587,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if assistantHubWindow == nil {
             assistantHubWindow = AssistantHubWindow(
                 store: assistantStore,
-                onQuickCapture: { [weak self] in
-                    Task { @MainActor in
-                        self?.showQuickCapture()
-                    }
-                }
+                captureState: inboxCaptureState
             )
         }
         assistantHubWindow?.present()
@@ -965,8 +931,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// center throws an NSException). True in a proper .app bundle.
     private var systemNotificationsAvailable = false
 
-    /// Request authorization and register as the delegate so click-to-jump works.
-    private func setupSystemNotifications(requestAuthorization: Bool = true) {
+    /// Register as the notification delegate without requesting permission.
+    /// Authorization is deferred until a real notification needs delivery.
+    private func setupSystemNotifications() {
         // UNUserNotificationCenter.current() requires a real .app bundle. When
         // running via `swift run`, mainBundle has no bundleIdentifier and the
         // first access throws (NSInternalInconsistencyException). Guard against
@@ -980,17 +947,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         systemNotificationsAvailable = true
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-        guard requestAuthorization else {
-            print("[NARC] 🔔 Notification authorization deferred until after onboarding.")
-            return
-        }
-        center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
-            if let error = error {
-                print("[NARC] ⚠️ Notification auth error: \(error)")
-            } else {
-                print("[NARC] 🔔 Notification auth granted=\(granted)")
-            }
-        }
+        print("[NARC] 🔔 Notification authorization deferred until first use.")
     }
 
     /// Generic poster — builds a content object and submits it to the center.
@@ -1021,9 +978,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             content: content,
             trigger: nil  // deliver immediately
         )
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error = error {
-                print("[NARC] ⚠️ Notification post failed: \(error)")
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            let addRequest = {
+                center.add(request) { error in
+                    if let error {
+                        print("[NARC] ⚠️ Notification post failed: \(error)")
+                    }
+                }
+            }
+
+            switch settings.authorizationStatus {
+            case .authorized, .provisional, .ephemeral:
+                addRequest()
+            case .notDetermined:
+                center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+                    if let error {
+                        print("[NARC] ⚠️ Notification auth error: \(error)")
+                    } else if granted {
+                        addRequest()
+                    } else {
+                        print("[NARC] 🔕 Notification delivery was not authorized.")
+                    }
+                }
+            case .denied:
+                print("[NARC] 🔕 Notification delivery is disabled in System Settings.")
+            @unknown default:
+                print("[NARC] ⚠️ Unknown notification authorization state.")
             }
         }
     }
@@ -1200,7 +1181,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// is targeted at any other window (Dashboard, Preferences, etc.) so the
     /// terminal in the workspace can receive characters like `-` and Enter that
     /// happen to overlap with our numeric/Return shortcuts.
-    private func installKeyEventMonitor(narcScreen: NSScreen?) {
+    private func installKeyEventMonitor() {
         removeKeyEventMonitor()
 
         // Handler logic shared by both monitors
@@ -1211,6 +1192,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             let keyCode = event.keyCode
+
+            // SwiftUI TextField uses the window field editor (NSTextView).
+            // Let editing keys reach it instead of treating Return, arrows,
+            // Tab, or digits as panel navigation commands.
+            if panel.firstResponder is NSTextView, keyCode != 53 {
+                return false
+            }
 
             switch keyCode {
             case 53: // Esc — close panel
@@ -1229,7 +1217,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             case 36: // ↩ — activate selected item (gated: user must have signaled nav intent)
                 guard self.keyboardSelection.wantsKeyboardNavigation else { return false }
-                self.activateSelectedItem(narcScreen: narcScreen)
+                self.activateSelectedItem()
                 return true
 
             case 48: // Tab — select next item (same as ↓), also signals nav intent
@@ -1258,7 +1246,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     22: 5, 26: 6, 28: 7, 25: 8, 29: 9
                 ]
                 if let index = numberMap[keyCode] {
-                    self.activateItemAtIndex(index, narcScreen: narcScreen)
+                    self.activateItemAtIndex(index)
                 }
                 return true
 
@@ -1338,21 +1326,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         keyboardSelection.selectedIndex = max(current - 1, 0)
     }
 
-    private func activateSelectedItem(narcScreen: NSScreen?) {
+    private func activateSelectedItem() {
         let items = allPanelItems()
         let index = keyboardSelection.selectedIndex
         guard index >= 0 && index < items.count else { return }
-        activatePanelItem(items[index], narcScreen: narcScreen)
+        activatePanelItem(items[index])
     }
 
-    private func activateItemAtIndex(_ index: Int, narcScreen: NSScreen?) {
+    private func activateItemAtIndex(_ index: Int) {
         let items = allPanelItems()
         guard index >= 0 && index < items.count else { return }
         keyboardSelection.selectedIndex = index
-        activatePanelItem(items[index], narcScreen: narcScreen)
+        activatePanelItem(items[index])
     }
 
-    private func activatePanelItem(_ item: PanelItem, narcScreen: NSScreen?) {
+    private func activatePanelItem(_ item: PanelItem) {
+        let narcScreen = currentFloatingWidgetScreen()
         switch item {
         case .monitoring(let state):
             appMonitor.activateApp(
@@ -1371,11 +1360,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     @objc private func menuBarIconClicked() {
-        togglePanel()
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            guard let button = statusBarItem?.button,
+                  let menu = statusBarMenu else {
+                return
+            }
+            menu.popUp(
+                positioning: nil,
+                at: NSPoint(x: 0, y: button.bounds.minY - 2),
+                in: button
+            )
+            return
+        }
+        summonFloatingWidgetToMouseScreen()
     }
 
     @objc private func showFloatingWidget() {
-        floatingWindow?.orderFrontRegardless()
+        summonFloatingWidgetToMouseScreen()
     }
 
     @objc private func showUserGuide() {
@@ -1386,15 +1387,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func showOnboarding(force: Bool) {
-        let hasCompleted = UserDefaults.standard.bool(
-            forKey: OnboardingPresentationPolicy.completionKey
-        )
-        guard OnboardingPresentationPolicy.shouldPresent(
-            hasCompleted: hasCompleted,
-            force: force
-        ) else {
+        guard OnboardingPresentationPolicy.shouldPresent(force: force) else {
             return
         }
+
+        OnboardingPresentationPolicy.markEntrySeen()
 
         if let window = onboardingWindow {
             window.present()
@@ -1417,15 +1414,55 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 NSWorkspace.shared.open(url)
             },
             onDismiss: { [weak self] in
-                UserDefaults.standard.set(
-                    true,
-                    forKey: OnboardingPresentationPolicy.completionKey
-                )
                 self?.onboardingWindow = nil
             }
         )
         onboardingWindow = window
         window.present()
+    }
+
+    private func handleLayoutHotkey(_ layout: WindowLayout) {
+        guard hotkeyService.checkAccessibilityPermission(prompt: false) else {
+            DispatchQueue.main.async { [weak self] in
+                self?.presentAccessibilityExplanation()
+            }
+            return
+        }
+
+        OnboardingPresentationPolicy.markWindowToolsIntroduced()
+        // Keep this synchronous with the Carbon callback so NARC cannot steal
+        // focus before the target window is resolved.
+        WindowManagerService.moveActiveWindow(to: layout)
+    }
+
+    @MainActor
+    private func handlePinHotkey() {
+        guard hotkeyService.checkAccessibilityPermission(prompt: false) else {
+            presentAccessibilityExplanation()
+            return
+        }
+
+        OnboardingPresentationPolicy.markWindowToolsIntroduced()
+        if pinnedWindowService.pinCurrentWindow() {
+            showPinFeedback()
+        }
+    }
+
+    @MainActor
+    private func presentAccessibilityExplanation() {
+        guard !accessibilityExplanationIsVisible else { return }
+        accessibilityExplanationIsVisible = true
+        defer { accessibilityExplanationIsVisible = false }
+
+        let alert = NSAlert()
+        alert.messageText = "窗口工具需要辅助功能权限"
+        alert.informativeText = "NARC 只在你使用窗口排列或钉选时需要这项权限。开启后，请再按一次刚才的快捷键。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "继续并打开设置")
+        alert.addButton(withTitle: "稍后")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        _ = hotkeyService.checkAccessibilityPermission(prompt: true)
     }
 
     private var preferencesWindow: PreferencesWindow?
@@ -1435,12 +1472,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let window = floatingWindow else { return }
         let mouseLocation = NSEvent.mouseLocation
         let activeScreen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main
-        let screenFrame = activeScreen?.visibleFrame ?? .zero
-        let widgetSide = FloatingWidgetWindow.widgetSize
-        let widgetInset = (FloatingWidgetWindow.canvasSize - widgetSide) / 2
-        let widgetX = screenFrame.maxX - widgetSide - 40 - widgetInset
-        let widgetY = screenFrame.minY + 100 - widgetInset
-        window.setFrameOrigin(NSPoint(x: widgetX, y: widgetY))
+        guard let screenFrame = activeScreen?.visibleFrame else { return }
+        let frame = FloatingWidgetPlacement.defaultFrame(
+            in: screenFrame,
+            windowSize: window.frame.size,
+            visibleSize: window.visibleSize
+        )
+        window.setFrameOrigin(frame.origin)
+        window.orderFrontRegardless()
     }
 
     @objc private func openPreferences() {
@@ -1468,7 +1507,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - UNUserNotificationCenterDelegate
 
-extension AppDelegate: UNUserNotificationCenterDelegate {
+extension AppDelegate: @preconcurrency UNUserNotificationCenterDelegate {
 
     /// Allow banners to appear even while NARC is in the foreground.
     func userNotificationCenter(

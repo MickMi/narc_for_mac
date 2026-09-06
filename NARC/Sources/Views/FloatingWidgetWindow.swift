@@ -1,5 +1,199 @@
 import Cocoa
 
+enum FloatingWidgetPlacement {
+    static let safeEdgeMargin: CGFloat = 8
+    static let defaultTrailingMargin: CGFloat = 40
+    static let defaultBottomMargin: CGFloat = 100
+
+    static func targetScreenIndex(
+        containing point: NSPoint,
+        screenFrames: [NSRect]
+    ) -> Int? {
+        screenFrames.firstIndex { $0.contains(point) }
+    }
+
+    static func visibleWidgetRect(
+        in windowFrame: NSRect,
+        visibleSize: CGFloat
+    ) -> NSRect {
+        let insetX = max(0, (windowFrame.width - visibleSize) / 2)
+        let insetY = max(0, (windowFrame.height - visibleSize) / 2)
+        return NSRect(
+            x: windowFrame.minX + insetX,
+            y: windowFrame.minY + insetY,
+            width: min(visibleSize, windowFrame.width),
+            height: min(visibleSize, windowFrame.height)
+        )
+    }
+
+    static func defaultFrame(
+        in targetVisibleFrame: NSRect,
+        windowSize: NSSize,
+        visibleSize: CGFloat
+    ) -> NSRect {
+        let insetX = max(0, (windowSize.width - visibleSize) / 2)
+        let insetY = max(0, (windowSize.height - visibleSize) / 2)
+        let preferred = NSRect(
+            x: targetVisibleFrame.maxX - visibleSize - defaultTrailingMargin - insetX,
+            y: targetVisibleFrame.minY + defaultBottomMargin - insetY,
+            width: windowSize.width,
+            height: windowSize.height
+        )
+        return clampedFrame(
+            preferred,
+            to: targetVisibleFrame,
+            visibleSize: visibleSize
+        )
+    }
+
+    /// Keep a valid manual position when the widget is already on the target
+    /// display. Crossing displays uses a predictable bottom-right anchor so
+    /// summoning never covers the pointer's current target.
+    static func summonedFrame(
+        currentFrame: NSRect,
+        targetVisibleFrame: NSRect,
+        visibleSize: CGFloat
+    ) -> NSRect {
+        let visibleRect = visibleWidgetRect(in: currentFrame, visibleSize: visibleSize)
+        let visibleCenter = NSPoint(x: visibleRect.midX, y: visibleRect.midY)
+
+        guard targetVisibleFrame.contains(visibleCenter) else {
+            return defaultFrame(
+                in: targetVisibleFrame,
+                windowSize: currentFrame.size,
+                visibleSize: visibleSize
+            )
+        }
+
+        return clampedFrame(
+            currentFrame,
+            to: targetVisibleFrame,
+            visibleSize: visibleSize
+        )
+    }
+
+    static func resizedFrame(
+        currentFrame: NSRect,
+        newWindowSize: NSSize,
+        newVisibleSize: CGFloat,
+        targetVisibleFrame: NSRect
+    ) -> NSRect {
+        let centeredFrame = NSRect(
+            x: currentFrame.midX - newWindowSize.width / 2,
+            y: currentFrame.midY - newWindowSize.height / 2,
+            width: newWindowSize.width,
+            height: newWindowSize.height
+        )
+        return clampedFrame(
+            centeredFrame,
+            to: targetVisibleFrame,
+            visibleSize: newVisibleSize
+        )
+    }
+
+    static func clampedFrame(
+        _ frame: NSRect,
+        to targetVisibleFrame: NSRect,
+        visibleSize: CGFloat,
+        margin: CGFloat = safeEdgeMargin
+    ) -> NSRect {
+        let insetX = max(0, (frame.width - visibleSize) / 2)
+        let insetY = max(0, (frame.height - visibleSize) / 2)
+
+        let minimumX = targetVisibleFrame.minX + margin - insetX
+        let maximumX = targetVisibleFrame.maxX - margin - visibleSize - insetX
+        let minimumY = targetVisibleFrame.minY + margin - insetY
+        let maximumY = targetVisibleFrame.maxY - margin - visibleSize - insetY
+
+        var result = frame
+        result.origin.x = clampedCoordinate(
+            frame.minX,
+            minimum: minimumX,
+            maximum: maximumX,
+            fallback: targetVisibleFrame.midX - frame.width / 2
+        )
+        result.origin.y = clampedCoordinate(
+            frame.minY,
+            minimum: minimumY,
+            maximum: maximumY,
+            fallback: targetVisibleFrame.midY - frame.height / 2
+        )
+        return result
+    }
+
+    private static func clampedCoordinate(
+        _ value: CGFloat,
+        minimum: CGFloat,
+        maximum: CGFloat,
+        fallback: CGFloat
+    ) -> CGFloat {
+        guard minimum <= maximum else { return fallback }
+        return max(minimum, min(value, maximum))
+    }
+}
+
+enum FloatingPanelPlacement {
+    static func frame(
+        adjacentTo widgetFrame: NSRect,
+        visibleWidgetSize: CGFloat,
+        panelSize: NSSize,
+        targetVisibleFrame: NSRect,
+        gap: CGFloat = 8,
+        margin: CGFloat = 4
+    ) -> NSRect {
+        let visibleWidget = FloatingWidgetPlacement.visibleWidgetRect(
+            in: widgetFrame,
+            visibleSize: visibleWidgetSize
+        )
+
+        var originX = visibleWidget.midX - panelSize.width / 2
+        var originY = visibleWidget.maxY + gap
+
+        if originY + panelSize.height > targetVisibleFrame.maxY - margin {
+            originY = visibleWidget.minY - panelSize.height - gap
+        }
+
+        originX = clampedCoordinate(
+            originX,
+            minimum: targetVisibleFrame.minX + margin,
+            maximum: targetVisibleFrame.maxX - panelSize.width - margin,
+            fallback: targetVisibleFrame.midX - panelSize.width / 2
+        )
+        originY = clampedCoordinate(
+            originY,
+            minimum: targetVisibleFrame.minY + margin,
+            maximum: targetVisibleFrame.maxY - panelSize.height - margin,
+            fallback: targetVisibleFrame.midY - panelSize.height / 2
+        )
+
+        return NSRect(origin: NSPoint(x: originX, y: originY), size: panelSize)
+    }
+
+    private static func clampedCoordinate(
+        _ value: CGFloat,
+        minimum: CGFloat,
+        maximum: CGFloat,
+        fallback: CGFloat
+    ) -> CGFloat {
+        guard minimum <= maximum else { return fallback }
+        return max(minimum, min(value, maximum))
+    }
+}
+
+enum FloatingPanelSummonAction: Equatable {
+    case present
+    case keepVisible
+    case replace
+
+    static func resolve(
+        panelIsVisible: Bool,
+        panelIsOnTargetScreen: Bool
+    ) -> FloatingPanelSummonAction {
+        guard panelIsVisible else { return .present }
+        return panelIsOnTargetScreen ? .keepVisible : .replace
+    }
+}
+
 enum WidgetPointerInteractionPolicy {
     static let dragThreshold: CGFloat = 5
 
@@ -135,7 +329,7 @@ final class FloatingWidgetWindow: NSPanel {
 
         // Spec §7
         self.level = .floating
-        self.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        self.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
         self.isOpaque = false              // critical — keeps the 48pt circle's surroundings transparent
         self.backgroundColor = .clear      // critical — same reason
         self.hasShadow = false             // SwiftUI view supplies its own drop shadow
@@ -162,6 +356,7 @@ final class FloatingWidgetWindow: NSPanel {
                     super.contentView = newView
                 } else {
                     let wrapper = FirstMouseView(frame: newView.frame)
+                    wrapper.visibleSize = visibleSize
                     wrapper.autoresizesSubviews = true
                     newView.autoresizingMask = [.width, .height]
                     wrapper.addSubview(newView)
@@ -240,15 +435,31 @@ final class FloatingWidgetWindow: NSPanel {
 
     /// Update the window frame and hit-test region when the widget size preset changes.
     func applyWidgetSize(_ newVisibleSize: CGFloat) {
+        let currentFrame = frame
+        let currentCenter = NSPoint(x: currentFrame.midX, y: currentFrame.midY)
+        let targetVisibleFrame = NSScreen.screens
+            .first(where: { $0.frame.contains(currentCenter) })?
+            .visibleFrame
         visibleSize = newVisibleSize
         let newCanvas = newVisibleSize + 80
-        var frame = self.frame
-        let centerX = frame.midX
-        let centerY = frame.midY
-        frame.size = NSSize(width: newCanvas, height: newCanvas)
-        frame.origin.x = centerX - newCanvas / 2
-        frame.origin.y = centerY - newCanvas / 2
-        setFrame(frame, display: true, animate: false)
+        let newWindowSize = NSSize(width: newCanvas, height: newCanvas)
+        let resizedFrame: NSRect
+        if let targetVisibleFrame {
+            resizedFrame = FloatingWidgetPlacement.resizedFrame(
+                currentFrame: currentFrame,
+                newWindowSize: newWindowSize,
+                newVisibleSize: newVisibleSize,
+                targetVisibleFrame: targetVisibleFrame
+            )
+        } else {
+            resizedFrame = NSRect(
+                x: currentFrame.midX - newCanvas / 2,
+                y: currentFrame.midY - newCanvas / 2,
+                width: newCanvas,
+                height: newCanvas
+            )
+        }
+        setFrame(resizedFrame, display: true, animate: false)
         // contentView is always a FirstMouseView (see the custom setter).
         (contentView as? FirstMouseView)?.visibleSize = newVisibleSize
     }
