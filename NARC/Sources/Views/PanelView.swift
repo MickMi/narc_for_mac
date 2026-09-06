@@ -1,31 +1,32 @@
 import SwiftUI
 
 /// The main panel that expands from the floating widget.
-/// Contains two tabs: Notifications and Window Management.
-///
-/// **Scope note**: this panel only surfaces NARC's "ambient awareness" data —
-/// IM badges and pinned windows.
+/// Starts with the shared Inbox capture flow, with Notifications and Window
+/// Management as secondary tabs.
 struct PanelView: View {
     @ObservedObject var appMonitor: AppMonitorService
     @ObservedObject var windowManager: WindowManagerService
     @ObservedObject var pinnedWindowService: PinnedWindowService
+    @ObservedObject var assistantStore: AssistantStore
+    @ObservedObject var inboxCaptureState: InboxCaptureState
     var onClose: () -> Void
     var onOpenPreferences: () -> Void
     var onOpenAssistant: () -> Void = {}
-    var onOpenQuickCapture: () -> Void = {}
-    /// The screen where NARC's floating widget is located.
-    var narcScreen: NSScreen?
+    /// Resolves the floating widget's current screen at action time.
+    var narcScreenProvider: () -> NSScreen?
     /// Keyboard selection state for ↑↓ navigation.
     @ObservedObject var keyboardSelection: KeyboardSelectionState
 
-    @State private var selectedTab: PanelTab = .notifications
+    @State private var selectedTab: PanelTab = .inbox
 
     enum PanelTab: String, CaseIterable {
+        case inbox = "Inbox"
         case notifications = "Notifications"
         case windows = "Windows"
 
         var icon: String {
             switch self {
+            case .inbox: return "tray.fill"
             case .notifications: return "bell.fill"
             case .windows: return "macwindow"
             }
@@ -43,12 +44,22 @@ struct PanelView: View {
             // Content
             Group {
                 switch selectedTab {
+                case .inbox:
+                    ScrollView {
+                        QuickCaptureView(
+                            store: assistantStore,
+                            captureState: inboxCaptureState,
+                            compact: true,
+                            onDismiss: onClose,
+                            onOpenAssistant: onOpenAssistant
+                        )
+                    }
                 case .notifications:
                     NotificationListView(
                         appMonitor: appMonitor,
                         pinnedWindowService: pinnedWindowService,
                         onClose: onClose,
-                        narcScreen: narcScreen,
+                        narcScreenProvider: narcScreenProvider,
                         keyboardSelection: keyboardSelection
                     )
                 case .windows:
@@ -79,13 +90,15 @@ struct PanelView: View {
 
             Spacer()
 
-            Button(action: onOpenQuickCapture) {
+            Button {
+                selectedTab = .inbox
+            } label: {
                 Image(systemName: "square.and.pencil")
                     .font(.narcSubtitle)
                     .foregroundColor(.narcTextMuted)
             }
             .buttonStyle(.plain)
-            .help("Quick Capture（⌃⌥Q）")
+            .help("随手记（⌃⌥Q）")
 
             Button(action: onOpenAssistant) {
                 Image(systemName: "sparkles")
@@ -150,36 +163,47 @@ struct PanelView: View {
 
     private var footerBar: some View {
         HStack(spacing: NarcSpacing.xs) {
-            // Keyboard hints
-            Group {
-                Text("↑↓")
+            if selectedTab == .inbox {
+                Text("Return")
                     .font(.narcMonoTiny)
-                    .padding(.horizontal, NarcSpacing.xxs + 1)
-                    .padding(.vertical, NarcSpacing.xxs / 2)
+                    .padding(.horizontal, NarcSpacing.xs)
+                    .padding(.vertical, NarcSpacing.xxs)
                     .background(Color.narcSurfaceMuted)
                     .cornerRadius(NarcRadius.xs / 2)
-                Text("select")
+                Text("save")
                     .font(.narcMonoTiny)
+                    .foregroundColor(.narcTextMuted)
+            } else {
+                Group {
+                    Text("↑↓")
+                        .font(.narcMonoTiny)
+                        .padding(.horizontal, NarcSpacing.xxs + 1)
+                        .padding(.vertical, NarcSpacing.xxs / 2)
+                        .background(Color.narcSurfaceMuted)
+                        .cornerRadius(NarcRadius.xs / 2)
+                    Text("select")
+                        .font(.narcMonoTiny)
 
-                Text("↩")
-                    .font(.narcMonoTiny)
-                    .padding(.horizontal, NarcSpacing.xxs + 1)
-                    .padding(.vertical, NarcSpacing.xxs / 2)
-                    .background(Color.narcSurfaceMuted)
-                    .cornerRadius(NarcRadius.xs / 2)
-                Text("open")
-                    .font(.narcMonoTiny)
+                    Text("↩")
+                        .font(.narcMonoTiny)
+                        .padding(.horizontal, NarcSpacing.xxs + 1)
+                        .padding(.vertical, NarcSpacing.xxs / 2)
+                        .background(Color.narcSurfaceMuted)
+                        .cornerRadius(NarcRadius.xs / 2)
+                    Text("open")
+                        .font(.narcMonoTiny)
 
-                Text("esc")
-                    .font(.narcMonoTiny)
-                    .padding(.horizontal, NarcSpacing.xxs + 1)
-                    .padding(.vertical, NarcSpacing.xxs / 2)
-                    .background(Color.narcSurfaceMuted)
-                    .cornerRadius(NarcRadius.xs / 2)
-                Text("close")
-                    .font(.narcMonoTiny)
+                    Text("esc")
+                        .font(.narcMonoTiny)
+                        .padding(.horizontal, NarcSpacing.xxs + 1)
+                        .padding(.vertical, NarcSpacing.xxs / 2)
+                        .background(Color.narcSurfaceMuted)
+                        .cornerRadius(NarcRadius.xs / 2)
+                    Text("close")
+                        .font(.narcMonoTiny)
+                }
+                .foregroundColor(.narcTextMuted)
             }
-            .foregroundColor(.narcTextMuted)
 
             Spacer()
 

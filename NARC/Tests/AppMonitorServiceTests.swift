@@ -5,11 +5,122 @@ import Testing
 @Test
 func dockBadgeReaderUsesDirectBundleResultWhenAvailable() {
     let reader = DockBadgeReader { arguments in
-        #expect(arguments == ["info", "-only", "StatusLabel", "com.example.chat"])
-        return #""StatusLabel"={ "label"="7" }"#
+        switch arguments {
+        case ["list"]:
+            return ""
+        case ["info", "-only", "StatusLabel", "com.example.chat"]:
+            return #""StatusLabel"={ "label"="7" }"#
+        default:
+            Issue.record("Unexpected lsappinfo arguments: \(arguments)")
+            return nil
+        }
     }
 
     #expect(reader.badgeCount(for: "com.example.chat") == 7)
+}
+
+@Test
+func dockBadgeReaderReconcilesDirectZeroWithNonzeroDuplicateInstance() {
+    let reader = DockBadgeReader { arguments in
+        switch arguments {
+        case ["list"]:
+            return weComLaunchServicesList
+        case ["info", "-only", "StatusLabel", "com.tencent.WeWorkMac"]:
+            return #""StatusLabel"={ "label"="" }"#
+        case ["info", "-only", "StatusLabel", "ASN:0x0-0x12012"]:
+            return #""StatusLabel"={ "label"="14" }"#
+        case ["info", "-only", "StatusLabel", "ASN:0x0-0x474474"]:
+            return #""StatusLabel"=[ NULL ]"#
+        default:
+            return nil
+        }
+    }
+
+    #expect(reader.badgeCount(for: "com.tencent.WeWorkMac") == 14)
+}
+
+@Test
+func dockBadgeReaderUsesLargestValueAcrossDirectAndDuplicateInstances() {
+    let reader = DockBadgeReader { arguments in
+        switch arguments {
+        case ["list"]:
+            return weComLaunchServicesList
+        case ["info", "-only", "StatusLabel", "com.tencent.WeWorkMac"]:
+            return #""StatusLabel"={ "label"="9" }"#
+        case ["info", "-only", "StatusLabel", "ASN:0x0-0x12012"]:
+            return #""StatusLabel"={ "label"="14" }"#
+        case ["info", "-only", "StatusLabel", "ASN:0x0-0x474474"]:
+            return #""StatusLabel"={ "label"="" }"#
+        default:
+            return nil
+        }
+    }
+
+    #expect(reader.badgeCount(for: "com.tencent.WeWorkMac") == 14)
+}
+
+@Test
+func dockBadgeReaderFallsBackToDirectValueWhenListIsUnavailable() {
+    let reader = DockBadgeReader { arguments in
+        switch arguments {
+        case ["list"]:
+            return nil
+        case ["info", "-only", "StatusLabel", "com.example.chat"]:
+            return #""StatusLabel"={ "label"="7" }"#
+        default:
+            return nil
+        }
+    }
+
+    #expect(reader.badgeCount(for: "com.example.chat") == 7)
+}
+
+@Test
+func batchBadgeReadListsLaunchServicesOnlyOnce() {
+    var listCallCount = 0
+    let reader = DockBadgeReader { arguments in
+        switch arguments {
+        case ["list"]:
+            listCallCount += 1
+            return weComLaunchServicesList
+        case ["info", "-only", "StatusLabel", "com.tencent.WeWorkMac"]:
+            return #""StatusLabel"={ "label"="" }"#
+        case ["info", "-only", "StatusLabel", "com.example.other"]:
+            return #""StatusLabel"={ "label"="2" }"#
+        case ["info", "-only", "StatusLabel", "ASN:0x0-0x12012"]:
+            return #""StatusLabel"={ "label"="14" }"#
+        case ["info", "-only", "StatusLabel", "ASN:0x0-0x474474"]:
+            return #""StatusLabel"=[ NULL ]"#
+        case ["info", "-only", "StatusLabel", "ASN:0x0-0x999999"]:
+            return #""StatusLabel"={ "label"="2" }"#
+        default:
+            return nil
+        }
+    }
+
+    let result = reader.badgeCounts(for: ["com.tencent.WeWorkMac", "com.example.other"])
+    #expect(result == ["com.tencent.WeWorkMac": 14, "com.example.other": 2])
+    #expect(listCallCount == 1)
+}
+
+@Test(arguments: [
+    (count: 0, uncertain: false, text: Optional<String>.none),
+    (count: 14, uncertain: false, text: Optional("14")),
+    (count: 120, uncertain: false, text: Optional("99+")),
+    (count: 0, uncertain: true, text: Optional("?")),
+    (count: 14, uncertain: true, text: Optional("14?")),
+])
+func badgePresentationNeverDisguisesUnknownAsZero(
+    count: Int,
+    uncertain: Bool,
+    text: String?
+) {
+    let presentation = BadgePresentation.resolve(
+        count: count,
+        isUncertain: uncertain
+    )
+    #expect(presentation.text == text)
+    #expect(presentation.isUncertain == uncertain)
 }
 
 @Test
@@ -69,6 +180,96 @@ func dockBadgeReaderReturnsNilWhenLaunchServicesCannotProvideAValue() {
     }
 
     #expect(reader.badgeCount(for: "com.example.chat") == nil)
+}
+
+@Test
+func dockBadgeReaderTreatsNonNumericLabelsAsUnknown() {
+    let reader = DockBadgeReader { arguments in
+        switch arguments {
+        case ["list"]:
+            return ""
+        case ["info", "-only", "StatusLabel", "com.example.chat"]:
+            return #""StatusLabel"={ "label"="new" }"#
+        default:
+            return nil
+        }
+    }
+
+    #expect(reader.badgeCount(for: "com.example.chat") == nil)
+}
+
+@Test
+func dockBadgeReaderTreatsNegativeLabelsAsUnknown() {
+    let reader = DockBadgeReader { arguments in
+        switch arguments {
+        case ["list"]:
+            return ""
+        case ["info", "-only", "StatusLabel", "com.example.chat"]:
+            return #""StatusLabel"={ "label"="-3" }"#
+        default:
+            return nil
+        }
+    }
+
+    #expect(reader.badgeCount(for: "com.example.chat") == nil)
+}
+
+@Test
+func dockBadgeReaderDoesNotLetDirectZeroHideNonNumericInstance() {
+    let reader = DockBadgeReader { arguments in
+        switch arguments {
+        case ["list"]:
+            return weComLaunchServicesList
+        case ["info", "-only", "StatusLabel", "com.tencent.WeWorkMac"]:
+            return #""StatusLabel"={ "label"="" }"#
+        case ["info", "-only", "StatusLabel", "ASN:0x0-0x12012"]:
+            return #""StatusLabel"={ "label"="99+" }"#
+        case ["info", "-only", "StatusLabel", "ASN:0x0-0x474474"]:
+            return #""StatusLabel"=[ NULL ]"#
+        default:
+            return nil
+        }
+    }
+
+    #expect(reader.badgeCount(for: "com.tencent.WeWorkMac") == nil)
+}
+
+@Test
+func dockBadgeReaderDoesNotLetDirectZeroHideNegativeInstance() {
+    let reader = DockBadgeReader { arguments in
+        switch arguments {
+        case ["list"]:
+            return weComLaunchServicesList
+        case ["info", "-only", "StatusLabel", "com.tencent.WeWorkMac"]:
+            return #""StatusLabel"={ "label"="" }"#
+        case ["info", "-only", "StatusLabel", "ASN:0x0-0x12012"]:
+            return #""StatusLabel"={ "label"="-3" }"#
+        case ["info", "-only", "StatusLabel", "ASN:0x0-0x474474"]:
+            return #""StatusLabel"=[ NULL ]"#
+        default:
+            return nil
+        }
+    }
+
+    #expect(reader.badgeCount(for: "com.tencent.WeWorkMac") == nil)
+}
+
+@Test
+func badgeStatusIsUncertainOnlyWhenARunningEnabledAppHasNoValue() {
+    let running: Set<String> = ["com.example.chat", "com.tencent.WeWorkMac"]
+
+    #expect(AppMonitorService.badgeStatusIsUncertain(
+        enabledRunningBundleIDs: running,
+        badgeMap: ["com.example.chat": 2]
+    ))
+    #expect(!AppMonitorService.badgeStatusIsUncertain(
+        enabledRunningBundleIDs: running,
+        badgeMap: ["com.example.chat": 2, "com.tencent.WeWorkMac": 14]
+    ))
+    #expect(!AppMonitorService.badgeStatusIsUncertain(
+        enabledRunningBundleIDs: [],
+        badgeMap: [:]
+    ))
 }
 
 @Test

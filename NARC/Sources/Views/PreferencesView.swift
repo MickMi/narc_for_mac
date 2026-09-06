@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Preferences window with tabbed navigation.
-/// Receives `AppMonitorService` so the Widget tab can read/write the real
+/// Receives `AppMonitorService` so the Floating Widget tab can read/write the real
 /// monitored-apps list (previously hardcoded @State).
 struct PreferencesView: View {
     @ObservedObject var appMonitor: AppMonitorService
@@ -12,7 +12,7 @@ struct PreferencesView: View {
                 .tabItem { Label("通用", systemImage: "gearshape") }
 
             WidgetTab(appMonitor: appMonitor)
-                .tabItem { Label("悬浮窗", systemImage: "circle.fill") }
+                .tabItem { Label("悬浮球", systemImage: "circle.fill") }
 
             ShortcutsTab()
                 .tabItem { Label("快捷键", systemImage: "keyboard") }
@@ -28,7 +28,6 @@ struct PreferencesView: View {
 
 struct GeneralTab: View {
     @AppStorage("launchAtLogin") private var launchAtLogin = false
-    @AppStorage("showMenuBarIcon") private var showMenuBarIcon = true
     @AppStorage("colorSchemeMode") private var colorSchemeMode = "system"
 
     private let themeOptions = [
@@ -57,7 +56,16 @@ struct GeneralTab: View {
 
             Section("系统行为") {
                 Toggle("开机自动启动", isOn: $launchAtLogin)
-                Toggle("显示菜单栏图标", isOn: $showMenuBarIcon)
+                LabeledContent {
+                    Text("始终显示")
+                        .foregroundColor(.narcTextMuted)
+                } label: {
+                    Label("菜单栏与悬浮球", systemImage: "menubar.rectangle")
+                }
+
+                Text("NARC 不显示 Dock 图标；菜单栏负责持续状态，桌面悬浮球负责当前注意力。")
+                    .font(.narcCaption)
+                    .foregroundColor(.narcTextMuted)
             }
         }
         .formStyle(.grouped)
@@ -65,7 +73,7 @@ struct GeneralTab: View {
     }
 }
 
-// MARK: - Tab 2: Widget (悬浮窗)
+// MARK: - Tab 2: Floating Widget and Monitoring
 
 struct WidgetTab: View {
     @ObservedObject var appMonitor: AppMonitorService
@@ -74,10 +82,31 @@ struct WidgetTab: View {
     @State private var newAppBundleID = ""
     @State private var newAppName = ""
 
-    private let sizeOptions = ["Small", "Medium", "Large"]
+    private let sizeOptions = [
+        ("Small", "小"),
+        ("Medium", "中"),
+        ("Large", "大"),
+    ]
 
     var body: some View {
         Form {
+            Section("注意力锚点") {
+                Text("按 ⌃⌥N 可把悬浮球召回鼠标所在屏幕，并展开它旁边的面板。")
+                    .font(.narcCaption)
+                    .foregroundColor(.narcTextMuted)
+
+                Picker("悬浮球尺寸", selection: $widgetSize) {
+                    ForEach(sizeOptions, id: \.0) { option in
+                        Text(option.1).tag(option.0)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Button("重置到当前屏幕右下角") {
+                    NotificationCenter.default.post(name: .resetWidgetPosition, object: nil)
+                }
+            }
+
             Section("监控对象") {
                 if appMonitor.notificationStates.isEmpty {
                     Text("暂无监控对象")
@@ -97,20 +126,10 @@ struct WidgetTab: View {
                 }
             }
 
-            Section("外观") {
-                Picker("Widget 尺寸", selection: $widgetSize) {
-                    ForEach(sizeOptions, id: \.self) { size in
-                        Text(size).tag(size)
-                    }
-                }
-                .pickerStyle(.segmented)
-            }
-
-            Section("位置") {
-                Button("重置悬浮窗位置到右下角") {
-                    // Post a notification that AppDelegate listens for
-                    NotificationCenter.default.post(name: .resetWidgetPosition, object: nil)
-                }
+            Section {
+                Text("这里管理悬浮球面板中的应用级未读；目标 App 未向 macOS 暴露 Dock Badge 时，状态会标记为不可确认。")
+                    .font(.narcCaption)
+                    .foregroundColor(.narcTextMuted)
             }
         }
         .formStyle(.grouped)
@@ -313,7 +332,8 @@ struct ShortcutsTab: View {
 
             Section("全局快捷键") {
                 ShortcutRow(label: "钉选窗口", hotkey: "⌃⌥P")
-                ShortcutRow(label: "切换面板", hotkey: "⌃⌥N")
+                ShortcutRow(label: "快速记录", hotkey: "⌃⌥Q")
+                ShortcutRow(label: "召回悬浮球", hotkey: "⌃⌥N")
             }
 
             Section {
@@ -321,7 +341,7 @@ struct ShortcutsTab: View {
                     Text("快捷键自定义即将推出")
                         .font(.narcCaption)
                         .foregroundColor(.narcTextMuted)
-                    Text("当前快捷键需要辅助功能权限。前往 系统设置 → 隐私与安全性 → 辅助功能 授权。")
+                    Text("随手箱快捷键无需辅助功能权限；窗口排列与钉选会在首次使用时再请求。")
                         .font(.narcCaption)
                         .foregroundColor(.narcTextMuted)
                 }

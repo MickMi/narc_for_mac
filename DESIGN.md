@@ -1,5 +1,9 @@
 # NARC Dashboard · Visual Softening Design System
 
+## v2.0.0 · 2026-09-07 · 当前产品设计覆盖
+
+本文主体是已软下线 Workspace/Dashboard 的历史视觉规范，仅保留为回滚与 Token 参考，不再定义当前信息架构。当前产品设计以“顶部菜单栏 + 桌面悬浮 `N`”为双入口：轻量面板默认打开 Inbox，先记录再转 Todo/Note；Notifications 与 Windows 是同一面板的次级页，完整 Assistant 使用独立窗口。与本文后续 Dock、Dashboard、Workspace、终端工具栏或显式首选分类描述冲突时，以本节、`plan.md` 与 `docs/PROJECT.md` 为准。
+
 > **源文件：** `narc-dashboard-soft-v5-5.html`（高保真原型稿，最后一次对齐修正版）
 > **版本：** v5.5
 > **导出日期：** 2026-06-17

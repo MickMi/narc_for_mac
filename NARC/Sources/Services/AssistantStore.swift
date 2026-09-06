@@ -24,7 +24,7 @@ enum AssistantStoreFailure: LocalizedError, Equatable {
     }
 }
 
-/// The local source of truth for Todo and Note data.
+/// The local source of truth for Inbox, Todo, and Note data.
 ///
 /// Mutations are persisted before published state changes, so the UI cannot
 /// report success when the atomic file write failed. A failed initial load also
@@ -34,6 +34,7 @@ enum AssistantStoreFailure: LocalizedError, Equatable {
 final class AssistantStore: ObservableObject {
     @Published private(set) var todos: [TodoItem] = []
     @Published private(set) var notes: [NoteItem] = []
+    @Published private(set) var inboxItems: [InboxItem] = []
     @Published private(set) var lastError: AssistantStoreFailure?
 
     let storageURL: URL
@@ -62,6 +63,10 @@ final class AssistantStore: ObservableObject {
             .sorted { ($0.completedAt ?? $0.updatedAt) > ($1.completedAt ?? $1.updatedAt) }
     }
 
+    var recentInboxItems: [InboxItem] {
+        inboxItems.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
     @discardableResult
     func capture(_ content: String, as kind: CaptureKind, now: Date = Date()) -> Bool {
         switch kind {
@@ -81,7 +86,7 @@ final class AssistantStore: ObservableObject {
 
         var nextTodos = todos
         nextTodos.append(TodoItem(title: title, createdAt: now))
-        return persist(todos: nextTodos, notes: notes)
+        return persist(todos: nextTodos, notes: notes, inboxItems: inboxItems)
     }
 
     @discardableResult
@@ -93,7 +98,7 @@ final class AssistantStore: ObservableObject {
         var nextTodos = todos
         nextTodos[index].completedAt = completed ? now : nil
         nextTodos[index].updatedAt = now
-        return persist(todos: nextTodos, notes: notes)
+        return persist(todos: nextTodos, notes: notes, inboxItems: inboxItems)
     }
 
     @discardableResult
@@ -105,7 +110,7 @@ final class AssistantStore: ObservableObject {
 
         var nextNotes = notes
         nextNotes.append(NoteItem(content: content, createdAt: now))
-        return persist(todos: todos, notes: nextNotes)
+        return persist(todos: todos, notes: nextNotes, inboxItems: inboxItems)
     }
 
     @discardableResult
@@ -115,7 +120,71 @@ final class AssistantStore: ObservableObject {
         }
 
         let nextNotes = notes.filter { $0.id != id }
-        return persist(todos: todos, notes: nextNotes)
+        return persist(todos: todos, notes: nextNotes, inboxItems: inboxItems)
+    }
+
+    @discardableResult
+    func captureInbox(_ content: String, now: Date = Date()) -> Bool {
+        guard let content = normalizedContent(content) else {
+            lastError = .blankContent
+            return false
+        }
+
+        var nextInboxItems = inboxItems
+        nextInboxItems.append(InboxItem(content: content, createdAt: now))
+        return persist(todos: todos, notes: notes, inboxItems: nextInboxItems)
+    }
+
+    @discardableResult
+    func convertInbox(id: UUID, to kind: CaptureKind, now: Date = Date()) -> Bool {
+        guard let item = inboxItems.first(where: { $0.id == id }) else {
+            return false
+        }
+        guard let content = normalizedContent(item.content) else {
+            lastError = .blankContent
+            return false
+        }
+
+        var nextTodos = todos
+        var nextNotes = notes
+        let nextInboxItems = inboxItems.filter { $0.id != id }
+
+        switch kind {
+        case .todo:
+            nextTodos.append(
+                TodoItem(
+                    id: item.id,
+                    title: content,
+                    createdAt: item.createdAt,
+                    updatedAt: now
+                )
+            )
+        case .note:
+            nextNotes.append(
+                NoteItem(
+                    id: item.id,
+                    content: content,
+                    createdAt: item.createdAt,
+                    updatedAt: now
+                )
+            )
+        }
+
+        return persist(
+            todos: nextTodos,
+            notes: nextNotes,
+            inboxItems: nextInboxItems
+        )
+    }
+
+    @discardableResult
+    func deleteInbox(id: UUID) -> Bool {
+        guard inboxItems.contains(where: { $0.id == id }) else {
+            return false
+        }
+
+        let nextInboxItems = inboxItems.filter { $0.id != id }
+        return persist(todos: todos, notes: notes, inboxItems: nextInboxItems)
     }
 
     func searchNotes(query: String) -> [NoteItem] {
@@ -140,7 +209,8 @@ final class AssistantStore: ObservableObject {
         do {
             let data = try Data(contentsOf: storageURL)
             let snapshot = try Self.makeDecoder().decode(AssistantSnapshot.self, from: data)
-            guard snapshot.schemaVersion == AssistantSnapshot.currentSchemaVersion else {
+            guard snapshot.schemaVersion == 1
+                    || snapshot.schemaVersion == AssistantSnapshot.currentSchemaVersion else {
                 writesBlocked = true
                 lastError = .unsupportedSchema(snapshot.schemaVersion)
                 return
@@ -148,6 +218,7 @@ final class AssistantStore: ObservableObject {
 
             todos = snapshot.todos
             notes = snapshot.notes
+            inboxItems = snapshot.inboxItems
             lastError = nil
         } catch {
             writesBlocked = true
@@ -155,13 +226,21 @@ final class AssistantStore: ObservableObject {
         }
     }
 
-    private func persist(todos: [TodoItem], notes: [NoteItem]) -> Bool {
+    private func persist(
+        todos: [TodoItem],
+        notes: [NoteItem],
+        inboxItems: [InboxItem]
+    ) -> Bool {
         guard !writesBlocked else {
             lastError = .writesBlockedAfterLoadFailure
             return false
         }
 
-        let snapshot = AssistantSnapshot(todos: todos, notes: notes)
+        let snapshot = AssistantSnapshot(
+            todos: todos,
+            notes: notes,
+            inboxItems: inboxItems
+        )
 
         do {
             try fileManager.createDirectory(
@@ -173,6 +252,7 @@ final class AssistantStore: ObservableObject {
 
             self.todos = todos
             self.notes = notes
+            self.inboxItems = inboxItems
             lastError = nil
             return true
         } catch {

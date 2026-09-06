@@ -1,22 +1,24 @@
-[**English**](README.en.md) | [中文](README.md)
+[中文](README.md) | [**English**](README.en.md)
 
 # NARC for Mac
 
-NARC is a local desktop personal assistant. Its floating `N` combines app-level unread badges, fast Todo/Note capture, and shortcuts for pinning and arranging windows.
+> A local personal assistant that lives in the menu bar and can always be summoned back into view.
 
-NARC is obtained from GitHub source. One command clones the repository, prepares the app locally, places it under your user account, and launches it.
+NARC has two durable entry points: the menu bar provides a stable home, while a floating `N` anchors attention on the current display. Capture a thought, notice app-level unread activity, or recover scattered windows without leaving the work in front of you.
 
-## Install
+> **Status: v2 development preview.** Source installation, local data, and summon-placement logic have been verified locally or through automated tests. Menu-bar clicks, global shortcuts, real multi-display summon, full-screen Spaces, and first-time permission flows still need hands-on validation. This is not a stable-release promise.
 
-Requires macOS 14 or later. Copy this one line into Terminal:
+## Start with one command
+
+NARC requires macOS 14 or later, Git, and Xcode Command Line Tools. The first build needs internet access.
+
+Paste this line into Terminal:
 
 ```bash
 git clone https://github.com/MickMi/narc_for_mac.git && cd narc_for_mac && bash scripts/install.sh
 ```
 
-The first build needs an internet connection and may take a few minutes. The script checks the environment, prepares NARC locally, and places it at `~/Applications/NARC.app`. Terminal does not need to remain open afterward.
-
-This is the only supported end-user setup path. NARC does not provide a DMG, PKG, prebuilt app ZIP, or GitHub Release installer, and it does not ask users to prepare a developer certificate, notarize the app, or run a separate signing step.
+The script builds NARC locally from source, places it at `~/Applications/NARC.app`, and launches it. It does not need `sudo`, and Terminal does not need to remain open afterward.
 
 If Xcode Command Line Tools are missing, run:
 
@@ -24,121 +26,170 @@ If Xcode Command Line Tools are missing, run:
 xcode-select --install
 ```
 
-Then run the install command again.
+NARC is source-only. This is the only supported setup path for regular users. The project does not provide a DMG, PKG, prebuilt app ZIP, or binary GitHub Release, and users do not need a developer certificate, notarization, or a separate signing step.
 
-## Open NARC
+## Where NARC lives
 
-Remember only two actions:
+NARC is a menu-bar app. It does not show a Dock icon by default.
 
-| Action | Result |
+| Entry point | Action |
 |---|---|
-| Click the floating `N` | See unread apps, monitoring status, and pinned windows |
-| Press `⌃⌥Q` | Capture a Todo or Note from anywhere |
+| Left-click the menu bar `N` | Summon the floating `N` and open its adjacent lightweight panel |
+| Right-click the menu bar `N` | Open the User Guide, Preferences, About, or Quit menu |
+| Left-click the floating `N` | Open or close the lightweight panel |
+| Right-click the floating `N` | Open Assistant, the User Guide, or Preferences |
+| Press `⌃⌥N` | Summon the floating `N` to the display under the pointer and keep the panel open |
 
-Secondary entry points:
+The floating `N` can be dragged. Its size and position can also be adjusted or reset in Preferences. Summoning preserves a valid position on the same display and uses a safe visible position when moving to another display.
 
-- Right-click the floating `N`: open Assistant, the User Guide, or Preferences.
-- `⌃⌥N`: toggle the NARC panel on the display under the pointer.
-- To reopen later: launch `~/Applications/NARC.app`, or run `open ~/Applications/NARC.app`.
+## Three core workflows
 
-The first launch shows a short guide. It will not appear on every launch after you close it, and you can reopen it at any time from the floating `N` context menu.
+### 1. Capture first, organize later
 
-## What NARC Does
+Press `⌃⌥Q`, or use the Inbox in the lightweight panel:
 
-### Assistant
+1. Enter the thought without first choosing Todo or Note.
+2. Press Return to save it to the local Inbox. Blank content is not submitted.
+3. The panel keeps the three most recent Inbox items visible.
+4. Later, explicitly convert an item to Todo or Note. The original Inbox item is removed after a successful conversion.
 
-- **Quick Capture**: explicitly choose Todo or Note, then save it quickly.
-- **Todo**: view open and completed items and change their state.
-- **Notes**: save, search, and delete local notes.
-- Data stays at `~/Library/Application Support/NARC/assistant-v1.json`; it is not uploaded to a cloud service.
+Summoning capture again does not discard an unsubmitted draft. If saving fails, the content remains in place with a visible error.
 
-### Unread awareness
+The full Assistant opens in a separate window: Todo supports open/completed state, while Notes supports search and deletion.
 
-- Aggregates macOS Dock badges from WeChat, WeCom, and Lark.
-- The red number on the floating `N` is the total unread count from enabled apps.
-- NARC currently reads only app-level unread counts. It **does not read message content or monitor an individual WeChat conversation**.
+### 2. See app-level unread activity
 
-### Window tools
+NARC aggregates Dock badges that enabled apps expose to macOS. WeChat, WeCom, and Lark are monitored by default. The aggregate appears in the menu bar and on the floating `N`; values above 99 are shown as `99+`.
 
-- `⌃⌥P`: pin the current window so it can be found later from the NARC panel.
-- `⌃⌥←` / `⌃⌥→` / `⌃⌥↑` / `⌃⌥↓`: left, right, top, and bottom halves.
-- `⌃⌥U` / `⌃⌥I` / `⌃⌥J` / `⌃⌥K`: four corners.
-- `⌃⌥↩` / `⌃⌥C`: full screen / centered.
-- Repeat the same direction shortcut within five seconds to move the window to an adjacent display.
+This number is app-level only:
 
-## Permissions
+- NARC does not read message content.
+- NARC cannot identify which conversation produced an unread item.
+- Multiple system instances of the same app are reconciled using the largest trustworthy value, never added together.
+- If an app does not expose a trustworthy badge, NARC appends `?` to the last trusted value (for example, `14?`). With no trusted prior value it shows `?`, never a fabricated new zero.
 
-Assistant, Todo, Notes, Quick Capture, and Dock badge aggregation do not require Accessibility permission.
+### 3. Recover and arrange windows
 
-Window arrangement, pinning, and reactivating another app's window require permission under **System Settings → Privacy & Security → Accessibility**.
+These actions require macOS Accessibility permission:
 
-After a rebuild, macOS may ask you to enable NARC again for these optional window tools. The Assistant and unread badge continue to work without that permission.
+| Shortcut | Action |
+|---|---|
+| `⌃⌥P` | Pin the current window so it can be recovered from the panel later |
+| `⌃⌥←` / `⌃⌥→` | Left half / right half |
+| `⌃⌥↑` / `⌃⌥↓` | Top half / bottom half |
+| `⌃⌥U` / `⌃⌥I` / `⌃⌥J` / `⌃⌥K` | Four corners |
+| `⌃⌥↩` / `⌃⌥C` | Full screen / centered |
+
+Repeating the same directional shortcut within five seconds attempts to move the window to an adjacent display. Multi-display and full-screen Space behavior remains part of preview validation.
+
+## Current maturity
+
+| Capability | Status | Boundary |
+|---|---|---|
+| One-command setup from GitHub source | Verified | Builds locally, installs under the user account, and creates no installer package |
+| Menu bar + floating `N` | Development preview | No Dock icon and floating-widget clicks have been checked locally; placement has automated coverage, while menu-bar, global-shortcut, and real multi-display QA remain |
+| Inbox capture | Development preview | Persistence, migration, draft retention, and conversion have automated coverage; complete interaction QA continues |
+| Todo / Notes / Assistant | Development preview | Core management paths are connected and still gaining hands-on interaction coverage |
+| App-level unread aggregation | Depends on the source app | Reads only the badge macOS can see; not every app provides a reliable value at all times |
+| Window pinning and arrangement | Available with permission | Multi-display, cross-Space, and some window types remain subject to macOS behavior |
+
+See [Features](docs/FEATURES.md) for detailed maturity and [Version Plan](docs/VERSIONS.md) for release scope.
+
+## First use and permissions
+
+The first time the Inbox opens, a short inline guide introduces capture. The core guide is completed only after the first successful record; choosing “Later” applies only to the current run.
+
+Inbox, Todo, Notes, and app-level badges do not require Accessibility permission. NARC does not request Accessibility or notification access on launch. Window tools explain their need first; notification access is requested only when a real notification is first delivered.
+
+For window tools, enable NARC under:
+
+**System Settings → Privacy & Security → Accessibility → NARC**
+
+## Data and privacy
+
+- Inbox, Todo, and Notes are stored locally by default.
+- The data file is `~/Library/Application Support/NARC/assistant-v1.json`.
+- Existing Todo and Note data is preserved when the file migrates to the current format.
+- This version does not call an external model API and has no cloud sync or team collaboration.
+- NARC does not read WeChat or WeCom message content and does not use screenshot OCR, private databases, process injection, or private hooks.
+
+Removing the app does not automatically erase personal records.
+
+## Current boundaries
+
+- No Dock icon, Workspace entry point, or embedded terminal entry point.
+- No conversational AI, automatic classification, or cross-module AI execution.
+- No Apple Notes, Reminders, Calendar, GitHub, or other external connectors.
+- No per-conversation WeChat/WeCom unread state or message content.
+- No third-party dynamic plugins, script marketplace, or plugin permission system.
+- No automatic updater, DMG, PKG, prebuilt app, or certificate/notarization distribution chain.
+
+These boundaries keep capture, awareness, and recovery focused on a reliable, low-interruption local loop.
 
 ## Update
 
-Choose **Quit NARC** from the NARC menu, then run:
+Choose **Quit NARC**, then run this from the repository directory:
 
 ```bash
-cd narc_for_mac
 git pull && bash scripts/install.sh
 ```
 
-The installer will not force-quit a running NARC instance.
+The installer does not force-quit a running NARC instance and does not delete personal records.
 
 ## Uninstall
 
-1. Choose **Quit NARC** from the NARC menu.
+1. Choose **Quit NARC**.
 2. Delete `~/Applications/NARC.app`.
 
-Removing the app does not delete Todo or Note data. To erase that data too, manually delete `~/Library/Application Support/NARC`.
+Personal records remain. Only if you are sure you no longer need them, delete:
+
+`~/Library/Application Support/NARC`
 
 ## Troubleshooting
 
-### The floating N is missing
+### NARC is not visible
+
+NARC does not appear in the Dock by default. Look for the `N` in the menu bar, or run:
 
 ```bash
 open ~/Applications/NARC.app
 ```
 
-If NARC is already running, select the NARC menu bar icon and choose **Show NARC**.
+If NARC is already running, press `⌃⌥N` to summon the floating `N`.
 
-### `⌃⌥Q` or a window shortcut does nothing
+### A shortcut does nothing
 
-- `⌃⌥Q` and `⌃⌥N` register when NARC starts.
-- Window arrangement and pinning also require Accessibility permission.
+- `⌃⌥N` and `⌃⌥Q` register when NARC starts and do not require Accessibility permission.
+- Window pinning and arrangement explain and request Accessibility permission on first use.
 - If another app owns the same shortcut, quit the conflicting app and restart NARC.
 
 ### The WeCom or WeChat number does not match
 
-NARC reads the badge state that macOS LaunchServices exposes to the Dock. The value can lag when an app does not expose a badge, is still signing in, or has not refreshed multi-instance state.
+NARC reads the Dock badge that macOS LaunchServices exposes. The value may lag while an app is signed out, does not expose a badge, has multiple instances, or has not refreshed its state. Unknown state appears as `?`, or as a last trusted value such as `14?`.
 
-## Current Boundaries
+### Update says NARC is running
 
-- NARC does not read WeChat/WeCom message content and does not support per-conversation monitoring.
-- There is no cloud sync, team collaboration, or automatic update.
-- Distribution is source-only through the one-line GitHub command. There is no DMG, PKG, prebuilt app ZIP, GitHub Release installer, developer-certificate setup, or notarization workflow.
-- Updating requires rerunning the installer from the repository directory.
-- Workspace and the embedded terminal are not current user entry points; this version focuses on Assistant, unread awareness, and window tools.
-
-## Development and Verification
+Choose **Quit NARC**, then run:
 
 ```bash
-# Debug app
+bash scripts/install.sh
+```
+
+## Development and verification
+
+```bash
+# Build a runnable Debug app
 bash scripts/build-app.sh debug
 open build/NARC.app
 
 # Full test suite
 swift test
 
-# Source-only distribution guard
+# Guard against installers, certificate chains, and automatic updaters
 bash scripts/verify-source-only-distribution.sh
 
-# Command-line build only
+# Build the Swift package only
 swift build
 ```
 
-Stack: Swift 5.9 package, SwiftUI + AppKit, macOS 14+, and SwiftTerm. See [docs/PROJECT.md](docs/PROJECT.md) and [docs/VERSIONS.md](docs/VERSIONS.md) for detailed product boundaries and version planning.
-
-## License
-
-MIT
+Stack: Swift 5.9 Package, SwiftUI + AppKit, and macOS 14+. See [Project Profile](docs/PROJECT.md) for product goals and boundaries.

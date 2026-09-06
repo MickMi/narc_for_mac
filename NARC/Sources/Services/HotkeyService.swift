@@ -19,8 +19,8 @@ class HotkeyService: ObservableObject {
     /// Callback invoked when the Pin hotkey (⌃⌥P) is pressed.
     var onPinHotkeyPressed: (() -> Void)?
 
-    /// Callback invoked when the Toggle Panel hotkey (⌃⌥N) is pressed.
-    var onTogglePanelHotkeyPressed: (() -> Void)?
+    /// Callback invoked when the Summon Widget hotkey (⌃⌥N) is pressed.
+    var onSummonWidgetHotkeyPressed: (() -> Void)?
 
     /// Callback invoked when the Quick Capture hotkey (⌃⌥Q) is pressed.
     var onQuickCaptureHotkeyPressed: (() -> Void)?
@@ -34,12 +34,12 @@ class HotkeyService: ObservableObject {
     // MARK: - Static Handlers (for C callback)
 
     private static var pinHandler: (() -> Void)?
-    private static var togglePanelHandler: (() -> Void)?
+    private static var summonWidgetHandler: (() -> Void)?
     private static var quickCaptureHandler: (() -> Void)?
     private static var layoutHandler: ((WindowLayout) -> Void)?
 
     private static let pinHotkeyID: UInt32 = 100
-    private static let togglePanelHotkeyID: UInt32 = 101
+    private static let summonWidgetHotkeyID: UInt32 = 101
     private static let quickCaptureHotkeyID: UInt32 = 103
 
     // MARK: - Accessibility Permission
@@ -82,13 +82,17 @@ class HotkeyService: ObservableObject {
 
     // MARK: - Hotkey Registration
 
-    /// Register all global hotkeys (layout hotkeys + Pin + Toggle Panel).
+    /// Register all global hotkeys (layout hotkeys + Pin + Summon Widget).
     func registerGlobalHotkeys(promptForAccessibility: Bool = true) {
-        guard checkAccessibilityPermission(prompt: promptForAccessibility) else {
-            print("[NARC] Registering panel/quick-capture hotkeys without Accessibility.")
-            registerDevNoAXHotkeys()
+        guard eventHandler == nil else { return }
+
+        let hasAccessibility = checkAccessibilityPermission(prompt: promptForAccessibility)
+        if !hasAccessibility {
+            // Carbon registration itself does not require Accessibility. Keep
+            // every shortcut reachable so the first window action can explain
+            // and request permission at the moment of intent.
+            print("[NARC] Registering all hotkeys; window actions will request Accessibility when used.")
             startPermissionPolling()
-            return
         }
 
         let controlOption: UInt32 = UInt32(controlKey | optionKey)
@@ -108,7 +112,7 @@ class HotkeyService: ObservableObject {
 
         // Store handlers in static vars so the C callback can access them
         HotkeyService.pinHandler = { [weak self] in self?.onPinHotkeyPressed?() }
-        HotkeyService.togglePanelHandler = { [weak self] in self?.onTogglePanelHotkeyPressed?() }
+        HotkeyService.summonWidgetHandler = { [weak self] in self?.onSummonWidgetHotkeyPressed?() }
         HotkeyService.quickCaptureHandler = { [weak self] in self?.onQuickCaptureHotkeyPressed?() }
         // Layout handler does NOT use [weak self] — it must always work, even from C callbacks.
         // The onLayoutHotkeyPressed closure is set once at startup and never changes.
@@ -130,8 +134,8 @@ class HotkeyService: ObservableObject {
                 return noErr
             }
 
-            if id == HotkeyService.togglePanelHotkeyID {
-                DispatchQueue.main.async { HotkeyService.togglePanelHandler?() }
+            if id == HotkeyService.summonWidgetHotkeyID {
+                DispatchQueue.main.async { HotkeyService.summonWidgetHandler?() }
                 return noErr
             }
 
@@ -165,8 +169,8 @@ class HotkeyService: ObservableObject {
         // Register Pin hotkey: ⌃⌥P
         registerHotkey(keyCode: 35, modifiers: controlOption, id: HotkeyService.pinHotkeyID, label: "Pin ⌃⌥P")
 
-        // Register Toggle Panel hotkey: ⌃⌥N
-        registerHotkey(keyCode: 45, modifiers: controlOption, id: HotkeyService.togglePanelHotkeyID, label: "Toggle Panel ⌃⌥N")
+        // Register Summon Widget hotkey: ⌃⌥N
+        registerHotkey(keyCode: 45, modifiers: controlOption, id: HotkeyService.summonWidgetHotkeyID, label: "Summon Widget ⌃⌥N")
 
         // Register Quick Capture: ⌃⌥Q (Q = keyCode 12).
         registerHotkey(keyCode: 12, modifiers: controlOption, id: HotkeyService.quickCaptureHotkeyID, label: "Quick Capture ⌃⌥Q")
@@ -177,7 +181,7 @@ class HotkeyService: ObservableObject {
     func registerDevNoAXHotkeys() {
         let controlOption: UInt32 = UInt32(controlKey | optionKey)
 
-        HotkeyService.togglePanelHandler = { [weak self] in self?.onTogglePanelHotkeyPressed?() }
+        HotkeyService.summonWidgetHandler = { [weak self] in self?.onSummonWidgetHotkeyPressed?() }
         HotkeyService.quickCaptureHandler = { [weak self] in self?.onQuickCaptureHotkeyPressed?() }
 
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -193,8 +197,8 @@ class HotkeyService: ObservableObject {
                 &hotKeyID
             )
 
-            if hotKeyID.id == HotkeyService.togglePanelHotkeyID {
-                DispatchQueue.main.async { HotkeyService.togglePanelHandler?() }
+            if hotKeyID.id == HotkeyService.summonWidgetHotkeyID {
+                DispatchQueue.main.async { HotkeyService.summonWidgetHandler?() }
                 return noErr
             }
             if hotKeyID.id == HotkeyService.quickCaptureHotkeyID {
@@ -205,7 +209,7 @@ class HotkeyService: ObservableObject {
         }
 
         InstallEventHandler(GetApplicationEventTarget(), handler, 1, &eventType, nil, &eventHandler)
-        registerHotkey(keyCode: 45, modifiers: controlOption, id: HotkeyService.togglePanelHotkeyID, label: "Toggle Panel ⌃⌥N")
+        registerHotkey(keyCode: 45, modifiers: controlOption, id: HotkeyService.summonWidgetHotkeyID, label: "Summon Widget ⌃⌥N")
         registerHotkey(keyCode: 12, modifiers: controlOption, id: HotkeyService.quickCaptureHotkeyID, label: "Quick Capture ⌃⌥Q")
         print("[NARC] 🧪 Pin/layout hotkeys disabled in NARC_DEV_NO_AX because they require Accessibility.")
     }
@@ -252,13 +256,11 @@ class HotkeyService: ObservableObject {
             let trusted = AXIsProcessTrustedWithOptions(options)
 
             if trusted {
-                print("[NARC] ✅ Accessibility permission now granted! Registering hotkeys...")
+                print("[NARC] ✅ Accessibility permission now granted.")
                 timer.invalidate()
                 self.permissionTimer = nil
                 DispatchQueue.main.async {
                     self.isAccessibilityGranted = true
-                    self.unregisterGlobalHotkeys()
-                    self.registerGlobalHotkeys(promptForAccessibility: false)
                 }
             }
         }

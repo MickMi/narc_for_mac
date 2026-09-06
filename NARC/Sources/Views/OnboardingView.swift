@@ -1,10 +1,120 @@
 import SwiftUI
 
-enum OnboardingPresentationPolicy {
-    static let completionKey = "narc.onboarding.completed.v2"
+/// Durable milestones for the menu-bar onboarding flow.
+///
+/// The stages are monotonic: reaching a later stage implies that the earlier
+/// stages have also happened. Opening the entry alone is intentionally not
+/// completion; the user has learned the core flow only after saving a capture.
+enum OnboardingStage: Int, Equatable, Sendable {
+    case notStarted = 0
+    case entrySeen = 1
+    case firstCaptureCompleted = 2
+    case windowToolsIntroduced = 3
 
-    static func shouldPresent(hasCompleted: Bool, force: Bool = false) -> Bool {
-        force || !hasCompleted
+    var hasCompletedCoreFlow: Bool {
+        rawValue >= Self.firstCaptureCompleted.rawValue
+    }
+}
+
+struct OnboardingState: Equatable, Sendable {
+    let version: Int?
+    let stage: OnboardingStage
+    let legacyCompletionRecorded: Bool
+
+    var hasCompletedCurrentCoreFlow: Bool {
+        guard let version,
+              version >= OnboardingPresentationPolicy.currentVersion else {
+            return false
+        }
+        return stage.hasCompletedCoreFlow
+    }
+}
+
+enum OnboardingPresentationPolicy {
+    /// Version 2 was represented only by `legacyCompletionKey`. Version 3 is
+    /// the first versioned, staged menu-bar onboarding flow.
+    static let currentVersion = 3
+    static let versionKey = "narc.onboarding.version"
+    static let stageKey = "narc.onboarding.stage"
+    static let legacyCompletionKey = "narc.onboarding.completed.v2"
+
+    static func resolvedState(
+        storedVersion: Int?,
+        storedStageRawValue: Int?,
+        legacyCompleted: Bool
+    ) -> OnboardingState {
+        let stage = storedStageRawValue
+            .flatMap(OnboardingStage.init(rawValue:)) ?? .notStarted
+
+        return OnboardingState(
+            version: storedVersion,
+            stage: stage,
+            legacyCompletionRecorded: legacyCompleted
+        )
+    }
+
+    static func resolvedState(in defaults: UserDefaults = .standard) -> OnboardingState {
+        let storedVersion = defaults.object(forKey: versionKey) == nil
+            ? nil
+            : defaults.integer(forKey: versionKey)
+        let storedStage = defaults.object(forKey: stageKey) == nil
+            ? nil
+            : defaults.integer(forKey: stageKey)
+
+        return resolvedState(
+            storedVersion: storedVersion,
+            storedStageRawValue: storedStage,
+            legacyCompleted: defaults.bool(forKey: legacyCompletionKey)
+        )
+    }
+
+    static func shouldPresent(state: OnboardingState, force: Bool = false) -> Bool {
+        force || !state.hasCompletedCurrentCoreFlow
+    }
+
+    static func shouldPresent(
+        defaults: UserDefaults = .standard,
+        force: Bool = false
+    ) -> Bool {
+        shouldPresent(state: resolvedState(in: defaults), force: force)
+    }
+
+    static func markEntrySeen(in defaults: UserDefaults = .standard) {
+        advance(to: .entrySeen, in: defaults)
+    }
+
+    /// Call only after the first Inbox item has been saved successfully.
+    static func markFirstCaptureCompleted(in defaults: UserDefaults = .standard) {
+        advance(to: .firstCaptureCompleted, in: defaults)
+    }
+
+    static func markWindowToolsIntroduced(in defaults: UserDefaults = .standard) {
+        let state = resolvedState(in: defaults)
+        guard state.hasCompletedCurrentCoreFlow else {
+            // Window tools are an optional, independent path. Using them first
+            // must not pretend that the user has already completed an Inbox
+            // capture, which is the core-flow completion gate.
+            markEntrySeen(in: defaults)
+            return
+        }
+        advance(to: .windowToolsIntroduced, in: defaults)
+    }
+
+    private static func advance(to requestedStage: OnboardingStage, in defaults: UserDefaults) {
+        let state = resolvedState(in: defaults)
+
+        // Do not let an older binary overwrite state written by a newer one.
+        if let storedVersion = state.version, storedVersion > currentVersion {
+            return
+        }
+
+        let existingStage = state.version == currentVersion ? state.stage : .notStarted
+        let nextStage = existingStage.rawValue >= requestedStage.rawValue
+            ? existingStage
+            : requestedStage
+
+        defaults.set(currentVersion, forKey: versionKey)
+        defaults.set(nextStage.rawValue, forKey: stageKey)
     }
 }
 
@@ -43,7 +153,7 @@ struct OnboardingView: View {
                 Text("NARC 已在运行")
                     .font(.narcDisplay)
                     .foregroundColor(.narcText)
-                Text("不用记菜单，先记住两个动作。")
+                Text("先记住两个动作，其余能力稍后再看。")
                     .font(.narcBody)
                     .foregroundColor(.narcTextMuted)
             }
@@ -53,15 +163,15 @@ struct OnboardingView: View {
     private var coreActions: some View {
         VStack(spacing: NarcSpacing.md) {
             OnboardingActionRow(
-                icon: "cursorarrow.click.2",
-                title: "点击悬浮 N",
-                detail: "查看未读、监控应用和已标记窗口"
+                icon: "scope",
+                title: "菜单栏 N 或 ⌃⌥N",
+                detail: "把桌面悬浮 N 召回当前屏幕，并展开面板"
             )
 
             OnboardingActionRow(
                 icon: "square.and.pencil",
                 title: "按 ⌃⌥Q",
-                detail: "随时记录一条 Todo 或 Note"
+                detail: "直接写下内容并按 Return，先存入随手箱"
             )
         }
         .accessibilityElement(children: .contain)
@@ -83,7 +193,7 @@ struct OnboardingView: View {
                     : "窗口快捷键还未开启")
                     .font(.narcSubtitle)
                     .foregroundColor(.narcText)
-                Text("辅助功能只影响窗口排列、钉选和相关快捷键；Assistant、Todo/Note 和未读角标可直接使用。")
+                Text("辅助功能只影响窗口排列、钉选和相关快捷键；随手箱、Todo、Notes 和未读角标可直接使用。")
                     .font(.narcCaption)
                     .foregroundColor(.narcTextMuted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -118,14 +228,14 @@ struct OnboardingView: View {
             Spacer()
 
             Button(action: onOpenAssistant) {
-                Label("打开 Assistant", systemImage: "sparkles")
+                Label("打开随手箱", systemImage: "tray.and.arrow.down.fill")
                     .font(.narcBody)
                     .padding(.horizontal, NarcSpacing.md)
                     .padding(.vertical, NarcSpacing.xs)
             }
             .buttonStyle(.borderedProminent)
             .keyboardShortcut(.defaultAction)
-            .accessibilityLabel("完成使用指南并打开 Assistant")
+            .accessibilityLabel("关闭使用指南并打开随手箱")
         }
     }
 }

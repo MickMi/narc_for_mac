@@ -6,6 +6,12 @@ import Combine
 struct DockBadgeReader {
     typealias Runner = ([String]) -> String?
 
+    private enum ParsedBadgeValue {
+        case count(Int)
+        case absent
+        case invalid
+    }
+
     private let runLSAppInfo: Runner
 
     init(runLSAppInfo: @escaping Runner) {
@@ -19,42 +25,71 @@ struct DockBadgeReader {
     /// Returns nil only when LaunchServices cannot provide a trustworthy value.
     /// Duplicate app registrations represent one app, so their values are never added.
     func badgeCount(for bundleID: String) -> Int? {
-        let directArguments = ["info", "-only", "StatusLabel", bundleID]
-        if let directCount = Self.parseBadgeCount(runLSAppInfo(directArguments)) {
-            return directCount
-        }
-
-        guard let listOutput = runLSAppInfo(["list"]) else { return nil }
-        let applicationIdentifiers = Self.applicationIdentifiers(
-            in: listOutput,
-            matching: bundleID
-        )
-        guard !applicationIdentifiers.isEmpty else { return nil }
-
-        let counts = applicationIdentifiers.compactMap { identifier in
-            Self.parseBadgeCount(
-                runLSAppInfo(["info", "-only", "StatusLabel", identifier])
-            )
-        }
-        return counts.max()
+        badgeCounts(for: [bundleID])[bundleID]
     }
 
-    private static func parseBadgeCount(_ output: String?) -> Int? {
+    /// Reads one LaunchServices process list and reconciles every matching ASN
+    /// with the bundle-level lookup. This handles apps such as WeCom that may
+    /// expose an empty label on one registration and a non-zero label on another.
+    func badgeCounts(for bundleIDs: [String]) -> [String: Int] {
+        let listOutput = runLSAppInfo(["list"])
+        var result: [String: Int] = [:]
+
+        for bundleID in bundleIDs {
+            var candidates: [Int] = []
+            var containsInvalidLabel = false
+
+            func collect(_ output: String?) {
+                switch Self.parseBadgeValue(output) {
+                case .count(let count):
+                    candidates.append(count)
+                case .absent:
+                    break
+                case .invalid:
+                    containsInvalidLabel = true
+                }
+            }
+
+            collect(runLSAppInfo(["info", "-only", "StatusLabel", bundleID]))
+
+            if let listOutput {
+                let applicationIdentifiers = Self.applicationIdentifiers(
+                    in: listOutput,
+                    matching: bundleID
+                )
+                for identifier in applicationIdentifiers {
+                    collect(runLSAppInfo(["info", "-only", "StatusLabel", identifier]))
+                }
+            }
+
+            if !containsInvalidLabel, let count = candidates.max() {
+                result[bundleID] = count
+            }
+        }
+
+        return result
+    }
+
+    private static func parseBadgeValue(_ output: String?) -> ParsedBadgeValue {
         guard let output,
               let labelRange = output.range(of: "\"label\"=") else {
-            return nil
+            return .absent
         }
         let afterLabel = output[labelRange.upperBound...]
-        guard afterLabel.first == "\"" else { return nil }
+        guard afterLabel.first == "\"" else { return .invalid }
 
         let valueStart = afterLabel.index(after: afterLabel.startIndex)
         guard let valueEnd = afterLabel[valueStart...].firstIndex(of: "\"") else {
-            return nil
+            return .invalid
         }
 
         let value = String(afterLabel[valueStart..<valueEnd])
-        if value.isEmpty { return 0 }
-        return Int(value) ?? 1
+        if value.isEmpty { return .count(0) }
+        // A non-numeric label can mean a dot or arbitrary app-specific text.
+        // It invalidates the whole reconciliation batch for this app: accepting
+        // another instance's zero would still disguise an unknown count as zero.
+        guard let count = Int(value), count >= 0 else { return .invalid }
+        return .count(count)
     }
 
     private static func applicationIdentifiers(
@@ -116,6 +151,26 @@ struct DockBadgeReader {
     }
 }
 
+/// Shared display contract for menu-bar and floating-widget badge states.
+struct BadgePresentation: Equatable {
+    let text: String?
+    let isUncertain: Bool
+
+    static func resolve(count: Int, isUncertain: Bool) -> BadgePresentation {
+        if isUncertain {
+            let base = count > 99 ? "99+" : (count > 0 ? "\(count)" : "")
+            return BadgePresentation(text: "\(base)?", isUncertain: true)
+        }
+        guard count > 0 else {
+            return BadgePresentation(text: nil, isUncertain: false)
+        }
+        return BadgePresentation(
+            text: count > 99 ? "99+" : "\(count)",
+            isUncertain: false
+        )
+    }
+}
+
 /// Service that monitors running applications for Dock badge changes.
 /// Uses NSWorkspace notifications + periodic polling of Dock badge via LaunchServices.
 class AppMonitorService: ObservableObject {
@@ -124,6 +179,11 @@ class AppMonitorService: ObservableObject {
 
     @Published var notificationStates: [NotificationState] = []
     @Published var totalBadgeCount: Int = 0
+    /// True when at least one enabled, running app did not expose a trustworthy
+    /// Dock badge during the latest poll. The last trustworthy count is kept.
+    @Published private(set) var isBadgeStatusUncertain: Bool = false
+    /// Enabled, running apps whose latest Dock badge could not be confirmed.
+    @Published private(set) var uncertainBundleIDs: Set<String> = []
     @Published var filters: [NotificationFilter] = []
 
     /// Filtered notification states based on active filter rules.
@@ -323,6 +383,12 @@ class AppMonitorService: ObservableObject {
             let badgeMap = self.readAllDockBadges(
                 for: enabledBundleIDs.filter { runningBundleIDs.contains($0) }
             )
+            let enabledRunningBundleIDs = Set(
+                enabledBundleIDs.filter { runningBundleIDs.contains($0) }
+            )
+            let uncertainBundleIDs = Set(
+                enabledRunningBundleIDs.filter { badgeMap[$0] == nil }
+            )
 
             DispatchQueue.main.async {
                 for state in self.notificationStates {
@@ -354,20 +420,23 @@ class AppMonitorService: ObservableObject {
                 self.totalBadgeCount = self.notificationStates
                     .filter { $0.app.isEnabled }
                     .reduce(0) { $0 + $1.badgeCount }
+                self.uncertainBundleIDs = uncertainBundleIDs
+                self.isBadgeStatusUncertain = !uncertainBundleIDs.isEmpty
             }
         }
+    }
+
+    static func badgeStatusIsUncertain(
+        enabledRunningBundleIDs: Set<String>,
+        badgeMap: [String: Int]
+    ) -> Bool {
+        enabledRunningBundleIDs.contains { badgeMap[$0] == nil }
     }
 
     /// Batch-read Dock badge counts for multiple apps using `lsappinfo`.
     /// Returns a dictionary of [bundleID: badgeCount].
     private func readAllDockBadges(for bundleIDs: [String]) -> [String: Int] {
-        var result: [String: Int] = [:]
-        for bundleID in bundleIDs {
-            if let badgeCount = dockBadgeReader.badgeCount(for: bundleID) {
-                result[bundleID] = badgeCount
-            }
-        }
-        return result
+        dockBadgeReader.badgeCounts(for: bundleIDs)
     }
 
     // MARK: - App Activation

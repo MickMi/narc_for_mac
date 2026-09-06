@@ -6,7 +6,34 @@ import SwiftUI
 enum FloatingWidgetState: Equatable {
     case idle
     case hasNotification(count: Int)
+    case badgeUnavailable(lastKnownCount: Int)
     case dragging
+
+    static func resolve(
+        badgeCount: Int,
+        isBadgeStatusUncertain: Bool,
+        isDragging: Bool
+    ) -> FloatingWidgetState {
+        if isDragging { return .dragging }
+        if isBadgeStatusUncertain {
+            return .badgeUnavailable(lastKnownCount: badgeCount)
+        }
+        if badgeCount > 0 {
+            return .hasNotification(count: badgeCount)
+        }
+        return .idle
+    }
+
+    var badgePresentation: BadgePresentation {
+        switch self {
+        case .hasNotification(let count):
+            return .resolve(count: count, isUncertain: false)
+        case .badgeUnavailable(let count):
+            return .resolve(count: count, isUncertain: true)
+        case .idle, .dragging:
+            return .resolve(count: 0, isUncertain: false)
+        }
+    }
 }
 
 // MARK: - 2. Drag state
@@ -28,18 +55,13 @@ struct FloatingWidgetContainer: View {
 
     var body: some View {
         FloatingWidgetView(
-            state: computedState,
+            state: FloatingWidgetState.resolve(
+                badgeCount: appMonitor.totalBadgeCount,
+                isBadgeStatusUncertain: appMonitor.isBadgeStatusUncertain,
+                isDragging: dragState.isDragging
+            ),
             widgetSize: widgetSize
         )
-    }
-
-    private var computedState: FloatingWidgetState {
-        if dragState.isDragging { return .dragging }
-        let badgeCount = appMonitor.totalBadgeCount
-        if badgeCount > 0 {
-            return .hasNotification(count: badgeCount)
-        }
-        return .idle
     }
 }
 
@@ -99,8 +121,11 @@ struct FloatingWidgetView: View {
             // Badge — sibling of the Circle, NOT inside its overlay, so the
             // capsule overflows the 48pt circle's top-right corner. Per design
             // ref, badge sits mostly OUTSIDE the circle (~70% out).
-            if case .hasNotification(let count) = state {
-                FloatingBadgeView(count: count)
+            if let text = state.badgePresentation.text {
+                FloatingBadgeView(
+                    text: text,
+                    isUncertain: state.badgePresentation.isUncertain
+                )
                     .offset(x: 6, y: -6)
                     .transition(
                         .scale(scale: 0)
@@ -237,10 +262,11 @@ private struct FloatingMarkView: View {
 // MARK: - 9. Badge (per spec §6)
 
 private struct FloatingBadgeView: View {
-    let count: Int
+    let text: String
+    let isUncertain: Bool
 
     var body: some View {
-        Text(count > 99 ? "99+" : "\(count)")
+        Text(text)
             .font(.system(size: 11, weight: .semibold, design: .default))
             .tracking(-0.1)
             .monospacedDigit()
@@ -249,7 +275,13 @@ private struct FloatingBadgeView: View {
             .padding(.horizontal, 5)
             .background(
                 Capsule()
-                    .fill(Color(red: 0.86, green: 0.31, blue: 0.27))
+                    .fill(isUncertain ? Color.narcWarn : Color(red: 0.86, green: 0.31, blue: 0.27))
+            )
+            .help(isUncertain ? "未读暂不可确认，已保留上次可信结果" : "应用级未读")
+            .accessibilityLabel(
+                isUncertain
+                    ? "未读暂不可确认，最后可信结果 \(text)"
+                    : "应用级未读 \(text)"
             )
             .overlay(
                 Capsule()
