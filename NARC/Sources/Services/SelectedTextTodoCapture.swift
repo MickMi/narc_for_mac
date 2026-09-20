@@ -443,7 +443,7 @@ final class AXSelectedTextReader: SelectedTextReading {
     private let workQueue: DispatchQueue
 
     init(
-        sourceProvider: @escaping @MainActor () -> SelectedTextSource? = AXSelectedTextReader.frontmostSource,
+        sourceProvider: @escaping @MainActor () -> SelectedTextSource? = { AXSelectedTextReader.frontmostSource() },
         permissionCheck: @escaping () -> Bool = AXIsProcessTrusted,
         focusedElementCapture: @escaping @MainActor (pid_t) -> SelectedTextAXRead<AXUIElement> = {
             processID in

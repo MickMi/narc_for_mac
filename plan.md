@@ -10,6 +10,7 @@
 - [x] 2. 完整 Swift/Python/安装与签名策略测试、源码分发检查、Release 编译及 bundle 校验。
   - 本次 Swift 231/231、Python 32/32、Pin 结构 8/8、构建输出 6/6、签名迁移 19/19、安装事务 6/6；source-only/diff、Release 编译、plist/LSUIElement、严格验签和 adapter 资源 cmp 通过。构建夹具遗漏新资源先失败，补齐后转绿；CI 纳入对应回归。没有覆盖仍开放的全部实机矩阵。
 - [ ] 3. 提交完整预览代码与 README，推送功能分支，通过 PR 与远程 CI 更新主分支；不直接 push main、不绕过保护规则。
+  - PR #1 首次远端编译发现 Swift 5.10 不兼容：协议 conformance 注解、actor 默认参数引用及嵌套 weak 捕获。做保持行为的兼容修正；测试依赖 Swift Testing，CI 用已提供的 Xcode 16.2 跑完整测试，另保留 Xcode 15.4/Swift 5.10 的 Release 编译门禁，不提高普通安装的系统要求。两项均绿才合并。
 - [ ] 4. 核对远端 main 的提交和 README/核心资源与发布内容一致，告知用户结果及剩余兼容性边界。
 - 验证边界：新一轮真实回执及连接页用户反馈已确认；没有据此关闭其他历史手工验收项。发布目标是可获取的源码预览，不创建正式版本 Tag。
 
