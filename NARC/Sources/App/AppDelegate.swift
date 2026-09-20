@@ -1,25 +1,86 @@
 import Cocoa
 import SwiftUI
 import Combine
-import UserNotifications
+@preconcurrency import UserNotifications
 
 /// AppDelegate handles app lifecycle, floating window, and menu bar setup.
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Properties
 
     private var floatingWindow: FloatingWidgetWindow?
     private var statusBarItem: NSStatusItem?
+    private var statusBarMenu: NSMenu?
     private var panelWindow: NSPanel?
+    private var panelScreenFrame: NSRect?
+    private var pinnedWindowSwitcherWindow: PanelWindow?
+    private var pinnedWindowSwitcherTargetDisplayID: CGDirectDisplayID?
+    private var pinnedWindowSwitcherPreviousApplication: NSRunningApplication?
     private var keyEventMonitor: Any?
     private var globalKeyEventMonitor: Any?
+    private var accessibilityExplanationIsVisible = false
+    private var accessibilityExplanationAlert: NSAlert?
+    private var accessibilityPermissionFlow = AccessibilityPermissionFlow()
+    private var accessibilityReadyPanel: NSPanel?
+    private var accessibilityReadyShowWorkItem: DispatchWorkItem?
+    private var accessibilityReadyHideWorkItem: DispatchWorkItem?
+    private var statusBarCancellables = Set<AnyCancellable>()
+    private var selectedTextTodoCancellables = Set<AnyCancellable>()
+    private var todoNudgeCancellables = Set<AnyCancellable>()
+    private var todoNudgePanel: TodoNudgeWindow?
+    private let codexCompletionPresenter = CodexCompletionPresenter()
+    private var todoNudgeTodoID: UUID?
+    private var todoNudgeEarliestPresentationAt = Date.distantFuture
+    private var todoNudgeWarmupWorkItem: DispatchWorkItem?
+    private var todoNudgeAutoDismissWorkItem: DispatchWorkItem?
+    private var transientTodoNudgeLedger = TodoNudgeLedgerState.empty
+    private var todoNudgeIsPreview = false
+    private var todoNudgeSessionIsAvailable = true
+    private var todoNudgeScreenIsAwake = true
+    private lazy var reminderSettings = TodoReminderSettings(
+        defaults: TodoNudgeLedgerStorage.resolve(
+            assistantStorageSelection: DevRuntimeOptions.assistantStorageSelection
+        ) == .persistent ? .standard : nil
+    )
+    private var selectedTextTodoFeedbackPanel: NSPanel?
+    private var selectedTextTodoFeedbackHideWorkItem: DispatchWorkItem?
+    private var selectedTextTodoFeedbackGeneration = 0
+    private var selectedTextTodoConfirmationAlert: NSAlert?
 
     private let appMonitor = AppMonitorService()
     private let windowManager = WindowManagerService()
     private let pinnedWindowService = PinnedWindowService()
     private let hotkeyService = HotkeyService()
     private let moduleRegistry = ModuleRegistry()
-    @MainActor private lazy var assistantStore = AssistantStore()
+    @MainActor private lazy var assistantStore: AssistantStore = {
+        switch DevRuntimeOptions.assistantStorageSelection {
+        case .standard:
+            return AssistantStore()
+        case .temporary(let url):
+            return AssistantStore(storageURL: url)
+        case .invalidOverride:
+            // Fail closed: an invalid Debug override must never fall back to
+            // the user's real Assistant file. Writes to this sentinel fail.
+            return AssistantStore(
+                storageURL: URL(fileURLWithPath: "/dev/null/NARC-invalid-dev-storage.json")
+            )
+        }
+    }()
+    @MainActor private lazy var inboxCaptureState: InboxCaptureState = {
+        InboxCaptureState(
+            store: assistantStore,
+            onCaptureCompleted: { [weak self] in
+                OnboardingPresentationPolicy.markFirstCaptureCompleted()
+                self?.onboardingWindow?.dismiss()
+            }
+        )
+    }()
+    @MainActor private lazy var selectedTextTodoCaptureCoordinator =
+        SelectedTextTodoCaptureCoordinator(
+            reader: AXSelectedTextReader(),
+            store: assistantStore
+        )
     @MainActor private var quickCaptureWindow: QuickCaptureWindow?
     @MainActor private var assistantHubWindow: AssistantHubWindow?
     @MainActor private var onboardingWindow: OnboardingWindow?
@@ -31,133 +92,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Drives FloatingWidgetView's `.dragging` state transitions per spec §2.
     /// Flipped by FloatingWidgetWindow's onDragStart / onDragEnd callbacks.
     private let widgetDragState = WidgetDragState()
+    private let pinnedWindowSwitcherSelection = PinnedWindowSwitcherSelectionState()
 
-    // MARK: - App Lifecycle
-
-    /// Checks all required system permissions on startup. If any are missing,
-    /// shows a single consolidated alert explaining what won't work and how to
-    /// fix it. Runs once per launch, before any features initialize.
-    private func checkRequiredPermissions() {
-        // UNUserNotificationCenter.current() crashes if the process has no
-        // bundle identifier (e.g. `swift run`). Guard early — the system-
-        // notifications setup method below does the same.
-        let notificationsAvailable = Bundle.main.bundleIdentifier != nil
-
-        // Brief delay then check all permissions and alert if any are missing.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self = self else { return }
-
-            let missingAccess = !AXIsProcessTrusted()
-
-            guard notificationsAvailable else {
-                // No bundle ID — skip notification checks entirely.
-                if missingAccess {
-                    if DevRuntimeOptions.terminalHost {
-                        print("[NARC] ⚠️ Terminal-host dev mode needs Accessibility on the terminal app launching NARC.")
-                        print("[NARC]    Grant Accessibility to Terminal / iTerm / Codex, then restart this script.")
-                    } else {
-                        self.showPermissionsAlert(missingAccessibility: true, missingNotifications: false)
-                    }
-                } else {
-                    print("[NARC] ✅ Accessibility OK (notifications unavailable — no bundle ID)")
-                }
-                return
-            }
-
-            let noteCenter = UNUserNotificationCenter.current()
-            noteCenter.getNotificationSettings { settings in
-                let missingNotifs = (settings.authorizationStatus == .denied)
-
-                guard missingAccess || missingNotifs else {
-                    print("[NARC] ✅ All permissions OK")
-                    return
-                }
-
-                DispatchQueue.main.async {
-                    self.showPermissionsAlert(
-                        missingAccessibility: missingAccess,
-                        missingNotifications: missingNotifs
-                    )
-                }
-            }
-
-            // Always request notification auth on launch.
-            noteCenter.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
-                print("[NARC] 🔔 Notification permission granted=\(granted)")
-            }
-        }
-    }
-
-    /// Show a single alert listing missing permissions and their impact.
-    private func showPermissionsAlert(missingAccessibility: Bool, missingNotifications: Bool) {
-        let alert = NSAlert()
-        alert.messageText = "NARC 需要系统权限"
-        alert.alertStyle = .warning
-
-        var lines: [String] = []
-        if missingAccessibility {
-            lines.append("⚠️ 辅助功能 — 未授权")
-            lines.append("  影响：窗口管理、钉选和相关快捷键")
-        }
-        if missingNotifications {
-            lines.append("⚠️ 通知 — 未授权")
-            lines.append("  影响：Claude 事件横幅提醒")
-        }
-        alert.informativeText = """
-            以下权限未授权，部分功能将无法正常工作：
-
-            \(lines.joined(separator: "\n"))
-
-            打开系统设置 → 隐私与安全性，找到 NARC 并开启对应权限。
-            """
-
-        alert.addButton(withTitle: "打开系统设置")
-        alert.addButton(withTitle: "稍后设置")
-
-        if alert.runModal() == .alertFirstButtonReturn {
-            // Open Privacy & Security → Accessibility (the most critical one)
-            if missingAccessibility {
-                NSWorkspace.shared.open(
-                    URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-                )
-            } else {
-                // If only notifications missing, open Notifications prefs
-                NSWorkspace.shared.open(
-                    URL(string: "x-apple.systempreferences:com.apple.preference.notifications")!
-                )
-            }
-        }
-    }
-
-    // MARK: - Menu Bar
+    // MARK: - App Lifecycle and Menu Bar
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("[NARC] 🚀 App launching...")
 
+        // NARC is intentionally a status-bar + floating-widget app. Windows
+        // still activate when needed, but there is no persistent Dock icon.
+        NSApp.setActivationPolicy(.accessory)
         if DevRuntimeOptions.terminalHost {
-            // Terminal-host dev mode mirrors the early high-frequency workflow:
-            // no Dock icon, but keep AX-powered hotkeys and window pinning.
-            NSApp.setActivationPolicy(.accessory)
             print("[NARC] 🧪 Terminal-host dev mode — Dock icon hidden; AX features remain enabled.")
         } else {
-            // Regular Dock app — reopening from the Dock fronts Assistant.
-            NSApp.setActivationPolicy(.regular)
+            print("[NARC] Status-bar mode — Dock icon hidden; floating widget remains available.")
         }
 
-        let shouldPresentOnboarding = OnboardingPresentationPolicy.shouldPresent(
-            hasCompleted: UserDefaults.standard.bool(
-                forKey: OnboardingPresentationPolicy.completionKey
-            )
-        )
+        switch DevRuntimeOptions.assistantStorageSelection {
+        case .temporary:
+            print("[NARC] 🧪 Using isolated temporary Assistant data for UI validation.")
+        case .invalidOverride:
+            print("[NARC] ❌ Invalid temporary Assistant path; personal data fallback is disabled and Assistant writes will fail.")
+        case .standard:
+            break
+        }
 
         if DevRuntimeOptions.noAX {
             print("[NARC] 🧪 NARC_DEV_NO_AX=1 — skipping permission prompts and AX-dependent startup paths.")
-        } else if !shouldPresentOnboarding {
-            // Existing users keep the consolidated permission check. First-run
-            // users get the guide instead of stacked alerts and System Settings.
-            // Show a clear alert once so the user knows what to fix, rather than
-            // silently failing for feature after feature.
-            checkRequiredPermissions()
         }
 
         print("[NARC] Setting up menu bar icon...")
@@ -166,35 +127,64 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         print("[NARC] Setting up floating widget...")
         setupFloatingWidget()
 
+        print("[NARC] Setting up local Todo reminders...")
+        setupTodoNudges()
+
+        codexCompletionPresenter.anchor = { [weak self] in
+            guard let self, let window = self.floatingWindow, window.isVisible,
+                  let screen = self.currentFloatingWidgetScreen() else { return nil }
+            return (window.frame, window.visibleSize, screen.visibleFrame)
+        }
+        codexCompletionPresenter.isBlocked = { [weak self] in
+            guard let self else { return true }
+            return self.widgetDragState.isDragging || !self.todoNudgeSessionIsAvailable
+                || !self.todoNudgeScreenIsAwake || self.todoNudgePanel?.isVisible == true
+                || self.panelWindow?.isVisible == true || self.pinnedWindowSwitcherWindow?.isVisible == true
+                || self.preferencesWindow?.isVisible == true
+        }
+        codexCompletionPresenter.start()
+
         print("[NARC] Starting app monitor...")
         appMonitor.startMonitoring()
 
-        hotkeyService.onPinHotkeyPressed = { [weak self] in
-            guard let self = self else { return }
-            let success = self.pinnedWindowService.pinCurrentWindow()
-            if success {
-                self.showPinFeedback()
-            }
+        hotkeyService.onAccessibilityPermissionGranted = { [weak self] in
+            self?.handleAccessibilityPermissionGranted()
         }
-        hotkeyService.onTogglePanelHotkeyPressed = { [weak self] in
-            self?.togglePanelAtMouseScreen()
+        hotkeyService.onAccessibilityPermissionStillDenied = { [weak self] in
+            self?.handleAccessibilityPermissionStillDenied()
+        }
+        hotkeyService.onPinnedWindowSwitcherHotkeyPressed = { [weak self] in
+            self?.showPinnedWindowSwitcher()
+        }
+        hotkeyService.onToggleCurrentWindowPinHotkeyPressed = { [weak self] in
+            self?.handleToggleCurrentWindowPinHotkey()
+        }
+        hotkeyService.onSummonWidgetHotkeyPressed = { [weak self] in
+            self?.summonFloatingWidgetToMouseScreen()
         }
         hotkeyService.onQuickCaptureHotkeyPressed = { [weak self] in
             Task { @MainActor in
                 self?.showQuickCapture()
             }
         }
-        hotkeyService.onLayoutHotkeyPressed = { layout in
-            WindowManagerService.moveActiveWindow(to: layout)
+        hotkeyService.onSelectedTextTodoHotkeyPressed = { [weak self] in
+            self?.handleSelectedTextTodoHotkey()
         }
+        hotkeyService.onLayoutHotkeyPressed = { [weak self] layout in
+            self?.handleLayoutHotkey(layout)
+        }
+        selectedTextTodoCaptureCoordinator.$state
+            .dropFirst()
+            .sink { [weak self] state in
+                self?.handleSelectedTextTodoCaptureState(state)
+            }
+            .store(in: &selectedTextTodoCancellables)
         if DevRuntimeOptions.noAX {
             print("[NARC] 🧪 Registering panel/quick-capture hotkeys for dev no-AX mode.")
             hotkeyService.registerDevNoAXHotkeys()
         } else {
             print("[NARC] Registering global hotkeys...")
-            hotkeyService.registerGlobalHotkeys(
-                promptForAccessibility: !shouldPresentOnboarding
-            )
+            hotkeyService.registerGlobalHotkeys(promptForAccessibility: false)
         }
 
         // Start Claude Code session monitoring
@@ -231,10 +221,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if DevRuntimeOptions.noAX {
             print("[NARC] 🧪 System notification authorization disabled for dev no-AX mode.")
         } else {
-            // Register for macOS system notifications (for click-to-jump support)
-            setupSystemNotifications(
-                requestAuthorization: !shouldPresentOnboarding
-            )
+            // Register the delegate only. Authorization is requested lazily on
+            // the first real notification delivery attempt.
+            setupSystemNotifications()
         }
 
         // Listen for preferences-triggered actions
@@ -245,18 +234,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
-        if shouldPresentOnboarding, !DevRuntimeOptions.noAX {
-            Task { @MainActor in
-                showOnboarding(force: false)
-            }
-        }
-
-        print("[NARC] ✅ App launch complete. Look for the floating widget (bottom-right) and menu bar icon.")
+        print("[NARC] ✅ App launch complete. Use the menu bar or your configured shortcut to summon the floating widget.")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        codexCompletionPresenter.stop()
+        stopTodoNudges()
+        pinnedWindowService.cancelPendingActivation()
+        hidePinnedWindowSwitcher()
+        dismissAccessibilityReadyFeedback()
+        dismissSelectedTextTodoFeedback(clearCoordinatorState: false)
+        if let alert = selectedTextTodoConfirmationAlert {
+            if NSApp.modalWindow === alert.window {
+                NSApp.abortModal()
+            }
+            alert.window.orderOut(nil)
+            selectedTextTodoConfirmationAlert = nil
+        }
+        _ = selectedTextTodoCaptureCoordinator.cancelPendingCapture()
+        hotkeyService.unregisterGlobalHotkeys()
         appMonitor.stopMonitoring()
         claudeService.stopListening()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        if !todoNudgeIsPreview { dismissTodoNudge() }
+        guard !DevRuntimeOptions.noAX else { return }
+        _ = hotkeyService.checkAccessibilityPermission(prompt: false)
     }
 
     /// Keep the app alive when its windows are closed; the menu bar item and
@@ -265,32 +269,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    /// Dock icon clicked (or `open -a NARC` while already running). If no window
-    /// is visible, open Assistant. Otherwise let macOS handle un-minimize.
+    /// Reopening an accessory app should return its attention anchor even
+    /// though the always-visible widget makes `hasVisibleWindows` true.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        if !hasVisibleWindows {
-            Task { @MainActor in
-                showAssistantHub()
-            }
-        }
+        summonFloatingWidgetToMouseScreen()
         return true
     }
 
-    /// Show a brief visual feedback on the floating widget when a window is pinned.
-    private func showPinFeedback() {
-        guard let window = floatingWindow else { return }
-        let originalAlpha = window.alphaValue
-
-        // Quick flash animation
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.1
-            window.animator().alphaValue = 0.3
-        }, completionHandler: {
+    /// Give the mark/unmark action a distinguishable, non-activating result.
+    private func showPinFeedback(
+        title: String,
+        message: String,
+        systemImage: String,
+        accentColor: Color
+    ) {
+        if let window = floatingWindow {
+            let originalAlpha = window.alphaValue
             NSAnimationContext.runAnimationGroup({ context in
                 context.duration = 0.1
-                window.animator().alphaValue = originalAlpha
+                window.animator().alphaValue = 0.3
+            }, completionHandler: {
+                NSAnimationContext.runAnimationGroup({ context in
+                    context.duration = 0.1
+                    window.animator().alphaValue = originalAlpha
+                })
             })
-        })
+        }
+
+        scheduleAccessibilityFeedback(
+            title: title,
+            message: message,
+            systemImage: systemImage,
+            accentColor: accentColor,
+            panelSize: NSSize(width: 400, height: 96),
+            duration: 3.5
+        )
     }
 
     // MARK: - Menu Bar
@@ -303,10 +316,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.image?.size = NSSize(width: 18, height: 18)
             button.action = #selector(menuBarIconClicked)
             button.target = self
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            button.toolTip = "NARC — 左键召回悬浮球，右键打开菜单"
         }
 
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Show NARC", action: #selector(showFloatingWidget), keyEquivalent: ""))
+        let summonItem = NSMenuItem(
+            title: "召回悬浮球",
+            action: #selector(showFloatingWidget),
+            keyEquivalent: ""
+        )
+        summonItem.target = self
+        summonItem.image = NSImage(systemSymbolName: "scope", accessibilityDescription: nil)
+        menu.addItem(summonItem)
         menu.addItem(NSMenuItem.separator())
         let guideItem = NSMenuItem(
             title: "User Guide",
@@ -315,12 +337,60 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
         guideItem.target = self
         menu.addItem(guideItem)
-        menu.addItem(NSMenuItem(title: "Preferences...", action: #selector(openPreferences), keyEquivalent: ","))
-        menu.addItem(NSMenuItem(title: "About NARC", action: #selector(showAbout), keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit NARC", action: #selector(quitApp), keyEquivalent: "q"))
 
-        statusBarItem?.menu = menu
+        let preferencesItem = NSMenuItem(
+            title: "Preferences...",
+            action: #selector(openPreferences),
+            keyEquivalent: ","
+        )
+        preferencesItem.target = self
+        menu.addItem(preferencesItem)
+
+        let aboutItem = NSMenuItem(
+            title: "About NARC",
+            action: #selector(showAbout),
+            keyEquivalent: ""
+        )
+        aboutItem.target = self
+        menu.addItem(aboutItem)
+        menu.addItem(NSMenuItem.separator())
+
+        let quitItem = NSMenuItem(
+            title: "Quit NARC",
+            action: #selector(quitApp),
+            keyEquivalent: "q"
+        )
+        quitItem.target = self
+        menu.addItem(quitItem)
+
+        statusBarMenu = menu
+
+        Publishers.CombineLatest(
+            appMonitor.$totalBadgeCount,
+            appMonitor.$isBadgeStatusUncertain
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] count, isUncertain in
+            self?.updateStatusBarBadge(count: count, isUncertain: isUncertain)
+        }
+        .store(in: &statusBarCancellables)
+    }
+
+    private func updateStatusBarBadge(count: Int, isUncertain: Bool) {
+        guard let button = statusBarItem?.button else { return }
+        let presentation = BadgePresentation.resolve(
+            count: count,
+            isUncertain: isUncertain
+        )
+        button.imagePosition = .imageLeft
+        button.title = presentation.text.map { " \($0)" } ?? ""
+        button.toolTip = presentation.isUncertain
+            ? "NARC — 未读暂不可确认；左键召回，右键打开菜单"
+            : "NARC — 左键召回悬浮球，右键打开菜单"
+        button.setAccessibilityLabel(
+            presentation.text.map { "NARC，应用级未读 \($0)" }
+                ?? "NARC"
+        )
     }
 
     // MARK: - Floating Widget
@@ -328,6 +398,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupFloatingWidget() {
         let widgetView = FloatingWidgetContainer(
             appMonitor: appMonitor,
+            assistantStore: assistantStore,
             dragState: widgetDragState
         )
 
@@ -339,7 +410,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // hard rectangular halo around the circle (the "方框" bug).
         let canvas = FloatingWidgetWindow.canvasSize
         let widgetSide = FloatingWidgetWindow.widgetSize
-        let widgetInset = (canvas - widgetSide) / 2  // 40pt
 
         let hostingView = NSHostingView(rootView: widgetView)
         hostingView.frame = NSRect(x: 0, y: 0, width: canvas, height: canvas)
@@ -354,25 +424,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let mouseLocation = NSEvent.mouseLocation
         let activeScreen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main
         let screenFrame = activeScreen?.visibleFrame ?? .zero
-        let defaultX = screenFrame.maxX - widgetSide - 40 - widgetInset
-        let defaultY = screenFrame.minY + 100 - widgetInset
+        let defaultFrame = FloatingWidgetPlacement.defaultFrame(
+            in: screenFrame,
+            windowSize: NSSize(width: canvas, height: canvas),
+            visibleSize: widgetSide
+        )
         let savedOrigin = UserDefaults.standard.string(forKey: "widgetOrigin")
         let origin: NSPoint
         if let saved = savedOrigin {
             let parts = saved.split(separator: ",").compactMap { Double($0) }
             if parts.count == 2 {
                 let savedPoint = NSPoint(x: parts[0], y: parts[1])
-                // Only use saved position if it's on a visible screen
-                if NSScreen.screens.contains(where: { $0.visibleFrame.insetBy(dx: -50, dy: -50).contains(savedPoint) }) {
-                    origin = savedPoint
+                let savedFrame = NSRect(
+                    origin: savedPoint,
+                    size: NSSize(width: canvas, height: canvas)
+                )
+                let visibleWidget = FloatingWidgetPlacement.visibleWidgetRect(
+                    in: savedFrame,
+                    visibleSize: widgetSide
+                )
+                let center = NSPoint(x: visibleWidget.midX, y: visibleWidget.midY)
+                if let savedScreen = NSScreen.screens.first(where: { $0.frame.contains(center) }) {
+                    origin = FloatingWidgetPlacement.clampedFrame(
+                        savedFrame,
+                        to: savedScreen.visibleFrame,
+                        visibleSize: widgetSide
+                    ).origin
                 } else {
-                    origin = NSPoint(x: defaultX, y: defaultY)
+                    origin = defaultFrame.origin
                 }
             } else {
-                origin = NSPoint(x: defaultX, y: defaultY)
+                origin = defaultFrame.origin
             }
         } else {
-            origin = NSPoint(x: defaultX, y: defaultY)
+            origin = defaultFrame.origin
         }
 
         // Spec §7: window configuration is fully encapsulated in FloatingWidgetWindow.init().
@@ -397,6 +482,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // and the widget tilts/scales (spec §5).
         window.onDragStart = { [weak self] in
             self?.widgetDragState.isDragging = true
+            self?.postponeTodoNudge(for: TodoNudgePolicy.todoChangeSilence)
         }
         window.onDragEnd = { [weak self] in
             self?.widgetDragState.isDragging = false
@@ -405,6 +491,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // When the widget is dragged, reposition the panel and persist the origin.
         window.onWindowMoved = { [weak self] in
             self?.repositionPanel()
+            self?.repositionTodoNudge()
             if let win = self?.floatingWindow {
                 let origin = win.frame.origin
                 UserDefaults.standard.set("\(Int(origin.x)),\(Int(origin.y))", forKey: "widgetOrigin")
@@ -420,7 +507,279 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { [weak self] _ in
             let newSize = FloatingWidgetWindow.widgetSize
-            self?.floatingWindow?.applyWidgetSize(newSize)
+            Task { @MainActor [weak self] in
+                self?.floatingWindow?.applyWidgetSize(newSize)
+            }
+        }
+    }
+
+    // MARK: - Local Todo Nudge
+
+    private func setupTodoNudges() {
+        let now = Date()
+        todoNudgeEarliestPresentationAt = now.addingTimeInterval(
+            TodoNudgePolicy.startupWarmup
+        )
+
+        assistantStore.$todos
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.todoNudgeEarliestPresentationAt = Date().addingTimeInterval(
+                    TodoNudgePolicy.todoChangeSilence
+                )
+                self.reconcileTodoNudge()
+            }
+            .store(in: &todoNudgeCancellables)
+
+        reminderSettings.$configuration.dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.dismissTodoNudge()
+                // Editing a schedule cancels any old one-off snooze.
+                var ledger = self.loadTodoNudgeLedger()
+                ledger.snoozedUntil = nil
+                self.saveTodoNudgeLedger(ledger)
+                self.reconcileTodoNudge()
+            }.store(in: &todoNudgeCancellables)
+
+        let workspaceEvents = NSWorkspace.shared.notificationCenter
+        for event in [NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.screensDidSleepNotification] {
+            workspaceEvents.publisher(for: event).receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    if event == NSWorkspace.sessionDidResignActiveNotification {
+                        self?.todoNudgeSessionIsAvailable = false
+                    } else {
+                        self?.todoNudgeScreenIsAwake = false
+                    }
+                    self?.dismissTodoNudge()
+                }.store(in: &todoNudgeCancellables)
+        }
+        for event in [NSWorkspace.sessionDidBecomeActiveNotification, NSWorkspace.screensDidWakeNotification] {
+            workspaceEvents.publisher(for: event).receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    if event == NSWorkspace.sessionDidBecomeActiveNotification {
+                        self?.todoNudgeSessionIsAvailable = true
+                    } else {
+                        self?.todoNudgeScreenIsAwake = true
+                    }
+                    self?.reconcileTodoNudge()
+                }.store(in: &todoNudgeCancellables)
+        }
+
+        Timer.publish(every: 5, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] date in
+                self?.reconcileTodoNudge(now: date)
+            }
+            .store(in: &todoNudgeCancellables)
+
+        let warmupWorkItem = DispatchWorkItem { [weak self] in
+            self?.reconcileTodoNudge()
+        }
+        todoNudgeWarmupWorkItem = warmupWorkItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + TodoNudgePolicy.startupWarmup,
+            execute: warmupWorkItem
+        )
+    }
+
+    private func stopTodoNudges() {
+        todoNudgeWarmupWorkItem?.cancel()
+        todoNudgeWarmupWorkItem = nil
+        todoNudgeCancellables.removeAll()
+        dismissTodoNudge()
+    }
+
+    private func reconcileTodoNudge(now: Date = Date()) {
+        guard !todoNudgeIsPreview else { return }
+        let availableTodos = assistantStore.availableTodos(now: now)
+        if let visibleID = todoNudgeTodoID,
+           !availableTodos.contains(where: { $0.id == visibleID }) {
+            dismissTodoNudge()
+        }
+
+        let isBlocked = isTodoNudgePresentationBlocked
+        if isBlocked {
+            dismissTodoNudge()
+        }
+
+        guard todoNudgePanel == nil else { return }
+
+        let ledger = loadTodoNudgeLedger()
+        if availableTodos.isEmpty,
+           TodoNudgePolicy.dueOccurrence(now: now, configuration: reminderSettings.configuration,
+                                        ledger: ledger) != nil {
+            // An empty scheduled review is consumed, not replayed upon capture.
+            saveTodoNudgeLedger(TodoNudgePolicy.recordingPresentation(at: now, ledger: ledger))
+            return
+        }
+        let decision = TodoNudgePolicy.evaluate(
+            now: now,
+            earliestPresentationAt: todoNudgeEarliestPresentationAt,
+            hasAvailableTodo: !availableTodos.isEmpty,
+            isPresentationBlocked: isBlocked,
+            ledger: ledger,
+            configuration: reminderSettings.configuration
+        )
+
+        guard decision == .present, let todo = availableTodos.first else {
+            return
+        }
+        presentTodoNudge(todo, now: now, ledger: ledger)
+    }
+
+    private var isTodoNudgePresentationBlocked: Bool {
+        widgetDragState.isDragging
+            || codexCompletionPresenter.isVisible
+            || !todoNudgeSessionIsAvailable
+            || !todoNudgeScreenIsAwake
+            || CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown) < 2
+            || NSApp.isActive
+            || panelWindow?.isVisible == true
+            || quickCaptureWindow?.isVisible == true
+            || assistantHubWindow?.isVisible == true
+            || dashboardWindow?.isVisible == true
+            || preferencesWindow?.isVisible == true
+            || shortcutEditorWindow?.isVisible == true
+            || onboardingWindow?.isVisible == true
+            || selectedTextTodoFeedbackPanel?.isVisible == true
+            || accessibilityReadyPanel?.isVisible == true
+    }
+
+    private func presentTodoNudge(
+        _ todo: TodoItem?,
+        now: Date,
+        ledger: TodoNudgeLedgerState,
+        isPreview: Bool = false
+    ) {
+        guard let floatingWindow,
+              let screen = currentFloatingWidgetScreen() else {
+            return
+        }
+
+        let card = TodoNudgeCardView(
+            store: assistantStore,
+            onActionStarted: { [weak self] in
+                self?.pauseTodoNudgeAutoDismiss()
+            },
+            onActionFailed: { [weak self] in
+                self?.scheduleTodoNudgeAutoDismiss(
+                    after: TodoNudgePolicy.errorVisibleDuration
+                )
+            },
+            onSuccessfulAction: { [weak self] in
+                self?.dismissTodoNudge()
+            },
+            onDismiss: { [weak self] in
+                self?.dismissTodoNudge()
+            },
+            onSnooze: { [weak self] in
+                guard let self else { return }
+                var next = self.loadTodoNudgeLedger()
+                next.snoozedUntil = Date().addingTimeInterval(TodoNudgePolicy.snoozeDuration)
+                self.saveTodoNudgeLedger(next)
+                self.dismissTodoNudge()
+            },
+            onViewAll: { [weak self] in
+                self?.showAssistantHub()
+                self?.assistantHubWindow?.selectTodos()
+            },
+            isPreview: isPreview
+        )
+        let panel = TodoNudgeWindow(rootView: card)
+        let frame = TodoNudgePlacement.frame(
+            adjacentTo: floatingWindow.frame,
+            visibleWidgetSize: floatingWindow.visibleSize,
+            cardSize: TodoNudgeWindow.cardSize,
+            targetVisibleFrame: screen.visibleFrame
+        )
+        panel.setFrame(frame, display: false)
+
+        todoNudgePanel = panel
+        todoNudgeTodoID = todo?.id
+        todoNudgeIsPreview = isPreview
+        panel.orderFrontRegardless()
+
+        if !isPreview {
+            let updatedLedger = TodoNudgePolicy.recordingPresentation(at: now, ledger: ledger)
+            saveTodoNudgeLedger(updatedLedger)
+        }
+
+        scheduleTodoNudgeAutoDismiss(after: TodoNudgePolicy.visibleDuration)
+    }
+
+    private func dismissTodoNudge() {
+        pauseTodoNudgeAutoDismiss()
+        todoNudgePanel?.orderOut(nil)
+        todoNudgePanel = nil
+        todoNudgeTodoID = nil
+        todoNudgeIsPreview = false
+    }
+
+    private func pauseTodoNudgeAutoDismiss() {
+        todoNudgeAutoDismissWorkItem?.cancel()
+        todoNudgeAutoDismissWorkItem = nil
+    }
+
+    private func scheduleTodoNudgeAutoDismiss(after interval: TimeInterval) {
+        pauseTodoNudgeAutoDismiss()
+        let autoDismissWorkItem = DispatchWorkItem { [weak self] in
+            self?.dismissTodoNudge()
+        }
+        todoNudgeAutoDismissWorkItem = autoDismissWorkItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + interval,
+            execute: autoDismissWorkItem
+        )
+    }
+
+    private func repositionTodoNudge() {
+        guard let panel = todoNudgePanel,
+              panel.isVisible,
+              let floatingWindow,
+              let screen = currentFloatingWidgetScreen() else {
+            return
+        }
+
+        let frame = TodoNudgePlacement.frame(
+            adjacentTo: floatingWindow.frame,
+            visibleWidgetSize: floatingWindow.visibleSize,
+            cardSize: panel.frame.size,
+            targetVisibleFrame: screen.visibleFrame
+        )
+        panel.setFrame(frame, display: true, animate: false)
+    }
+
+    private func postponeTodoNudge(for interval: TimeInterval) {
+        todoNudgeEarliestPresentationAt = max(
+            todoNudgeEarliestPresentationAt,
+            Date().addingTimeInterval(interval)
+        )
+        dismissTodoNudge()
+    }
+
+    private func loadTodoNudgeLedger() -> TodoNudgeLedgerState {
+        switch TodoNudgeLedgerStorage.resolve(
+            assistantStorageSelection: DevRuntimeOptions.assistantStorageSelection
+        ) {
+        case .persistent:
+            return TodoNudgeLedgerDefaults.load()
+        case .transient:
+            return transientTodoNudgeLedger
+        }
+    }
+
+    private func saveTodoNudgeLedger(_ ledger: TodoNudgeLedgerState) {
+        switch TodoNudgeLedgerStorage.resolve(
+            assistantStorageSelection: DevRuntimeOptions.assistantStorageSelection
+        ) {
+        case .persistent:
+            TodoNudgeLedgerDefaults.save(ledger)
+        case .transient:
+            transientTodoNudgeLedger = ledger
         }
     }
 
@@ -438,55 +797,67 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Toggle panel from hotkey (⌃⌥N) — panel appears on the screen where the mouse cursor is.
-    private func togglePanelAtMouseScreen() {
-        if let panel = panelWindow, panel.isVisible {
+    /// Summon the attention anchor to the mouse's display. Unlike a toggle,
+    /// repeated invocations always leave both the widget and panel visible.
+    private func summonFloatingWidgetToMouseScreen() {
+        guard let window = floatingWindow else { return }
+
+        let screens = NSScreen.screens
+        let mouseLocation = NSEvent.mouseLocation
+        let targetIndex = FloatingWidgetPlacement.targetScreenIndex(
+            containing: mouseLocation,
+            screenFrames: screens.map(\.frame)
+        )
+        guard let targetScreen = targetIndex.map({ screens[$0] }) ?? NSScreen.main else {
+            return
+        }
+
+        let targetFrame = FloatingWidgetPlacement.summonedFrame(
+            currentFrame: window.frame,
+            targetVisibleFrame: targetScreen.visibleFrame,
+            visibleSize: window.visibleSize
+        )
+        if targetFrame.origin != window.frame.origin {
+            window.setFrameOrigin(targetFrame.origin)
+        }
+        window.orderFrontRegardless()
+
+        let action = FloatingPanelSummonAction.resolve(
+            panelIsVisible: panelWindow?.isVisible == true,
+            panelIsOnTargetScreen: panelScreenFrame == targetScreen.frame
+        )
+        switch action {
+        case .present:
+            showPanel()
+        case .keepVisible:
+            repositionPanel()
+            NSApp.activate(ignoringOtherApps: true)
+            panelWindow?.makeKeyAndOrderFront(nil)
+        case .replace:
             hidePanel()
-        } else {
-            showPanelAtMouseScreen()
+            showPanel()
         }
     }
 
     /// Calculate the panel frame relative to the current floating widget position.
     private func panelFrame() -> NSRect {
         guard let widgetFrame = floatingWindow?.frame else { return .zero }
-
-        // Use the screen where the widget is located, not always the main screen
-        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(widgetFrame.origin) }) ?? NSScreen.main else { return .zero }
-
-        let screenFrame = screen.visibleFrame
-
-        // The widget panel is 128×128 with a 40pt transparent padding around
-        // the visible 48pt circle. To place the popup adjacent to the visible
-        // circle (not the invisible frame edge), strip the inset.
-        let widgetInset = (FloatingWidgetWindow.canvasSize - FloatingWidgetWindow.widgetSize) / 2
-        let visibleTop = widgetFrame.maxY - widgetInset
-        let visibleBottom = widgetFrame.minY + widgetInset
-
-        // Default: panel above the widget, centered horizontally
-        var panelX = widgetFrame.midX - panelWidth / 2
-        var panelY = visibleTop + 8
-
-        // If panel would go above the screen, show it below the widget
-        if panelY + panelHeight > screenFrame.maxY {
-            panelY = visibleBottom - panelHeight - 8
+        guard let screen = currentFloatingWidgetScreen() else {
+            return .zero
         }
 
-        // Clamp horizontal position to screen bounds
-        panelX = max(screenFrame.minX + 4, min(panelX, screenFrame.maxX - panelWidth - 4))
-
-        return NSRect(x: panelX, y: panelY, width: panelWidth, height: panelHeight)
+        return FloatingPanelPlacement.frame(
+            adjacentTo: widgetFrame,
+            visibleWidgetSize: floatingWindow?.visibleSize ?? FloatingWidgetWindow.widgetSize,
+            panelSize: NSSize(width: panelWidth, height: panelHeight),
+            targetVisibleFrame: screen.visibleFrame
+        )
     }
 
-    /// Calculate the panel frame at the bottom-right of the given screen.
-    private func panelFrameOnScreen(_ screen: NSScreen) -> NSRect {
-        let screenFrame = screen.visibleFrame
-
-        // Position at bottom-right corner with some padding
-        let panelX = screenFrame.maxX - panelWidth - 20
-        let panelY = screenFrame.minY + 20
-
-        return NSRect(x: panelX, y: panelY, width: panelWidth, height: panelHeight)
+    private func currentFloatingWidgetScreen() -> NSScreen? {
+        guard let widgetFrame = floatingWindow?.frame else { return NSScreen.main }
+        let widgetCenter = NSPoint(x: widgetFrame.midX, y: widgetFrame.midY)
+        return NSScreen.screens.first(where: { $0.frame.contains(widgetCenter) }) ?? NSScreen.main
     }
 
     /// Shared keyboard selection state for the panel.
@@ -495,24 +866,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Show panel near the floating widget (triggered by widget click).
     private func showPanel() {
-        guard let widgetFrame = floatingWindow?.frame else { return }
+        guard floatingWindow != nil else { return }
+
+        postponeTodoNudge(for: TodoNudgePolicy.todoChangeSilence)
+        hidePinnedWindowSwitcher()
 
         let frame = panelFrame()
 
-        // Determine which screen the NARC widget is on
-        let narcScreen = NSScreen.screens.first(where: { $0.frame.contains(widgetFrame.origin) }) ?? NSScreen.main
+        // Resolve the current screen again for every action so dragging the
+        // widget across displays cannot leave stale window-routing context.
+        let narcScreen = currentFloatingWidgetScreen()
 
         presentPanel(frame: frame, narcScreen: narcScreen)
-    }
-
-    /// Show panel on the screen where the mouse cursor is (triggered by ⌃⌥N hotkey).
-    private func showPanelAtMouseScreen() {
-        let mouseLocation = NSEvent.mouseLocation
-        let mouseScreen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main
-
-        let frame = panelFrameOnScreen(mouseScreen!)
-
-        presentPanel(frame: frame, narcScreen: mouseScreen)
     }
 
     /// Shared panel creation logic.
@@ -520,6 +885,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Reset keyboard selection when opening panel.
         // wantsKeyboardNavigation starts false — the user must explicitly signal
         // intent (↑↓/Tab or click in panel) before number keys / Enter work.
+        keyboardSelection.route = .inbox
         keyboardSelection.selectedIndex = -1
         keyboardSelection.wantsKeyboardNavigation = false
 
@@ -527,21 +893,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             appMonitor: appMonitor,
             windowManager: windowManager,
             pinnedWindowService: pinnedWindowService,
+            hotkeyService: hotkeyService,
+            assistantStore: assistantStore,
+            inboxCaptureState: inboxCaptureState,
             onClose: { [weak self] in self?.hidePanel() },
             onOpenPreferences: { [weak self] in self?.openPreferences() },
+            onEditShortcut: { [weak self] action in
+                self?.openShortcutEditor(for: action)
+            },
             onOpenAssistant: { [weak self] in
                 self?.hidePanel()
                 Task { @MainActor in
                     self?.showAssistantHub()
                 }
             },
-            onOpenQuickCapture: { [weak self] in
-                self?.hidePanel()
-                Task { @MainActor in
-                    self?.showQuickCapture()
-                }
+            narcScreenProvider: { [weak self] in
+                self?.currentFloatingWidgetScreen()
             },
-            narcScreen: narcScreen,
             keyboardSelection: keyboardSelection
         )
 
@@ -562,16 +930,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel.level = .floating
         panel.hasShadow = true
         panel.isMovable = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
 
         // When the user clicks anywhere in the panel, they've shown intent to
         // interact — un-gate keyboard navigation so ↑↓/numbers/Enter work.
         panel.onMouseDown = { [weak self] in
-            self?.keyboardSelection.wantsKeyboardNavigation = true
+            guard let self,
+                  self.keyboardSelection.route.supportsItemNavigation else {
+                return
+            }
+            self.keyboardSelection.wantsKeyboardNavigation = true
         }
 
-        panel.orderFrontRegardless()
         self.panelWindow = panel
+        self.panelScreenFrame = narcScreen?.frame
 
         // CRITICAL: Make NARC the active app so the LOCAL key event monitor can
         // intercept and CONSUME keyboard events (return nil). Without this,
@@ -580,9 +952,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // This means Enter/Tab would both trigger NARC's action AND be sent to
         // the editor, causing unwanted edits.
         NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
 
         // Install key event monitor for panel keyboard navigation
-        installKeyEventMonitor(narcScreen: narcScreen)
+        installKeyEventMonitor()
     }
 
     /// Update the panel position to follow the floating widget.
@@ -590,12 +963,255 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let panel = panelWindow, panel.isVisible else { return }
         let frame = panelFrame()
         panel.setFrame(frame, display: true, animate: false)
+        panelScreenFrame = currentFloatingWidgetScreen()?.frame
     }
 
     private func hidePanel() {
         removeKeyEventMonitor()
         panelWindow?.orderOut(nil)
         panelWindow = nil
+        panelScreenFrame = nil
+    }
+
+    // MARK: - Pinned Window Switcher
+
+    /// Present a dedicated, keyboard-first exact-window launcher on the screen
+    /// containing the mouse. It intentionally does not reuse the main panel's
+    /// app-wide keyboard monitor or its Monitoring + Pinned flat index.
+    @MainActor
+    private func showPinnedWindowSwitcher() {
+        pinnedWindowService.cancelPendingActivation()
+        let screens = NSScreen.screens
+        let targetIndex = FloatingWidgetPlacement.targetScreenIndex(
+            containing: NSEvent.mouseLocation,
+            screenFrames: screens.map(\.frame)
+        )
+        guard let targetScreen = targetIndex.map({ screens[$0] }) ?? NSScreen.main else {
+            return
+        }
+        let targetDisplayID = WindowLayoutState.displayID(for: targetScreen)
+
+        hidePanel()
+        dismissTodoNudge()
+
+        if let panel = pinnedWindowSwitcherWindow,
+           panel.isVisible,
+           pinnedWindowSwitcherTargetDisplayID == targetDisplayID {
+            pinnedWindowSwitcherSelection.reset(
+                itemCount: pinnedWindowService.pinnedWindows.count
+            )
+            resizePinnedWindowSwitcher(itemCount: pinnedWindowService.pinnedWindows.count)
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let previousApplication = pinnedWindowSwitcherWindow?.isVisible == true
+            ? pinnedWindowSwitcherPreviousApplication
+            : currentFrontmostExternalApplication()
+        hidePinnedWindowSwitcher()
+        pinnedWindowSwitcherPreviousApplication = previousApplication
+        pinnedWindowSwitcherSelection.reset(itemCount: pinnedWindowService.pinnedWindows.count)
+
+        let frame = PinnedWindowSwitcherLayout.frame(
+            itemCount: pinnedWindowService.pinnedWindows.count,
+            in: targetScreen.visibleFrame
+        )
+        let panel = PanelWindow(
+            contentRect: frame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        let content = PinnedWindowSwitcherView(
+            pinnedWindowService: pinnedWindowService,
+            hotkeyService: hotkeyService,
+            selection: pinnedWindowSwitcherSelection,
+            onActivate: { [weak self] pinned in
+                self?.activatePinnedWindowFromSwitcher(pinned)
+            },
+            onClose: { [weak self] in
+                self?.hidePinnedWindowSwitcher(restorePreviousApplication: true)
+            },
+            onItemCountChanged: { [weak self] count in
+                self?.resizePinnedWindowSwitcher(itemCount: count)
+            }
+        )
+        let hostingView = NSHostingView(rootView: content)
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = .clear
+
+        panel.contentView = hostingView
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.level = .floating
+        panel.hasShadow = false
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = true
+        panel.isMovable = false
+        panel.isReleasedWhenClosed = false
+        panel.collectionBehavior = [
+            .canJoinAllSpaces,
+            .stationary,
+            .fullScreenAuxiliary,
+            .transient,
+        ]
+        panel.onKeyDown = { [weak self, weak panel] event in
+            guard let self, self.pinnedWindowSwitcherWindow === panel else {
+                return false
+            }
+            return self.handlePinnedWindowSwitcherKeyEvent(event)
+        }
+
+        pinnedWindowSwitcherWindow = panel
+        pinnedWindowSwitcherTargetDisplayID = targetDisplayID
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    @MainActor
+    private func handlePinnedWindowSwitcherKeyEvent(_ event: NSEvent) -> Bool {
+        let pins = pinnedWindowService.pinnedWindows
+        switch PinnedWindowSwitcherKeyboard.command(
+            for: event.keyCode,
+            selectedIndex: pinnedWindowSwitcherSelection.selectedIndex,
+            itemCount: pins.count
+        ) {
+        case .select(let index):
+            pinnedWindowSwitcherSelection.selectedIndex = index
+            return true
+        case .activate(let index):
+            guard pins.indices.contains(index) else { return false }
+            pinnedWindowSwitcherSelection.selectedIndex = index
+            activatePinnedWindowFromSwitcher(pins[index])
+            return true
+        case .dismiss:
+            hidePinnedWindowSwitcher(restorePreviousApplication: true)
+            return true
+        case .passThrough:
+            return false
+        }
+    }
+
+    @MainActor
+    private func activatePinnedWindowFromSwitcher(_ pinned: PinnedWindow) {
+        guard hotkeyService.checkAccessibilityPermission(prompt: false) else {
+            hidePinnedWindowSwitcher()
+            presentAccessibilityExplanation(shortcut: hotkeyService.activeShortcut(for: .pinnedWindowSwitcher)?.displayLabel ?? "窗口召回快捷键（请先到偏好设置启用）")
+            return
+        }
+        guard let targetScreen = pinnedWindowSwitcherTargetScreen() else {
+            hidePinnedWindowSwitcher(restorePreviousApplication: true)
+            scheduleAccessibilityFeedback(
+                title: "无法确认目标屏幕",
+                message: hotkeyService.activeShortcut(for: .pinnedWindowSwitcher).map { "显示器配置刚刚发生变化，请重新按 \($0.displayLabel)。" } ?? "显示器配置刚刚发生变化，请到偏好设置启用召回快捷键后重试。",
+                systemImage: "display.trianglebadge.exclamationmark",
+                accentColor: .narcWarn,
+                panelSize: NSSize(width: 420, height: 96),
+                duration: 5
+            )
+            return
+        }
+
+        consumeAccessibilityGuidanceForSuccessfulAction()
+        OnboardingPresentationPolicy.markWindowToolsIntroduced()
+        let previousApplication = pinnedWindowSwitcherPreviousApplication
+        hidePinnedWindowSwitcher()
+        pinnedWindowService.activatePinnedWindow(
+            pinned,
+            summonToScreen: targetScreen
+        ) { [weak self] result in
+            guard result != .cancelled else { return }
+            if !result.preservesTargetApplication {
+                self?.restoreApplicationAfterPinnedWindowSwitcher(previousApplication)
+            }
+            self?.showPinnedWindowRecallFailure(result)
+        }
+    }
+
+    @MainActor
+    private func resizePinnedWindowSwitcher(itemCount: Int) {
+        guard let panel = pinnedWindowSwitcherWindow,
+              panel.isVisible,
+              let targetScreen = pinnedWindowSwitcherTargetScreen() else {
+            return
+        }
+        panel.setFrame(
+            PinnedWindowSwitcherLayout.frame(
+                itemCount: itemCount,
+                in: targetScreen.visibleFrame
+            ),
+            display: true,
+            animate: false
+        )
+    }
+
+    private func pinnedWindowSwitcherTargetScreen() -> NSScreen? {
+        guard let displayID = pinnedWindowSwitcherTargetDisplayID else { return nil }
+        return NSScreen.screens.first {
+            WindowLayoutState.displayID(for: $0) == displayID
+        }
+    }
+
+    @MainActor
+    private func hidePinnedWindowSwitcher(restorePreviousApplication: Bool = false) {
+        let previousApplication = pinnedWindowSwitcherPreviousApplication
+        pinnedWindowSwitcherWindow?.onKeyDown = nil
+        pinnedWindowSwitcherWindow?.orderOut(nil)
+        pinnedWindowSwitcherWindow = nil
+        pinnedWindowSwitcherTargetDisplayID = nil
+        pinnedWindowSwitcherPreviousApplication = nil
+        if restorePreviousApplication {
+            restoreApplicationAfterPinnedWindowSwitcher(previousApplication)
+        }
+    }
+
+    private func currentFrontmostExternalApplication() -> NSRunningApplication? {
+        guard let application = NSWorkspace.shared.frontmostApplication,
+              application.bundleIdentifier != Bundle.main.bundleIdentifier else {
+            return nil
+        }
+        return application
+    }
+
+    private func restoreApplicationAfterPinnedWindowSwitcher(
+        _ application: NSRunningApplication?
+    ) {
+        guard let application, !application.isTerminated else {
+            NSApp.deactivate()
+            return
+        }
+        application.activate()
+    }
+
+    private func showPinnedWindowRecallFailure(_ result: PinnedWindowActivationResult) {
+        let title: String
+        let message: String
+        switch result {
+        case .activated, .cancelled:
+            return
+        case .revealedOnOriginalDisplay:
+            title = "已定位到窗口"
+            message = "窗口已在它所在的屏幕与桌面打开。"
+        case .applicationOpened:
+            title = "已打开应用"
+            message = "已打开所属 App；原标记窗口未能精确定位，需要时可重新标记。"
+        case .applicationHasNoVisibleWindow:
+            title = "应用已激活，窗口尚未显示"
+            message = "macOS 未显示它的窗口。请检查“桌面与程序坞 → 调度中心”中的切换应用时切换空间选项。"
+        case .unavailable:
+            title = "未能打开应用"
+            message = "请确认 App 仍已安装且能够正常启动，然后重试。原窗口标记已保留。"
+        }
+        scheduleAccessibilityFeedback(
+            title: title,
+            message: message,
+            systemImage: result.preservesTargetApplication ? "macwindow" : "macwindow.badge.exclamationmark",
+            accentColor: result == .applicationHasNoVisibleWindow || !result.preservesTargetApplication
+                ? .narcWarn : .narcAccent,
+            panelSize: NSSize(width: 440, height: 112),
+            duration: 5
+        )
     }
 
     // MARK: - Personal Assistant
@@ -604,8 +1220,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func showQuickCapture() {
         guard moduleRegistry.module(id: "assistant") != nil else { return }
 
+        postponeTodoNudge(for: TodoNudgePolicy.todoChangeSilence)
+
         if quickCaptureWindow == nil {
-            quickCaptureWindow = QuickCaptureWindow(store: assistantStore)
+            quickCaptureWindow = QuickCaptureWindow(
+                store: assistantStore,
+                captureState: inboxCaptureState,
+                onOpenAssistant: { [weak self] in
+                    self?.showAssistantHub()
+                }
+            )
         }
         quickCaptureWindow?.present()
     }
@@ -614,14 +1238,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func showAssistantHub() {
         guard moduleRegistry.module(id: "assistant") != nil else { return }
 
+        postponeTodoNudge(for: TodoNudgePolicy.todoChangeSilence)
+
         if assistantHubWindow == nil {
             assistantHubWindow = AssistantHubWindow(
                 store: assistantStore,
-                onQuickCapture: { [weak self] in
-                    Task { @MainActor in
-                        self?.showQuickCapture()
-                    }
-                }
+                captureState: inboxCaptureState
             )
         }
         assistantHubWindow?.present()
@@ -649,6 +1271,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// The window always opens on the same screen as the floating widget
     /// so the user doesn't have to hunt across displays.
     private func showDashboard(selectingNarcSessionId narcSessionId: String? = nil) {
+        postponeTodoNudge(for: TodoNudgePolicy.todoChangeSilence)
+
         // Figure out which screen the dashboard should land on.
         // Priority: floating widget screen > mouse screen > main screen.
         let targetScreen: NSScreen? = {
@@ -965,8 +1589,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// center throws an NSException). True in a proper .app bundle.
     private var systemNotificationsAvailable = false
 
-    /// Request authorization and register as the delegate so click-to-jump works.
-    private func setupSystemNotifications(requestAuthorization: Bool = true) {
+    /// Register as the notification delegate without requesting permission.
+    /// Authorization is deferred until a real notification needs delivery.
+    private func setupSystemNotifications() {
         // UNUserNotificationCenter.current() requires a real .app bundle. When
         // running via `swift run`, mainBundle has no bundleIdentifier and the
         // first access throws (NSInternalInconsistencyException). Guard against
@@ -980,17 +1605,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         systemNotificationsAvailable = true
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-        guard requestAuthorization else {
-            print("[NARC] 🔔 Notification authorization deferred until after onboarding.")
-            return
-        }
-        center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
-            if let error = error {
-                print("[NARC] ⚠️ Notification auth error: \(error)")
-            } else {
-                print("[NARC] 🔔 Notification auth granted=\(granted)")
-            }
-        }
+        print("[NARC] 🔔 Notification authorization deferred until first use.")
     }
 
     /// Generic poster — builds a content object and submits it to the center.
@@ -1021,9 +1636,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             content: content,
             trigger: nil  // deliver immediately
         )
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error = error {
-                print("[NARC] ⚠️ Notification post failed: \(error)")
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            let addRequest = {
+                center.add(request) { error in
+                    if let error {
+                        print("[NARC] ⚠️ Notification post failed: \(error)")
+                    }
+                }
+            }
+
+            switch settings.authorizationStatus {
+            case .authorized, .provisional, .ephemeral:
+                addRequest()
+            case .notDetermined:
+                center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+                    if let error {
+                        print("[NARC] ⚠️ Notification auth error: \(error)")
+                    } else if granted {
+                        addRequest()
+                    } else {
+                        print("[NARC] 🔕 Notification delivery was not authorized.")
+                    }
+                }
+            case .denied:
+                print("[NARC] 🔕 Notification delivery is disabled in System Settings.")
+            @unknown default:
+                print("[NARC] ⚠️ Unknown notification authorization state.")
             }
         }
     }
@@ -1200,7 +1839,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// is targeted at any other window (Dashboard, Preferences, etc.) so the
     /// terminal in the workspace can receive characters like `-` and Enter that
     /// happen to overlap with our numeric/Return shortcuts.
-    private func installKeyEventMonitor(narcScreen: NSScreen?) {
+    private func installKeyEventMonitor() {
         removeKeyEventMonitor()
 
         // Handler logic shared by both monitors
@@ -1212,11 +1851,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             let keyCode = event.keyCode
 
-            switch keyCode {
-            case 53: // Esc — close panel
+            switch self.keyboardSelection.route.decision(
+                for: keyCode,
+                isTextEditing: panel.firstResponder is NSTextView
+            ) {
+            case .dismissPanel:
                 self.hidePanel()
                 return true
+            case .passThrough:
+                return false
+            case .legacyItemNavigation:
+                break
+            }
 
+            switch keyCode {
             case 126: // ↑ — select previous item (also signals nav intent)
                 self.keyboardSelection.wantsKeyboardNavigation = true
                 self.selectPreviousItem()
@@ -1229,7 +1877,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             case 36: // ↩ — activate selected item (gated: user must have signaled nav intent)
                 guard self.keyboardSelection.wantsKeyboardNavigation else { return false }
-                self.activateSelectedItem(narcScreen: narcScreen)
+                self.activateSelectedItem()
                 return true
 
             case 48: // Tab — select next item (same as ↓), also signals nav intent
@@ -1258,7 +1906,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     22: 5, 26: 6, 28: 7, 25: 8, 29: 9
                 ]
                 if let index = numberMap[keyCode] {
-                    self.activateItemAtIndex(index, narcScreen: narcScreen)
+                    self.activateItemAtIndex(index)
                 }
                 return true
 
@@ -1338,21 +1986,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         keyboardSelection.selectedIndex = max(current - 1, 0)
     }
 
-    private func activateSelectedItem(narcScreen: NSScreen?) {
+    private func activateSelectedItem() {
         let items = allPanelItems()
         let index = keyboardSelection.selectedIndex
         guard index >= 0 && index < items.count else { return }
-        activatePanelItem(items[index], narcScreen: narcScreen)
+        activatePanelItem(items[index])
     }
 
-    private func activateItemAtIndex(_ index: Int, narcScreen: NSScreen?) {
+    private func activateItemAtIndex(_ index: Int) {
         let items = allPanelItems()
         guard index >= 0 && index < items.count else { return }
         keyboardSelection.selectedIndex = index
-        activatePanelItem(items[index], narcScreen: narcScreen)
+        activatePanelItem(items[index])
     }
 
-    private func activatePanelItem(_ item: PanelItem, narcScreen: NSScreen?) {
+    private func activatePanelItem(_ item: PanelItem) {
+        let narcScreen = currentFloatingWidgetScreen()
         switch item {
         case .monitoring(let state):
             appMonitor.activateApp(
@@ -1371,11 +2020,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     @objc private func menuBarIconClicked() {
-        togglePanel()
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            guard let button = statusBarItem?.button,
+                  let menu = statusBarMenu else {
+                return
+            }
+            menu.popUp(
+                positioning: nil,
+                at: NSPoint(x: 0, y: button.bounds.minY - 2),
+                in: button
+            )
+            return
+        }
+        summonFloatingWidgetToMouseScreen()
     }
 
     @objc private func showFloatingWidget() {
-        floatingWindow?.orderFrontRegardless()
+        summonFloatingWidgetToMouseScreen()
     }
 
     @objc private func showUserGuide() {
@@ -1386,15 +2047,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func showOnboarding(force: Bool) {
-        let hasCompleted = UserDefaults.standard.bool(
-            forKey: OnboardingPresentationPolicy.completionKey
-        )
-        guard OnboardingPresentationPolicy.shouldPresent(
-            hasCompleted: hasCompleted,
-            force: force
-        ) else {
+        guard OnboardingPresentationPolicy.shouldPresent(force: force) else {
             return
         }
+
+        postponeTodoNudge(for: TodoNudgePolicy.todoChangeSilence)
+
+        OnboardingPresentationPolicy.markEntrySeen()
 
         if let window = onboardingWindow {
             window.present()
@@ -1408,19 +2067,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.showAssistantHub()
                 }
             },
-            onOpenAccessibilitySettings: {
-                guard let url = URL(
-                    string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-                ) else {
-                    return
-                }
-                NSWorkspace.shared.open(url)
+            onManageAccessibilityPermission: { [weak self] in
+                self?.manageAccessibilityPermissionFromOnboarding()
             },
             onDismiss: { [weak self] in
-                UserDefaults.standard.set(
-                    true,
-                    forKey: OnboardingPresentationPolicy.completionKey
-                )
                 self?.onboardingWindow = nil
             }
         )
@@ -1428,22 +2078,595 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.present()
     }
 
+    private func handleSelectedTextTodoHotkey() {
+        guard hotkeyService.checkAccessibilityPermission(prompt: false) else {
+            presentAccessibilityExplanation(
+                shortcut: hotkeyService.activeShortcut(for: .selectedTextTodo)?.displayLabel ?? "划词 Todo 快捷键（请先到偏好设置启用）",
+                capability: .selectedTextTodo
+            )
+            return
+        }
+
+        // `capture()` synchronously locks the source PID before it returns or
+        // any NARC UI is presented. All AX IPC and persistence happen after
+        // that immutable source snapshot has been established.
+        consumeAccessibilityGuidanceForSuccessfulAction()
+        if selectedTextTodoCaptureCoordinator.capture() {
+            dismissSelectedTextTodoFeedback(clearCoordinatorState: false)
+        }
+    }
+
+    private func handleSelectedTextTodoCaptureState(_ state: SelectedTextTodoCaptureState) {
+        switch state {
+        case .idle, .reading, .saving:
+            break
+        case .awaitingConfirmation(let snapshot):
+            presentSelectedTextTodoConfirmation(for: snapshot)
+        case .saved(let token):
+            presentSelectedTextTodoFeedback(
+                title: "Todo 已创建",
+                message: "已保存到本地；可在 7 秒内撤销本次创建。",
+                tone: .success,
+                duration: 7,
+                actionTitle: "撤销"
+            ) { [weak self] in
+                guard let self else { return }
+                self.dismissSelectedTextTodoFeedback(clearCoordinatorState: false)
+                _ = self.selectedTextTodoCaptureCoordinator.undo(token)
+            }
+        case .failed(let failure):
+            handleSelectedTextTodoCaptureFailure(failure)
+        case .undone:
+            presentSelectedTextTodoFeedback(
+                title: "已撤销",
+                message: "只删除了刚才创建的那一条 Todo。",
+                tone: .info,
+                duration: 4
+            )
+        }
+    }
+
+    private func handleSelectedTextTodoCaptureFailure(_ failure: SelectedTextTodoCaptureFailure) {
+        switch failure {
+        case .selection(.permissionRequired):
+            selectedTextTodoCaptureCoordinator.clearFeedback()
+            presentAccessibilityExplanation(
+                shortcut: hotkeyService.activeShortcut(for: .selectedTextTodo)?.displayLabel ?? "划词 Todo 快捷键（请先到偏好设置启用）",
+                capability: .selectedTextTodo
+            )
+        case .selection(.noSelection),
+             .selection(.noFocusedElement),
+             .selection(.noFrontmostApplication),
+             .selection(.narcIsFrontmost):
+            presentSelectedTextTodoFeedback(
+                title: "没有读取到选中文字",
+                message: "请回到其他 App，重新选中文字后再按快捷键。",
+                tone: .warning,
+                duration: 7
+            )
+        case .selection(.selectionTooLarge(let maximumUTF16Units)):
+            presentSelectedTextTodoFeedback(
+                title: "选中的内容过长",
+                message: "单次最多处理 \(maximumUTF16Units) 个文本单元；请缩小选区后重试。",
+                tone: .warning,
+                duration: 8
+            )
+        case .selection(.unsupported):
+            presentSelectedTextTodoFeedback(
+                title: "当前区域不支持标准选区读取",
+                message: "未创建 Todo，也没有读取或改写剪贴板。",
+                tone: .warning,
+                duration: 8
+            )
+        case .selection(.protectedContent):
+            presentSelectedTextTodoFeedback(
+                title: "受保护内容不会被读取",
+                message: "密码等受保护输入区域不会创建 Todo。",
+                tone: .warning,
+                duration: 7
+            )
+        case .selection(.temporarilyUnavailable):
+            presentSelectedTextTodoFeedback(
+                title: "暂时无法读取选区",
+                message: "来源 App 暂未响应，请保持选区后再试一次。",
+                tone: .warning,
+                duration: 7
+            )
+        case .save(let reason):
+            presentSelectedTextTodoFeedback(
+                title: "Todo 未保存",
+                message: reason?.errorDescription ?? "本地写入失败，没有创建任务。",
+                tone: .error,
+                duration: 9
+            )
+        case .undo(let todoID, let reason):
+            let token = SelectedTextTodoUndoToken(todoID: todoID)
+            presentSelectedTextTodoFeedback(
+                title: "撤销失败",
+                message: reason?.errorDescription ?? "Todo 仍然保留，可重试撤销。",
+                tone: .error,
+                duration: 9,
+                actionTitle: "重试撤销"
+            ) { [weak self] in
+                guard let self else { return }
+                self.dismissSelectedTextTodoFeedback(clearCoordinatorState: false)
+                _ = self.selectedTextTodoCaptureCoordinator.undo(token)
+            }
+        }
+    }
+
+    private func presentSelectedTextTodoConfirmation(for snapshot: SelectedTextSnapshot) {
+        guard selectedTextTodoConfirmationAlert == nil else { return }
+
+        let nonEmptyLineCount = snapshot.text
+            .components(separatedBy: .newlines)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .count
+        let alert = NSAlert()
+        alert.messageText = "选中的内容较长"
+        alert.informativeText = "已读取 \(snapshot.text.count) 个字符、\(nonEmptyLineCount) 个非空行。内容仅保留在本次确认中；要把完整选区保存为一条本地 Todo 吗？"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "创建 Todo")
+        alert.addButton(withTitle: "取消")
+        selectedTextTodoConfirmationAlert = alert
+
+        // Long-text confirmation is the one intentional focus-taking step,
+        // and it uses only the source snapshot captured before activation.
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        alert.window.orderOut(nil)
+        if selectedTextTodoConfirmationAlert === alert {
+            selectedTextTodoConfirmationAlert = nil
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if response == .alertFirstButtonReturn {
+                _ = self.selectedTextTodoCaptureCoordinator.confirmPendingCapture()
+            } else {
+                _ = self.selectedTextTodoCaptureCoordinator.cancelPendingCapture()
+            }
+        }
+    }
+
+    private func presentSelectedTextTodoFeedback(
+        title: String,
+        message: String,
+        tone: SelectedTextTodoFeedbackTone,
+        duration: TimeInterval,
+        actionTitle: String? = nil,
+        onAction: (() -> Void)? = nil
+    ) {
+        dismissSelectedTextTodoFeedback(clearCoordinatorState: false)
+        let feedbackGeneration = selectedTextTodoFeedbackGeneration
+
+        let size = NSSize(width: 400, height: 76)
+        let panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.ignoresMouseEvents = false
+        panel.isReleasedWhenClosed = false
+        panel.contentView = NSHostingView(
+            rootView: SelectedTextTodoFeedbackView(
+                title: title,
+                message: message,
+                tone: tone,
+                actionTitle: actionTitle,
+                onAction: onAction.map { action in
+                    { [weak self] in
+                        guard self?.selectedTextTodoFeedbackGeneration == feedbackGeneration else {
+                            return
+                        }
+                        action()
+                    }
+                },
+                onDismiss: { [weak self] in
+                    Task { @MainActor in
+                        self?.dismissSelectedTextTodoFeedback(
+                            clearCoordinatorState: true,
+                            expectedGeneration: feedbackGeneration
+                        )
+                    }
+                }
+            )
+        )
+
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        if let visibleFrame = screen?.visibleFrame {
+            panel.setFrameOrigin(NSPoint(
+                x: visibleFrame.maxX - size.width - 24,
+                y: visibleFrame.maxY - size.height - 24
+            ))
+        } else {
+            panel.center()
+        }
+
+        selectedTextTodoFeedbackPanel = panel
+        panel.orderFrontRegardless()
+
+        let hideWorkItem = DispatchWorkItem { [weak self] in
+            self?.dismissSelectedTextTodoFeedback(
+                clearCoordinatorState: true,
+                expectedGeneration: feedbackGeneration
+            )
+        }
+        selectedTextTodoFeedbackHideWorkItem = hideWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: hideWorkItem)
+    }
+
+    private func dismissSelectedTextTodoFeedback(
+        clearCoordinatorState: Bool,
+        expectedGeneration: Int? = nil
+    ) {
+        if let expectedGeneration,
+           expectedGeneration != selectedTextTodoFeedbackGeneration {
+            return
+        }
+        selectedTextTodoFeedbackGeneration &+= 1
+        selectedTextTodoFeedbackHideWorkItem?.cancel()
+        selectedTextTodoFeedbackHideWorkItem = nil
+        selectedTextTodoFeedbackPanel?.orderOut(nil)
+        selectedTextTodoFeedbackPanel = nil
+        if clearCoordinatorState {
+            selectedTextTodoCaptureCoordinator.clearFeedback()
+        }
+    }
+
+    private func handleLayoutHotkey(_ layout: WindowLayout) {
+        let receivedAt = DispatchTime.now().uptimeNanoseconds
+        guard hotkeyService.checkAccessibilityPermission(prompt: false) else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let shortcut = self.hotkeyService.activeShortcut(for: .forLayout(layout))
+                self.presentAccessibilityExplanation(shortcut: shortcut?.displayLabel ?? "窗口布局快捷键（请先到偏好设置启用）")
+            }
+            return
+        }
+
+        consumeAccessibilityGuidanceForSuccessfulAction()
+        OnboardingPresentationPolicy.markWindowToolsIntroduced()
+        // Keep this synchronous with the Carbon callback so NARC cannot steal
+        // focus before the target window is resolved.
+        WindowManagerService.moveActiveWindow(
+            to: layout,
+            receivedAt: receivedAt,
+            allowCrossScreen: true
+        )
+    }
+
+    @MainActor
+    private func handleToggleCurrentWindowPinHotkey() {
+        guard hotkeyService.checkAccessibilityPermission(prompt: false) else {
+            presentAccessibilityExplanation(shortcut: hotkeyService.activeShortcut(for: .toggleCurrentWindowPin)?.displayLabel ?? "窗口标记快捷键（请先到偏好设置启用）")
+            return
+        }
+
+        consumeAccessibilityGuidanceForSuccessfulAction()
+        OnboardingPresentationPolicy.markWindowToolsIntroduced()
+        switch pinnedWindowService.toggleCurrentWindowPin() {
+        case .pinned:
+            showPinFeedback(
+                title: "窗口已标记",
+                message: hotkeyService.activeShortcut(for: .pinnedWindowSwitcher).map { "按 \($0.displayLabel) 可随时用键盘召回。" } ?? "可从面板打开此窗口；召回快捷键未启用，请到偏好设置修改。",
+                systemImage: "pin.fill",
+                accentColor: .narcSuccess
+            )
+        case .unpinned:
+            showPinFeedback(
+                title: "已取消标记",
+                message: "这个窗口已从快速召回列表移除。",
+                systemImage: "pin.slash",
+                accentColor: .narcInfo
+            )
+        case .failed(.maximumReached(let maximum)):
+            showPinFeedback(
+                title: "标记数量已满",
+                message: "最多保留 \(maximum) 个窗口，请先在召回器中移除一个。",
+                systemImage: "exclamationmark.triangle.fill",
+                accentColor: .narcWarn
+            )
+        case .failed(.noFrontmostApplication), .failed(.noFocusedWindow):
+            showPinFeedback(
+                title: "没有可标记的窗口",
+                message: hotkeyService.activeShortcut(for: .toggleCurrentWindowPin).map { "请先点一下目标窗口，再按 \($0.displayLabel)。" } ?? "请到偏好设置启用标记快捷键，再回到目标窗口操作。",
+                systemImage: "macwindow.badge.exclamationmark",
+                accentColor: .narcWarn
+            )
+        }
+    }
+
+    @MainActor
+    private func presentAccessibilityExplanation(
+        shortcut: String,
+        capability: AccessibilityCapability = .windowTools
+    ) {
+        guard !accessibilityExplanationIsVisible else { return }
+
+        let guidance = AccessibilityPermissionGuidance(
+            shortcut: shortcut,
+            capability: capability
+        )
+        switch accessibilityPermissionFlow.responseToBlockedAction(guidance) {
+        case .openSettings:
+            scheduleAccessibilityRecoveryFeedback(guidance)
+            hotkeyService.openAccessibilitySettings()
+            return
+        case .explain:
+            break
+        }
+
+        accessibilityExplanationIsVisible = true
+
+        let alert = NSAlert()
+        alert.messageText = guidance.alertTitle
+        alert.informativeText = guidance.explanation
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "继续授权")
+        alert.addButton(withTitle: guidance.cancelButtonTitle)
+        accessibilityExplanationAlert = alert
+
+        let response = alert.runModal()
+
+        // The native AX prompt is asynchronous. Fully remove this window and
+        // return to the run loop before requesting it, otherwise both dialogs
+        // can remain visibly stacked.
+        alert.window.orderOut(nil)
+        if accessibilityExplanationAlert === alert {
+            accessibilityExplanationAlert = nil
+        }
+        accessibilityExplanationIsVisible = false
+
+        guard response == .alertFirstButtonReturn else {
+            accessibilityPermissionFlow.cancelExplanation()
+            return
+        }
+
+        accessibilityPermissionFlow.beginAuthorization(with: guidance)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if self.hotkeyService.requestAccessibilityPermission() {
+                self.handleAccessibilityPermissionGranted()
+            }
+        }
+    }
+
+    @MainActor
+    private func handleAccessibilityPermissionGranted() {
+        let wasExplaining = accessibilityPermissionFlow.isExplaining
+        guard let guidance = accessibilityPermissionFlow.takeGuidanceAfterGrant() else { return }
+
+        if wasExplaining, let alert = accessibilityExplanationAlert {
+            if NSApp.modalWindow === alert.window {
+                NSApp.abortModal()
+            }
+            alert.window.orderOut(nil)
+            accessibilityExplanationAlert = nil
+        }
+
+        scheduleAccessibilityReadyFeedback(guidance)
+    }
+
+    @MainActor
+    private func handleAccessibilityPermissionStillDenied() {
+        guard let guidance = accessibilityPermissionFlow.currentGuidance else { return }
+        scheduleAccessibilityRecoveryFeedback(guidance)
+    }
+
+    @MainActor
+    private func manageAccessibilityPermissionFromOnboarding() {
+        if hotkeyService.checkAccessibilityPermission(prompt: false) {
+            hotkeyService.openAccessibilitySettings()
+            return
+        }
+
+        let guidance = AccessibilityPermissionGuidance.general
+        switch accessibilityPermissionFlow.responseToBlockedAction(guidance) {
+        case .openSettings:
+            scheduleAccessibilityRecoveryFeedback(guidance)
+            hotkeyService.openAccessibilitySettings()
+        case .explain:
+            // The onboarding card already explains why this permission is
+            // optional, so go straight to the single native prompt.
+            accessibilityPermissionFlow.beginAuthorization(with: guidance)
+            if hotkeyService.requestAccessibilityPermission() {
+                handleAccessibilityPermissionGranted()
+            }
+        }
+    }
+
+    @MainActor
+    private func scheduleAccessibilityReadyFeedback(_ guidance: AccessibilityPermissionGuidance) {
+        scheduleAccessibilityFeedback(
+            title: guidance.capability == .windowTools ? "窗口权限已开启" : "辅助功能权限已开启",
+            message: guidance.ready,
+            systemImage: "checkmark.circle.fill",
+            accentColor: .narcSuccess,
+            panelSize: NSSize(width: 430, height: 104),
+            duration: 7
+        )
+    }
+
+    @MainActor
+    private func scheduleAccessibilityRecoveryFeedback(_ guidance: AccessibilityPermissionGuidance) {
+        scheduleAccessibilityFeedback(
+            title: guidance.capability == .windowTools
+                ? "NARC 仍未获得窗口权限"
+                : "NARC 仍未获得辅助功能权限",
+            message: guidance.recovery,
+            systemImage: "exclamationmark.triangle.fill",
+            accentColor: .narcWarn,
+            panelSize: NSSize(width: 520, height: 142),
+            duration: 14
+        )
+    }
+
+    @MainActor
+    private func scheduleAccessibilityFeedback(
+        title: String,
+        message: String,
+        systemImage: String,
+        accentColor: Color,
+        panelSize: NSSize,
+        duration: TimeInterval
+    ) {
+        dismissAccessibilityReadyFeedback()
+
+        let showWorkItem = DispatchWorkItem { [weak self] in
+            self?.presentAccessibilityFeedback(
+                title: title,
+                message: message,
+                systemImage: systemImage,
+                accentColor: accentColor,
+                panelSize: panelSize,
+                duration: duration
+            )
+        }
+        accessibilityReadyShowWorkItem = showWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: showWorkItem)
+    }
+
+    @MainActor
+    private func presentAccessibilityFeedback(
+        title: String,
+        message: String,
+        systemImage: String,
+        accentColor: Color,
+        panelSize: NSSize,
+        duration: TimeInterval
+    ) {
+        accessibilityReadyShowWorkItem = nil
+
+        let panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: panelSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.ignoresMouseEvents = true
+        panel.isReleasedWhenClosed = false
+        panel.contentView = NSHostingView(
+            rootView: AccessibilityReadyToastView(
+                title: title,
+                message: message,
+                systemImage: systemImage,
+                accentColor: accentColor,
+                size: panelSize
+            )
+        )
+
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        if let visibleFrame = screen?.visibleFrame {
+            panel.setFrameOrigin(NSPoint(
+                x: visibleFrame.maxX - panelSize.width - 24,
+                y: visibleFrame.maxY - panelSize.height - 24
+            ))
+        } else {
+            panel.center()
+        }
+
+        accessibilityReadyPanel = panel
+        panel.orderFrontRegardless()
+
+        let hideWorkItem = DispatchWorkItem { [weak self] in
+            self?.dismissAccessibilityReadyFeedback()
+        }
+        accessibilityReadyHideWorkItem = hideWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: hideWorkItem)
+    }
+
+    @MainActor
+    private func consumeAccessibilityGuidanceForSuccessfulAction() {
+        accessibilityPermissionFlow.consumeForSuccessfulWindowAction()
+        dismissAccessibilityReadyFeedback()
+    }
+
+    @MainActor
+    private func dismissAccessibilityReadyFeedback() {
+        accessibilityReadyShowWorkItem?.cancel()
+        accessibilityReadyShowWorkItem = nil
+        accessibilityReadyHideWorkItem?.cancel()
+        accessibilityReadyHideWorkItem = nil
+        accessibilityReadyPanel?.orderOut(nil)
+        accessibilityReadyPanel = nil
+    }
+
     private var preferencesWindow: PreferencesWindow?
+    private var shortcutEditorWindow: PreferencesWindow?
+
+    /// Reuse a standard window so the narrow panel's keyboard monitors cannot
+    /// intercept editor input. Configuration never moves an external window.
+    @MainActor
+    private func openShortcutEditor(for action: ConfigurableHotkeyAction) {
+        postponeTodoNudge(for: TodoNudgePolicy.todoChangeSilence)
+        hidePanel()
+        hidePinnedWindowSwitcher()
+        shortcutEditorWindow?.close()
+
+        let window = PreferencesWindow()
+        window.title = "\(action.title) — 快捷键"
+        window.contentView = NSHostingView(
+            rootView: ConfigurableShortcutEditor(
+                hotkeyService: hotkeyService,
+                action: action,
+                onClose: { [weak window] in window?.close() }
+            )
+        )
+        window.setContentSize(NSSize(width: 500, height: 400))
+        window.minSize = window.frame.size
+        let mouse = NSEvent.mouseLocation
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main {
+            let visible = screen.visibleFrame
+            window.setFrameOrigin(NSPoint(
+                x: visible.midX - window.frame.width / 2,
+                y: visible.midY - window.frame.height / 2
+            ))
+        }
+        shortcutEditorWindow = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     @objc private func handleResetWidgetPosition() {
         UserDefaults.standard.removeObject(forKey: "widgetOrigin")
         guard let window = floatingWindow else { return }
         let mouseLocation = NSEvent.mouseLocation
         let activeScreen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main
-        let screenFrame = activeScreen?.visibleFrame ?? .zero
-        let widgetSide = FloatingWidgetWindow.widgetSize
-        let widgetInset = (FloatingWidgetWindow.canvasSize - widgetSide) / 2
-        let widgetX = screenFrame.maxX - widgetSide - 40 - widgetInset
-        let widgetY = screenFrame.minY + 100 - widgetInset
-        window.setFrameOrigin(NSPoint(x: widgetX, y: widgetY))
+        guard let screenFrame = activeScreen?.visibleFrame else { return }
+        let frame = FloatingWidgetPlacement.defaultFrame(
+            in: screenFrame,
+            windowSize: window.frame.size,
+            visibleSize: window.visibleSize
+        )
+        window.setFrameOrigin(frame.origin)
+        window.orderFrontRegardless()
     }
 
-    @objc private func openPreferences() {
+    @objc func openPreferences() {
+        postponeTodoNudge(for: TodoNudgePolicy.todoChangeSilence)
+
         if let window = preferencesWindow, window.isVisible {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -1451,7 +2674,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let window = PreferencesWindow()
-        window.contentView = NSHostingView(rootView: PreferencesView(appMonitor: appMonitor))
+        window.contentView = NSHostingView(
+            rootView: PreferencesView(
+                appMonitor: appMonitor,
+                hotkeyService: hotkeyService,
+                reminderSettings: reminderSettings,
+                codexCompletionService: codexCompletionPresenter.service,
+                onPreviewReminder: { [weak self] in
+                    guard let self else { return }
+                    self.preferencesWindow?.orderOut(nil)
+                    self.hidePanel()
+                    self.dismissTodoNudge()
+                    self.presentTodoNudge(self.assistantStore.availableTodos().first,
+                                          now: Date(), ledger: self.loadTodoNudgeLedger(), isPreview: true)
+                }
+            )
+        )
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.preferencesWindow = window
@@ -1471,7 +2709,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 extension AppDelegate: UNUserNotificationCenterDelegate {
 
     /// Allow banners to appear even while NARC is in the foreground.
-    func userNotificationCenter(
+    nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
@@ -1480,7 +2718,7 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
     }
 
     /// User clicked the banner — extract carried tty/cwd/project and jump.
-    func userNotificationCenter(
+    nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
@@ -1489,7 +2727,9 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
         let tty = userInfo["narc.tty"] as? String
         let cwd = userInfo["narc.cwd"] as? String
         let projectName = userInfo["narc.project"] as? String
-        TerminalJumper.jump(tty: tty, cwd: cwd, projectName: projectName)
+        DispatchQueue.main.async {
+            TerminalJumper.jump(tty: tty, cwd: cwd, projectName: projectName)
+        }
         completionHandler()
     }
 }

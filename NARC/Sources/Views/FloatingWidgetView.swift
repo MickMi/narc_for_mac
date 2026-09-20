@@ -6,7 +6,47 @@ import SwiftUI
 enum FloatingWidgetState: Equatable {
     case idle
     case hasNotification(count: Int)
+    case badgeUnavailable(lastKnownCount: Int)
     case dragging
+
+    static func resolve(
+        badgeCount: Int,
+        isBadgeStatusUncertain: Bool,
+        isDragging: Bool
+    ) -> FloatingWidgetState {
+        if isDragging { return .dragging }
+        if isBadgeStatusUncertain {
+            return .badgeUnavailable(lastKnownCount: badgeCount)
+        }
+        if badgeCount > 0 {
+            return .hasNotification(count: badgeCount)
+        }
+        return .idle
+    }
+
+    var badgePresentation: BadgePresentation {
+        switch self {
+        case .hasNotification(let count):
+            return .resolve(count: count, isUncertain: false)
+        case .badgeUnavailable(let count):
+            return .resolve(count: count, isUncertain: true)
+        case .idle, .dragging:
+            return .resolve(count: 0, isUncertain: false)
+        }
+    }
+
+    func showsTodoCue(availableTodoCount: Int) -> Bool {
+        availableTodoCount > 0 && self != .dragging
+    }
+}
+
+struct TodoCuePresentation: Equatable {
+    let text: String?
+
+    static func resolve(count: Int) -> TodoCuePresentation {
+        guard count > 0 else { return TodoCuePresentation(text: nil) }
+        return TodoCuePresentation(text: count > 99 ? "99+" : "\(count)")
+    }
 }
 
 // MARK: - 2. Drag state
@@ -20,26 +60,25 @@ final class WidgetDragState: ObservableObject {
 // MARK: - 3. Container — projects app data sources onto FloatingWidgetState
 
 /// Wraps the spec-compliant `FloatingWidgetView` and computes its state from
-/// the project's data sources (monitored app badge counts + drag).
+/// the project's data sources (monitored app badge counts, available Todo, and drag).
 struct FloatingWidgetContainer: View {
     @ObservedObject var appMonitor: AppMonitorService
+    @ObservedObject var assistantStore: AssistantStore
     @ObservedObject var dragState: WidgetDragState
     @AppStorage("widgetSize") private var widgetSize = "Medium"
 
     var body: some View {
-        FloatingWidgetView(
-            state: computedState,
-            widgetSize: widgetSize
-        )
-    }
-
-    private var computedState: FloatingWidgetState {
-        if dragState.isDragging { return .dragging }
-        let badgeCount = appMonitor.totalBadgeCount
-        if badgeCount > 0 {
-            return .hasNotification(count: badgeCount)
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            FloatingWidgetView(
+                state: FloatingWidgetState.resolve(
+                    badgeCount: appMonitor.totalBadgeCount,
+                    isBadgeStatusUncertain: appMonitor.isBadgeStatusUncertain,
+                    isDragging: dragState.isDragging
+                ),
+                availableTodoCount: assistantStore.availableTodos(now: context.date).count,
+                widgetSize: widgetSize
+            )
         }
-        return .idle
     }
 }
 
@@ -63,6 +102,7 @@ private func widgetVisibleSize(for preset: String) -> CGFloat {
 
 struct FloatingWidgetView: View {
     let state: FloatingWidgetState
+    var availableTodoCount = 0
     var widgetSize: String = "Medium"
 
     private var visibleSize: CGFloat { widgetVisibleSize(for: widgetSize) }
@@ -93,14 +133,23 @@ struct FloatingWidgetView: View {
                             lineWidth: 1
                         )
                 }
+                .overlay(alignment: .bottomLeading) {
+                    if state.showsTodoCue(availableTodoCount: availableTodoCount) {
+                        TodoAvailabilityCue(count: availableTodoCount)
+                            .offset(x: -6, y: 6)
+                    }
+                }
                 .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
                 .shadow(color: .black.opacity(0.12), radius: 32, y: 12)
 
             // Badge — sibling of the Circle, NOT inside its overlay, so the
             // capsule overflows the 48pt circle's top-right corner. Per design
             // ref, badge sits mostly OUTSIDE the circle (~70% out).
-            if case .hasNotification(let count) = state {
-                FloatingBadgeView(count: count)
+            if let text = state.badgePresentation.text {
+                FloatingBadgeView(
+                    text: text,
+                    isUncertain: state.badgePresentation.isUncertain
+                )
                     .offset(x: 6, y: -6)
                     .transition(
                         .scale(scale: 0)
@@ -115,7 +164,40 @@ struct FloatingWidgetView: View {
     }
 }
 
-// MARK: - 5. Halo Inner (bloom + ripple + mark)
+// MARK: - 5. Todo availability cue
+
+/// A blue, count-bearing second status axis for actionable Todo. Application
+/// unread keeps exclusive ownership of the red badge in the opposite corner.
+private struct TodoAvailabilityCue: View {
+    let count: Int
+
+    var body: some View {
+        let presentation = TodoCuePresentation.resolve(count: count)
+
+        HStack(spacing: 3) {
+            Image(systemName: "checklist")
+                .font(.system(size: 8, weight: .bold))
+
+            if let text = presentation.text {
+                Text(text)
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+            }
+        }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 5)
+            .frame(height: 19)
+            .background(Capsule().fill(Color.narcInfo))
+            .overlay {
+                Capsule()
+                    .strokeBorder(Color(NSColor.windowBackgroundColor), lineWidth: 1.5)
+            }
+            .help("有 \(count) 项可处理 Todo")
+            .accessibilityLabel("有 \(count) 项可处理 Todo")
+    }
+}
+
+// MARK: - 6. Halo Inner (bloom + ripple + mark)
 
 private struct HaloInnerView: View {
     let state: FloatingWidgetState
@@ -141,7 +223,7 @@ private struct HaloInnerView: View {
     }
 }
 
-// MARK: - 6. Bloom (center radial glow with opacity breathing)
+// MARK: - 7. Bloom (center radial glow with opacity breathing)
 
 private struct BloomView: View {
     let reduceMotion: Bool
@@ -176,7 +258,7 @@ private struct BloomView: View {
     }
 }
 
-// MARK: - 7. Ripple (slow sonar pulse)
+// MARK: - 8. Ripple (slow sonar pulse)
 
 private struct RippleView: View {
     let delay: Double
@@ -203,7 +285,7 @@ private struct RippleView: View {
     }
 }
 
-// MARK: - 8. Brand mark (N with subtle opacity breathing)
+// MARK: - 9. Brand mark (N with subtle opacity breathing)
 
 private struct FloatingMarkView: View {
     let reduceMotion: Bool
@@ -234,13 +316,14 @@ private struct FloatingMarkView: View {
     }
 }
 
-// MARK: - 9. Badge (per spec §6)
+// MARK: - 10. Badge (per spec §6)
 
 private struct FloatingBadgeView: View {
-    let count: Int
+    let text: String
+    let isUncertain: Bool
 
     var body: some View {
-        Text(count > 99 ? "99+" : "\(count)")
+        Text(text)
             .font(.system(size: 11, weight: .semibold, design: .default))
             .tracking(-0.1)
             .monospacedDigit()
@@ -249,7 +332,13 @@ private struct FloatingBadgeView: View {
             .padding(.horizontal, 5)
             .background(
                 Capsule()
-                    .fill(Color(red: 0.86, green: 0.31, blue: 0.27))
+                    .fill(isUncertain ? Color.narcWarn : Color(red: 0.86, green: 0.31, blue: 0.27))
+            )
+            .help(isUncertain ? "未读暂不可确认，已保留上次可信结果" : "应用级未读")
+            .accessibilityLabel(
+                isUncertain
+                    ? "未读暂不可确认，最后可信结果 \(text)"
+                    : "应用级未读 \(text)"
             )
             .overlay(
                 Capsule()

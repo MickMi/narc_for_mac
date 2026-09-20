@@ -10,12 +10,12 @@
 
 | 目录/文件 | Owner | 说明 |
 |-----------|-------|------|
-| `Sources/Design/` | **Design** | 设计 Token、共享样式、动画定义 |
-| `Sources/Views/` | **Design** (结构) + **Code** (逻辑) | Design 写 UI 结构和视觉；Code 接线业务逻辑 |
-| `Sources/Services/` | **Code** | 业务逻辑、系统 API、网络层 |
-| `Sources/App/` | **Code** | AppDelegate、窗口管理、系统集成 |
-| `Sources/Utils/` | **Code** | 底层工具（AX API、坐标转换） |
-| `Sources/Models/` | **Code** | 数据模型 |
+| `NARC/Sources/Design/` | **Design** | 设计 Token、共享样式、动画定义 |
+| `NARC/Sources/Views/` | **Design** (结构) + **Code** (逻辑) | Design 写 UI 结构和视觉；Code 接线业务逻辑 |
+| `NARC/Sources/Services/` | **Code** | 业务逻辑、系统 API、网络层 |
+| `NARC/Sources/App/` | **Code** | AppDelegate、窗口管理、系统集成 |
+| `NARC/Sources/Utils/` | **Code** | 底层工具（AX API、坐标转换） |
+| `NARC/Sources/Models/` | **Code** | 数据模型 |
 | `design-handoff/` | **Design** | 交接产物（见下） |
 
 ---
@@ -63,7 +63,7 @@ Claude Code 收到 Design 分支后：
 2. 编译验证 `swift build`
 3. 接线业务逻辑（传入 Service、绑定 Model、注册窗口）
 4. 功能测试
-5. 提交到 `main`
+5. 推送功能分支并创建 PR；CI 与 review 通过后再合并到 `main`
 
 ---
 
@@ -73,13 +73,13 @@ Design AI 开始工作前，应先读以下文件获取当前上下文：
 
 ```
 必读（每次）：
-- Sources/Design/DesignTokens.swift     ← 当前 Token 系统
-- Sources/Models/Models.swift           ← 数据模型（View 要绑定的数据）
+- NARC/Sources/Design/DesignTokens.swift     ← 当前 Token 系统
+- NARC/Sources/Models/Models.swift           ← 数据模型（View 要绑定的数据）
 - README.md                             ← 功能全景
 
 按需读：
-- Sources/Views/[目标文件].swift        ← 要修改的现有 View
-- Sources/Services/[相关 Service].swift ← 理解数据从哪来
+- NARC/Sources/Views/[目标文件].swift        ← 要修改的现有 View
+- NARC/Sources/Services/[相关 Service].swift ← 理解数据从哪来
 ```
 
 ---
@@ -102,7 +102,7 @@ Design AI 开始工作前，应先读以下文件获取当前上下文：
 你正在为 NARC for Mac（SwiftUI macOS app）做 UI 设计和前端实现。
 
 项目路径：~/narc_for_mac
-设计 Token：Sources/Design/DesignTokens.swift（所有颜色/字体/间距/动画从这里引用）
+设计 Token：NARC/Sources/Design/DesignTokens.swift（所有颜色/字体/间距/动画从这里引用）
 完整设计规格：见 Open Design 项目中的 DESIGN.md（包含颜色系统、圆角阶梯、阴影层次、间距体系、组件规格、气泡通知等完整规范）
   → 路径: ~/Library/Application Support/Open Design/namespaces/release-stable/data/projects/4756a449-e37d-418b-8c2a-752d680cb835/DESIGN.md
   → 高保真 HTML 原型: narc-dashboard-soft-v5-5.html (同目录)
@@ -110,7 +110,7 @@ Design AI 开始工作前，应先读以下文件获取当前上下文：
 你的输出规则：
 1. 直接写完整的 .swift 文件（不是伪代码，不是 MD 描述）
 2. 所有颜色用 Color.narcXxx，字体用 Font.narcXxx，间距用 NarcSpacing.xxx
-3. 不要碰 Sources/Services/ 和 Sources/App/ 下的文件
+3. 不要碰 NARC/Sources/Services/ 和 NARC/Sources/App/ 下的文件
 4. 如果需要 Service 提供数据，在 View 的 init 参数中声明，注释 `// TODO: Code 侧接线`
 5. 输出到 design-handoff/views/ 目录
 6. 写 design-handoff/CURRENT.md 说明变更

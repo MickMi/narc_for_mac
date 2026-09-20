@@ -10,6 +10,40 @@ func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePoin
 /// All methods are static — this is a stateless helper, not a service.
 enum AXWindowHelper {
 
+    enum FrameReadResult {
+        case success(position: CGPoint, size: CGSize)
+        case failure(AXError)
+    }
+
+    enum NativeFullScreenStatus {
+        case enabled
+        case disabled
+        case unsupported
+        case unreadable(AXError)
+    }
+
+    struct FrameWriteReceipt {
+        let firstSize: AXError?
+        let position: AXError
+        let finalSize: AXError?
+        let firstSizeNanoseconds: UInt64
+        let positionNanoseconds: UInt64
+        let finalSizeNanoseconds: UInt64
+
+        /// AX success is only an acknowledgement. The caller must still verify
+        /// the physical frame before treating the move as complete.
+        var acceptedByAPI: Bool {
+            position == .success
+                && ((firstSize == nil && finalSize == nil) || firstSize == .success || finalSize == .success)
+        }
+    }
+
+    private static let enhancedUICompatibilityQueue = DispatchQueue(
+        label: "com.mickmi.narc.window-enhanced-ui",
+        qos: .userInitiated
+    )
+    private static let enhancedUIMessagingTimeout: Float = 0.10
+
     // MARK: - Primary Screen Height (for coordinate conversion)
 
     /// The height of the primary screen, used for NS ↔ AX coordinate conversion.
@@ -55,8 +89,97 @@ enum AXWindowHelper {
     /// Read the window's position and size together.
     /// Returns nil if either attribute cannot be read.
     static func getFrame(_ window: AXUIElement) -> (position: CGPoint, size: CGSize)? {
-        guard let pos = getPosition(window), let size = getSize(window) else { return nil }
-        return (pos, size)
+        guard case let .success(position, size) = getFrameResult(window) else { return nil }
+        return (position, size)
+    }
+
+    /// Read the frame while preserving the AX failure reason. Callers on the
+    /// hot path use this to retry only transient target-app timeouts without
+    /// masking invalid elements or permission failures.
+    static func getFrameResult(_ window: AXUIElement) -> FrameReadResult {
+        let attributes = [
+            kAXPositionAttribute as CFString,
+            kAXSizeAttribute as CFString,
+        ] as CFArray
+        var values: CFArray?
+        let multipleReadResult = AXUIElementCopyMultipleAttributeValues(
+            window,
+            attributes,
+            AXCopyMultipleAttributeOptions(rawValue: 1),
+            &values
+        )
+        guard multipleReadResult == .success else {
+            switch multipleReadResult {
+            case .notImplemented, .attributeUnsupported:
+                return getFrameIndividuallyResult(window)
+            default:
+                // A timeout or invalid element must not trigger two more blocking
+                // IPC calls. The asynchronous verifier will make the next probe.
+                return .failure(multipleReadResult)
+            }
+        }
+        guard let values,
+        CFArrayGetCount(values) == 2,
+        let positionValue = CFArrayGetValueAtIndex(values, 0),
+        let sizeValue = CFArrayGetValueAtIndex(values, 1) else {
+            return getFrameIndividuallyResult(window)
+        }
+
+        let positionAXValue = unsafeBitCast(positionValue, to: AXValue.self)
+        let sizeAXValue = unsafeBitCast(sizeValue, to: AXValue.self)
+        guard CFGetTypeID(positionAXValue) == AXValueGetTypeID(),
+              CFGetTypeID(sizeAXValue) == AXValueGetTypeID(),
+              AXValueGetType(positionAXValue) == .cgPoint,
+              AXValueGetType(sizeAXValue) == .cgSize else {
+            return getFrameIndividuallyResult(window)
+        }
+
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionAXValue, .cgPoint, &position),
+              AXValueGetValue(sizeAXValue, .cgSize, &size) else {
+            return getFrameIndividuallyResult(window)
+        }
+        return .success(position: position, size: size)
+    }
+
+    private static func getFrameIndividuallyResult(_ window: AXUIElement) -> FrameReadResult {
+        var positionRef: CFTypeRef?
+        let positionResult = AXUIElementCopyAttributeValue(
+            window,
+            kAXPositionAttribute as CFString,
+            &positionRef
+        )
+        guard positionResult == .success else { return .failure(positionResult) }
+
+        var sizeRef: CFTypeRef?
+        let sizeResult = AXUIElementCopyAttributeValue(
+            window,
+            kAXSizeAttribute as CFString,
+            &sizeRef
+        )
+        guard sizeResult == .success else { return .failure(sizeResult) }
+        guard let positionRef,
+              let sizeRef,
+              CFGetTypeID(positionRef) == AXValueGetTypeID(),
+              CFGetTypeID(sizeRef) == AXValueGetTypeID() else {
+            return .failure(.noValue)
+        }
+
+        let positionValue = positionRef as! AXValue
+        let sizeValue = sizeRef as! AXValue
+        guard AXValueGetType(positionValue) == .cgPoint,
+              AXValueGetType(sizeValue) == .cgSize else {
+            return .failure(.noValue)
+        }
+
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionValue, .cgPoint, &position),
+              AXValueGetValue(sizeValue, .cgSize, &size) else {
+            return .failure(.cannotComplete)
+        }
+        return .success(position: position, size: size)
     }
 
     /// Read the window's title.
@@ -78,11 +201,36 @@ enum AXWindowHelper {
     /// Check if the window is in macOS native fullscreen (green button fullscreen).
     /// This is different from our "fullScreen" layout which just maximizes the window
     /// within the visible frame. Native fullscreen puts the window in a separate Space.
-    static func isNativeFullScreen(_ window: AXUIElement) -> Bool {
+    static func nativeFullScreenStatus(_ window: AXUIElement) -> NativeFullScreenStatus {
         var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(window, "AXFullScreen" as CFString, &ref) == .success,
-              let value = ref as? Bool else { return false }
-        return value
+        let result = AXUIElementCopyAttributeValue(window, "AXFullScreen" as CFString, &ref)
+        guard result == .success else {
+            switch result {
+            case .attributeUnsupported, .noValue, .notImplemented:
+                return .unsupported
+            default:
+                return .unreadable(result)
+            }
+        }
+        guard let value = ref as? Bool else { return .unreadable(.cannotComplete) }
+        return value ? .enabled : .disabled
+    }
+
+    static func nativeFullScreenState(_ window: AXUIElement) -> Bool? {
+        switch nativeFullScreenStatus(window) {
+        case .enabled: return true
+        case .disabled, .unsupported: return false
+        case .unreadable: return nil
+        }
+    }
+
+    static func isNativeFullScreen(_ window: AXUIElement) -> Bool {
+        nativeFullScreenState(window) == true
+    }
+
+    @discardableResult
+    static func requestNativeFullScreenExit(_ window: AXUIElement) -> AXError {
+        AXUIElementSetAttributeValue(window, "AXFullScreen" as CFString, false as CFTypeRef)
     }
 
     /// Exit macOS native fullscreen mode for a window.
@@ -90,9 +238,11 @@ enum AXWindowHelper {
     @discardableResult
     static func exitNativeFullScreen(_ window: AXUIElement) -> Bool {
         guard isNativeFullScreen(window) else { return false }
-        AXUIElementSetAttributeValue(window, "AXFullScreen" as CFString, false as CFTypeRef)
-        print("[NARC] 🔲 Exited native fullscreen")
-        return true
+        let result = requestNativeFullScreenExit(window)
+        if result == .success {
+            print("[NARC] 🔲 Exited native fullscreen")
+        }
+        return result == .success
     }
 
     // MARK: - Write Window Attributes
@@ -113,58 +263,270 @@ enum AXWindowHelper {
         return AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value)
     }
 
-    /// Set the window's size and position — Magnet/Rectangle-equivalent implementation.
+    /// Apply the first frame write inside the existing Enhanced UI protection.
     ///
-    /// Key techniques from Rectangle (open-source Magnet alternative):
-    /// 1. Disable AXEnhancedUserInterface before resize (some apps like WeChat block
-    ///    AX resize when this is enabled)
-    /// 2. Set size first, then position, then size again (handles cross-display moves)
-    /// 3. Re-enable enhanced UI after
-    static func setFrame(_ window: AXUIElement, position: CGPoint, size: CGSize, on targetScreen: NSScreen? = nil) {
-        let tolerance: CGFloat = 8.0
+    /// Known same-display moves omit unchanged/repeated size writes. Cross-display
+    /// moves and unknown source frames retain Size → Position → Size. Every path
+    /// still requires physical-frame verification and a bounded compatibility retry.
+    ///
+    /// The experiment changes only the placement of the existing protection:
+    /// enabled Enhanced UI gets its existing 20ms settle before any frame write,
+    /// then its previous state is restored. Verification/retry timing and the
+    /// synchronous pin/summon path remain unchanged; AX IPC can still block.
+    @discardableResult
+    static func setFrameFast(
+        _ window: AXUIElement,
+        position: CGPoint,
+        size: CGSize,
+        on _: NSScreen? = nil,
+        currentFrame: WindowMoveFrame? = nil,
+        sameDisplay: Bool = false
+    ) -> FrameWriteReceipt {
+        let plan = WindowFrameWritePlan.initial(current: currentFrame, targetSize: size, sameDisplay: sameDisplay)
+        return withTemporarilyDisabledEnhancedUI(window, settleDelayMicroseconds: 20_000) {
+            setFrameValues(window, position: position, size: size, plan: plan)
+        }
+    }
 
-        // Get the application element for enhanced UI handling
-        var pid: pid_t = 0
-        AXUIElementGetPid(window, &pid)
-        let appElement = AXUIElementCreateApplication(pid)
+    /// Retry once with the compatibility timing required by apps such as WeChat.
+    /// All waits and recovery happen on a dedicated queue, never the main thread.
+    static func setFrameCompatibilityAsync(
+        _ window: AXUIElement,
+        position: CGPoint,
+        size: CGSize,
+        shouldContinue: @escaping () -> Bool,
+        completion: @escaping (FrameWriteReceipt?) -> Void
+    ) {
+        enhancedUICompatibilityQueue.async {
+            guard shouldContinue() else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
 
-        // Step 1: Disable AXEnhancedUserInterface if enabled (critical for WeChat, etc.)
-        var enhancedUIWasEnabled = false
-        var enhancedUIRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, &enhancedUIRef) == .success,
-           let enabled = enhancedUIRef as? Bool, enabled {
-            enhancedUIWasEnabled = true
-            AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, false as CFTypeRef)
-            usleep(20_000)  // 20ms for the change to take effect
+            var pid: pid_t = 0
+            let hasProcess = AXUIElementGetPid(window, &pid) == .success && pid != 0
+            let appElement = hasProcess ? AXUIElementCreateApplication(pid) : nil
+            var shouldRestoreEnhancedUI = false
+
+            if let appElement {
+                AXUIElementSetMessagingTimeout(appElement, enhancedUIMessagingTimeout)
+                var enhancedUIRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(
+                    appElement,
+                    "AXEnhancedUserInterface" as CFString,
+                    &enhancedUIRef
+                ) == .success,
+                let enabled = enhancedUIRef as? Bool,
+                enabled {
+                    shouldRestoreEnhancedUI = true
+                    let disableResult = AXUIElementSetAttributeValue(
+                        appElement,
+                        "AXEnhancedUserInterface" as CFString,
+                        false as CFTypeRef
+                    )
+                    if disableResult == .success || disableResult == .cannotComplete {
+                        usleep(20_000)
+                    }
+                }
+            }
+
+            guard shouldContinue() else {
+                if shouldRestoreEnhancedUI, let appElement {
+                    restoreEnhancedUI(
+                        appElement: appElement,
+                        processID: pid,
+                        attempt: 0
+                    )
+                }
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+
+            let receipt = setFrameValuesIfCurrent(
+                window,
+                position: position,
+                size: size,
+                shouldContinue: shouldContinue
+            )
+            if receipt != nil {
+                usleep(50_000)
+            }
+            if shouldRestoreEnhancedUI, let appElement {
+                restoreEnhancedUI(
+                    appElement: appElement,
+                    processID: pid,
+                    attempt: 0
+                )
+            }
+            DispatchQueue.main.async { completion(receipt) }
+        }
+    }
+
+    private static func restoreEnhancedUI(
+        appElement: AXUIElement,
+        processID: pid_t,
+        attempt: Int
+    ) {
+        let result = AXUIElementSetAttributeValue(
+            appElement,
+            "AXEnhancedUserInterface" as CFString,
+            true as CFTypeRef
+        )
+        guard result == .cannotComplete,
+              NSRunningApplication(processIdentifier: processID) != nil else {
+            return
         }
 
-        // Step 2: Size → Position → Size (Rectangle's proven pattern, no intermediate moves)
-        setSize(window, size)
-        setPosition(window, position)
-        setSize(window, size)
-        usleep(50_000)  // 50ms for app to process
+        let exponent = min(attempt, 6)
+        let delay = min(0.025 * pow(2, Double(exponent)), 1.0)
+        enhancedUICompatibilityQueue.asyncAfter(deadline: .now() + delay) {
+            restoreEnhancedUI(
+                appElement: appElement,
+                processID: processID,
+                attempt: attempt + 1
+            )
+        }
+    }
 
-        // Step 3: Verify and retry if needed
-        if let s = getSize(window), !(abs(s.width - size.width) <= tolerance && abs(s.height - size.height) <= tolerance) {
+    private static func setFrameValues(
+        _ window: AXUIElement,
+        position: CGPoint,
+        size: CGSize,
+        plan: WindowFrameWritePlan
+    ) -> FrameWriteReceipt {
+        executeFrameWrite(plan, writeSize: { setSize(window, size) }, writePosition: { setPosition(window, position) })
+    }
+
+    /// Injectable operations let tests count actual writes without controlling
+    /// any user window. nil receipts mean skipped, never fabricated AX success.
+    static func executeFrameWrite(
+        _ plan: WindowFrameWritePlan,
+        writeSize: () -> AXError,
+        writePosition: () -> AXError
+    ) -> FrameWriteReceipt {
+        let firstSizeStartedAt = DispatchTime.now().uptimeNanoseconds
+        let firstSize = plan == .positionOnly ? nil : writeSize()
+        let firstSizeFinishedAt = DispatchTime.now().uptimeNanoseconds
+        let position = writePosition()
+        let positionFinishedAt = DispatchTime.now().uptimeNanoseconds
+        let finalSize = plan == .sizePositionSize ? writeSize() : nil
+        let finalSizeFinishedAt = DispatchTime.now().uptimeNanoseconds
+        return FrameWriteReceipt(
+            firstSize: firstSize,
+            position: position,
+            finalSize: finalSize,
+            firstSizeNanoseconds: firstSizeFinishedAt - firstSizeStartedAt,
+            positionNanoseconds: positionFinishedAt - firstSizeFinishedAt,
+            finalSizeNanoseconds: finalSizeFinishedAt - positionFinishedAt
+        )
+    }
+
+    /// The compatibility write can be superseded by a newer hotkey press while
+    /// it is waiting on the target app. Recheck the generation between every AX
+    /// mutation so a stale retry stops at the earliest safe boundary.
+    private static func setFrameValuesIfCurrent(
+        _ window: AXUIElement,
+        position: CGPoint,
+        size: CGSize,
+        shouldContinue: () -> Bool
+    ) -> FrameWriteReceipt? {
+        guard shouldContinue() else { return nil }
+        let firstSizeStartedAt = DispatchTime.now().uptimeNanoseconds
+        let firstSize = setSize(window, size)
+        let firstSizeFinishedAt = DispatchTime.now().uptimeNanoseconds
+        guard shouldContinue() else { return nil }
+        let position = setPosition(window, position)
+        let positionFinishedAt = DispatchTime.now().uptimeNanoseconds
+        guard shouldContinue() else { return nil }
+        let finalSize = setSize(window, size)
+        let finalSizeFinishedAt = DispatchTime.now().uptimeNanoseconds
+        return FrameWriteReceipt(
+            firstSize: firstSize,
+            position: position,
+            finalSize: finalSize,
+            firstSizeNanoseconds: firstSizeFinishedAt - firstSizeStartedAt,
+            positionNanoseconds: positionFinishedAt - firstSizeFinishedAt,
+            finalSizeNanoseconds: finalSizeFinishedAt - positionFinishedAt
+        )
+    }
+
+    /// Compatibility-preserving synchronous path used by summon/pin flows that
+    /// have not yet adopted WindowManagerService's asynchronous verifier.
+    static func setFrame(
+        _ window: AXUIElement,
+        position: CGPoint,
+        size: CGSize,
+        on _: NSScreen? = nil
+    ) {
+        let tolerance: CGFloat = 8
+
+        withTemporarilyDisabledEnhancedUI(window, settleDelayMicroseconds: 20_000) {
             setSize(window, size)
             setPosition(window, position)
-            usleep(100_000)  // 100ms
+            setSize(window, size)
+            usleep(50_000)
 
-            if let s2 = getSize(window), !(abs(s2.width - size.width) <= tolerance && abs(s2.height - size.height) <= tolerance) {
-                setSize(window, size)
-                setPosition(window, position)
-                usleep(150_000)  // 150ms
+            guard let firstRead = getSize(window), !sizeIsClose(firstRead, size, tolerance: tolerance) else {
+                return
+            }
 
-                let finalSize = getSize(window)
-                print("[NARC] 📏 setFrame: final \(Int(finalSize?.width ?? -1))x\(Int(finalSize?.height ?? -1)) "
-                      + "(wanted \(Int(size.width))x\(Int(size.height)))")
+            setSize(window, size)
+            setPosition(window, position)
+            usleep(100_000)
+            guard let secondRead = getSize(window), !sizeIsClose(secondRead, size, tolerance: tolerance) else {
+                return
+            }
+
+            setSize(window, size)
+            setPosition(window, position)
+            usleep(150_000)
+        }
+    }
+
+    private static func withTemporarilyDisabledEnhancedUI<T>(
+        _ window: AXUIElement,
+        settleDelayMicroseconds: useconds_t,
+        operation: () -> T
+    ) -> T {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(window, &pid) == .success, pid != 0 else {
+            return operation()
+        }
+
+        let appElement = AXUIElementCreateApplication(pid)
+        var enhancedUIRef: CFTypeRef?
+        let enhancedUIWasEnabled = AXUIElementCopyAttributeValue(
+            appElement,
+            "AXEnhancedUserInterface" as CFString,
+            &enhancedUIRef
+        ) == .success && (enhancedUIRef as? Bool) == true
+
+        if enhancedUIWasEnabled {
+            let disableResult = AXUIElementSetAttributeValue(
+                appElement,
+                "AXEnhancedUserInterface" as CFString,
+                false as CFTypeRef
+            )
+            if (disableResult == .success || disableResult == .cannotComplete),
+               settleDelayMicroseconds > 0 {
+                usleep(settleDelayMicroseconds)
             }
         }
-
-        // Step 4: Re-enable AXEnhancedUserInterface if it was originally on
-        if enhancedUIWasEnabled {
-            AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, true as CFTypeRef)
+        defer {
+            if enhancedUIWasEnabled {
+                AXUIElementSetAttributeValue(
+                    appElement,
+                    "AXEnhancedUserInterface" as CFString,
+                    true as CFTypeRef
+                )
+            }
         }
+        return operation()
+    }
+
+    private static func sizeIsClose(_ observed: CGSize, _ expected: CGSize, tolerance: CGFloat) -> Bool {
+        abs(observed.width - expected.width) <= tolerance
+            && abs(observed.height - expected.height) <= tolerance
     }
 
     /// Unminimize the window.
@@ -257,9 +619,16 @@ enum AXWindowHelper {
     static func screenForWindow(_ window: AXUIElement) -> NSScreen? {
         guard let frame = getFrame(window) else { return nil }
 
+        return screenForFrame(position: frame.position, size: frame.size)
+    }
+
+    /// Determine which screen owns an already-read AX frame. This avoids two
+    /// extra accessibility IPC reads on the layout hot path.
+    static func screenForFrame(position: CGPoint, size: CGSize) -> NSScreen? {
+
         let axCenter = CGPoint(
-            x: frame.position.x + frame.size.width / 2,
-            y: frame.position.y + frame.size.height / 2
+            x: position.x + size.width / 2,
+            y: position.y + size.height / 2
         )
 
         // Primary strategy: check which screen's AX rect contains the window center
@@ -271,13 +640,15 @@ enum AXWindowHelper {
         }
 
         // Fallback: find the screen with the most overlap
-        let axWindowRect = NSRect(origin: frame.position, size: frame.size)
-        return NSScreen.screens.max(by: { a, b in
-            let rectA = screenFrameInAX(a.frame)
-            let rectB = screenFrameInAX(b.frame)
-            let areaA = rectA.intersection(axWindowRect).width * rectA.intersection(axWindowRect).height
-            let areaB = rectB.intersection(axWindowRect).width * rectB.intersection(axWindowRect).height
-            return areaA < areaB
-        })
+        let axWindowRect = NSRect(origin: position, size: size)
+        let overlaps = NSScreen.screens.map { screen -> (screen: NSScreen, area: CGFloat) in
+            let intersection = screenFrameInAX(screen.frame).intersection(axWindowRect)
+            let area = intersection.isNull ? 0 : intersection.width * intersection.height
+            return (screen, area)
+        }
+        guard let best = overlaps.max(by: { $0.area < $1.area }), best.area > 0 else {
+            return nil
+        }
+        return best.screen
     }
 }
