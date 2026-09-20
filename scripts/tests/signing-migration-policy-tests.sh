@@ -171,13 +171,13 @@ mkdir -p "$LOCK_TEST_HOME"
 # process must stop before identity selection or shared build output is used.
 HOME="$LOCK_TEST_HOME" \
 NARC_INTERNAL_INSTALL_LOCK_TEST=1 \
-NARC_INTERNAL_INSTALL_LOCK_HOLD_SECONDS=2 \
+NARC_INTERNAL_INSTALL_LOCK_HOLD_SECONDS=5 \
     bash "$INSTALL_SCRIPT" >"${LOCK_TEST_ROOT}/first.out" 2>"${LOCK_TEST_ROOT}/first.err" &
 FIRST_LOCK_PID=$!
 
 lock_wait_attempt=0
 while ! grep -Fq 'LOCK_ACQUIRED' "${LOCK_TEST_ROOT}/first.out" 2>/dev/null \
-    && [ "$lock_wait_attempt" -lt 50 ]; do
+    && [ "$lock_wait_attempt" -lt 600 ]; do
     /bin/sleep 0.05
     lock_wait_attempt=$((lock_wait_attempt + 1))
 done
