@@ -12,34 +12,47 @@
 
 ## 历史基线
 
-- 本地 Git Tag 可证明 `v1.0.0` 与 `v1.2.0`；文档将 Workspace 里程碑称为 v1.3，但当前没有对应本地 Tag，App Bundle 版本仍显示 `1.0.0`。
+- 本地 Git Tag 可证明 `v1.0.0` 与 `v1.2.0`；文档将 Workspace 里程碑称为 v1.3，但当前没有对应本地 Tag。v2 开发预览的 App Bundle 已更新为 `2.0.0 (2)`，仍没有 v2 Tag。
 - v1.4 Workspace 增强曾进入历史工作树；旧的预编译分发候选已废弃，不在本文件中伪装成已发布版本或未来路线。
 - v2.0 个人助手基础从 2026-08-20 起成为新产品主线；历史版本证据差异在发布前必须另行收口，但不阻塞本地功能验证。
 - 2026-08-20 的产品收敛复审将 Workspace 从“并列保留”修订为“入口软下线一版、底层仅供回滚”；该修订属于 v2.0 Goal 澄清，不伪装成历史发布。
 
+## v2.0.0 · 2026-09-20 · 完整源码预览发布
+
+- 用户确认将代码与简洁用户 README 一起更新，经 PR 与 CI 合并；不只发布文档，不创建二进制 Release 或正式 v2 Tag。
+- 本地验证：Swift 231 项、Python 32 项及安装/签名/构建回归通过，Release 编译和 bundle 校验通过；远端发布记录以对应 PR 为准。
+- 仍属开发预览：以下未完成的真实交互与兼容矩阵保留原状态，不因源码发布将整个 v2 标记为 released。
+
 ## v2.0.0 · 2026-08-20 · 个人助手基础
 
 - Status: in_progress
-- Branch: main（当前本地工作树；尚未形成发布分支或 Tag）
-- Goal: 用户可以通过清晰一致的 Assistant 主入口快速创建、保存和重新管理 Todo 与 Note，同时可靠感知应用未读状态；Workspace 不再占用主产品入口。
+- Branch: `feat/v2-dual-anchor-preview`（发布候选；尚未形成 v2 Tag）
+- Goal: 用户可从菜单栏或桌面悬浮 `N` 召回同一条 Inbox 捕获路径，可靠感知应用级未读并找回窗口；Workspace 不再占用产品入口。
 
 ### Requirements
 
 - [x] `assistant-001` 固定个人助手项目目标、产品边界和版本范围，明确 Assistant 为主线，外部 AI 与动态插件延后。
 - [x] `assistant-002` 建立编译期内置模块描述与 Registry，默认识别 Assistant、Notifications、Windows，拒绝重复模块 ID。
 - [x] `assistant-003` 建立版本化本地 Todo/Note 数据存储，支持原子保存、重启恢复和损坏文件保护。
-- [x] `assistant-004` 提供 Quick Capture，允许用户显式选择 Todo 或 Note，空白不能提交，失败时内容不丢失。
+- [x] `assistant-004` 提供共享 Inbox Capture；Return 保存、空白不可提交、失败保留原文，之后显式转 Todo 或 Note。
 - [x] `assistant-005` 提供 Todo 页面，支持创建、查看未完成/已完成项目并切换完成状态。
 - [x] `assistant-006` 提供 Notes 页面，支持创建、搜索和删除本地便签。
-- [x] `assistant-007` 提供 Assistant Hub，并从 Dock 重开、悬浮窗右键、Panel 与全局 Quick Capture 路径进入。
+- [x] `assistant-007` 提供 Assistant Hub，并从悬浮窗右键、Panel 与全局 Quick Capture 路径进入；默认无 Dock。
 - [ ] `assistant-008` 完成 Quick Capture、Todo、Notes、Assistant、Panel 与应用重启的真实交互验收。
-- [x] `assistant-009` 对同一 Bundle ID 的多个 LaunchServices 实例去重读取 Dock Badge，多个有效值不累加，读取失败保留最后可信值。
-- [x] `assistant-010` Dock 与悬浮圆点统一使用按可见重心居中的大写 `N`，并保留三档悬浮尺寸。
+- [x] `assistant-009` 对同一 Bundle ID 的多个 LaunchServices 实例取最大可信 Dock Badge、不累加；读取失败保留最后可信值并显示未知态。
+- [x] `assistant-010` App 图标资产与桌面悬浮圆点统一使用按可见重心居中的大写 `N`；默认不显示 Dock，并保留三档悬浮尺寸。
 - [x] `assistant-011` 从 Panel、悬浮窗右键、偏好设置、默认模块与 `⌃⌥W` 软下线 Workspace，底层实现与 SwiftTerm 保留一版用于回滚。
 - [x] `assistant-012` 提供 GitHub 源码一条命令准备：检查环境、本地构建、可恢复替换到 `~/Applications/NARC.app` 并启动，失败时给出下一条行动。
-- [x] `assistant-013` 提供首次使用指南，只讲悬浮 `N` 与 `⌃⌥Q` 两个核心动作，完成后不重复弹出并允许从右键菜单重开。
+- [x] `assistant-013` 提供版本化就地指南；第一条 Inbox 成功写盘后才完成，“稍后”不永久跳过，右键菜单可重开完整指南。
 - [x] `assistant-014` 用真实微信 4.1.11 AX 探针和 Apple 公开 API 完成重点会话可行性审查，明确书签可做、会话级未读监听当前 No-Go。
-- [x] `assistant-015` 锁定 source-only 分发：删除预编译 Release 和稳定证书入口，禁止 DMG/PKG/预编译 App ZIP/公证/自动更新路线，并用静态 checker 防回归。
+- [x] `assistant-015` 锁定 source-only 分发：删除预编译 Release 和共享发行证书入口，禁止 DMG/PKG/预编译 App ZIP/公证/自动更新路线，并用静态 checker 防回归。
+- [x] `assistant-016` 建立菜单栏 + 桌面悬浮 `N` 双入口，`⌃⌥N` 按鼠标所在屏幕召回并保持面板展开。
+- [x] `assistant-017` 移除启动期索权；划词或窗口动作首次使用时请求辅助功能，首次真实通知投递时才请求通知权限。
+- [x] `assistant-018` 跟踪 Swift Package 锁文件并增加 GitHub macOS CI，自动执行测试、`.app` 构建与签名校验、Shell 语法和 source-only 门禁。
+- [x] `assistant-019` 普通安装自动继承可验证的旧本地 signer，干净用户才创建 Local v1；以稳定 Designated Requirement 保持辅助功能授权连续，稳定身份冲突或身份异常时失败关闭，早期误迁移只允许显式可回滚恢复，CI 仍显式使用 ad-hoc。
+- [x] `assistant-020` 建立不依赖 AI 的 Todo 注意力闭环：`⌘Return` 直接创建、悬浮球匿名提示、面板单任务卡、完成、一小时延期和只读“下一项”；自动测试、隔离数据真实 `.app` 点击与重启往返均已通过。
+- [x] `assistant-021` 修复窗口布局与跨屏热路径：普通 App 不再支付固定等待，微信类兼容回退不阻塞主线程；只有真实 frame 回读通过才记录布局，受约束窗口按实际尺寸贴边，快速连按不会被旧验证覆盖。
+- [ ] `assistant-022` 用户在其他 App 主动选中文字后，可用偏好设置中可配置的专用快捷键创建本地 Todo；标准 AX 读取不碰剪贴板，长文先确认，成功可按精确 UUID 撤销，并以 App × 具体界面兼容矩阵记录真实边界。
 
 ### Excluded
 
@@ -48,8 +61,8 @@
 - 团队协作、云同步、富文本数据库和复杂项目管理。
 - 动态插件安装、第三方 Swift Bundle、脚本市场和插件权限系统。
 - Workspace 新功能、公开入口和进一步视觉打磨；本版本只保留不可见回滚层。
-- 微信/企微消息正文、会话级未读监听、默认 OCR、私有数据库读取、进程注入或 Hook。
-- DMG、PKG、预编译 App ZIP、GitHub Release 安装包、Developer ID、公证、稳定自签名证书和自动更新框架。
+- 微信/企微的自动正文监听与会话级未读、默认 OCR、私有数据库读取、进程注入或 Hook；用户显式按划词快捷键时，NARC 从触发时锁定的焦点控件发起一次标准选区读取，属于 `assistant-022` 的最小例外。
+- DMG、PKG、预编译 App ZIP、GitHub Release 安装包、Developer ID、公证、可跨机器共享的稳定签名材料和自动更新框架；仅当前用户钥匙串内的本地身份不属于分发产物。
 
 ## v2.1.0 · AI 编排
 
@@ -91,9 +104,13 @@
 - [ ] `plugin-302` 建立权限审批、数据边界、代码签名和运行隔离。
 - [ ] `plugin-303` 建立安装、升级、禁用、卸载和故障恢复闭环。
 
+### 已从 Backlog 纳入当前版本
+
+- `assistant-backlog-002` 统一 Inbox：于 2026-09-07 纳入 v2.0，并由 `assistant-004` 跟踪。
+- `assistant-backlog-005` 划词创建 Todo：于 2026-09-11 由用户明确纳入 v2.0，并由 `assistant-022` 跟踪。
+
 ## Backlog
 
 - `assistant-backlog-001` AI Activity：将外部 Claude/Codex 会话状态、最近文件和跳转动作整理为个人助手模块，不依赖已软下线的 Workspace 入口。
-- `assistant-backlog-002` 统一 Inbox：当 v2.0 的显式 Todo/Note 使用数据证明需要时，再评估“先收件、后分类”的单入口模型。
-- `assistant-backlog-003` 提醒与周期任务：依赖 Todo 数据稳定和系统通知权限体验验证后立项。
+- `assistant-backlog-003` 系统提醒与周期任务：v2.0 只包含 NARC 内的一小时延期，不含系统通知、截止日期或重复规则；更完整提醒需在 Todo 数据与通知权限体验稳定后另行立项。
 - `assistant-backlog-004` 微信重点会话书签：用户显式维护名称/备注，复用微信应用级 Badge 与现有窗口找回；会话级状态固定显示“不可见”，经用户确认后可按 5–8 个工程日立项。

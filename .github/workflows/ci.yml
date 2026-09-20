@@ -1,0 +1,75 @@
+name: Source verification
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-build:
+    runs-on: macos-14
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with Swift 5.10 for older source installations
+        run: |
+          swift --version
+          swift build -c release
+
+  verify:
+    runs-on: macos-14
+    timeout-minutes: 20
+    env:
+      # Swift Testing requires Swift 6; keep the app build checked above on 5.10.
+      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test signing migration policy
+        run: |
+          bash scripts/tests/signing-migration-policy-tests.sh
+          bash scripts/tests/install-transaction-tests.sh
+      - name: Show Swift version
+        run: swift --version
+      - name: Run tests
+        # AppKit/Carbon tests share process-global framework state.
+        run: swift test --no-parallel
+      - name: Collect test crash diagnostics
+        if: failure()
+        run: |
+          for report in "$HOME"/Library/Logs/DiagnosticReports/NARCPackageTests*; do
+            [ -f "$report" ] || continue
+            cat "$report"
+          done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Test reply reminders and UI structure
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/tests/codex-hook-tests.py
+          bash scripts/tests/pinned-window-row-structure-tests.sh
+          bash scripts/tests/build-app-output-tests.sh
+      - name: Build and validate local app bundle
+        run: |
+          NARC_SIGNING_MODE=adhoc bash scripts/build-app.sh release
+          plutil -lint build/NARC.app/Contents/Info.plist
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' build/NARC.app/Contents/Info.plist)" = "true"
+          codesign --verify --deep --strict build/NARC.app
+          codesign --display --verbose=4 build/NARC.app 2>&1 | grep -F 'Signature=adhoc'
+      - name: Enforce source-only distribution
+        run: bash scripts/verify-source-only-distribution.sh
+      - name: Check shell scripts
+        run: |
+          bash -n scripts/build-app.sh
+          bash -n scripts/ensure-local-signing-identity.sh
+          bash -n scripts/install.sh
+          bash -n scripts/lib/install-transaction.sh
+          bash -n scripts/tests/install-transaction-tests.sh
+          bash -n scripts/tests/signing-migration-policy-tests.sh
+          bash -n scripts/dev-run-no-ax.sh
+          bash -n scripts/verify-source-only-distribution.sh

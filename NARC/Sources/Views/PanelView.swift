@@ -1,33 +1,44 @@
 import SwiftUI
 
 /// The main panel that expands from the floating widget.
-/// Contains two tabs: Notifications and Window Management.
-///
-/// **Scope note**: this panel only surfaces NARC's "ambient awareness" data —
-/// IM badges and pinned windows.
+/// Starts with the shared Inbox capture flow, with Notifications and Window
+/// Management as secondary tabs.
 struct PanelView: View {
     @ObservedObject var appMonitor: AppMonitorService
     @ObservedObject var windowManager: WindowManagerService
     @ObservedObject var pinnedWindowService: PinnedWindowService
+    @ObservedObject var hotkeyService: HotkeyService
+    @ObservedObject var assistantStore: AssistantStore
+    @ObservedObject var inboxCaptureState: InboxCaptureState
     var onClose: () -> Void
     var onOpenPreferences: () -> Void
+    var onEditShortcut: (ConfigurableHotkeyAction) -> Void = { _ in }
     var onOpenAssistant: () -> Void = {}
-    var onOpenQuickCapture: () -> Void = {}
-    /// The screen where NARC's floating widget is located.
-    var narcScreen: NSScreen?
+    /// Resolves the floating widget's current screen at action time.
+    var narcScreenProvider: () -> NSScreen?
     /// Keyboard selection state for ↑↓ navigation.
     @ObservedObject var keyboardSelection: KeyboardSelectionState
 
-    @State private var selectedTab: PanelTab = .notifications
+    @State private var selectedTab: PanelTab = .inbox
 
     enum PanelTab: String, CaseIterable {
+        case inbox = "Inbox"
         case notifications = "Notifications"
         case windows = "Windows"
 
         var icon: String {
             switch self {
+            case .inbox: return "tray.fill"
             case .notifications: return "bell.fill"
             case .windows: return "macwindow"
+            }
+        }
+
+        var keyboardRoute: PanelKeyboardRoute {
+            switch self {
+            case .inbox: return .inbox
+            case .notifications: return .notifications
+            case .windows: return .windows
             }
         }
     }
@@ -43,16 +54,31 @@ struct PanelView: View {
             // Content
             Group {
                 switch selectedTab {
+                case .inbox:
+                    ScrollView {
+                        QuickCaptureView(
+                            store: assistantStore,
+                            captureState: inboxCaptureState,
+                            compact: true,
+                            onDismiss: onClose,
+                            onOpenAssistant: onOpenAssistant
+                        )
+                    }
                 case .notifications:
                     NotificationListView(
                         appMonitor: appMonitor,
                         pinnedWindowService: pinnedWindowService,
+                        hotkeyService: hotkeyService,
                         onClose: onClose,
-                        narcScreen: narcScreen,
+                        narcScreenProvider: narcScreenProvider,
                         keyboardSelection: keyboardSelection
                     )
                 case .windows:
-                    WindowGridView(windowManager: windowManager)
+                    WindowGridView(
+                        windowManager: windowManager,
+                        hotkeyService: hotkeyService,
+                        onEditShortcut: onEditShortcut
+                    )
                 }
             }
             .frame(maxHeight: .infinity)
@@ -67,6 +93,12 @@ struct PanelView: View {
             RoundedRectangle(cornerRadius: NarcRadius.xl)
                 .strokeBorder(Color.narcBorder)
         )
+        .onAppear {
+            keyboardSelection.route = selectedTab.keyboardRoute
+        }
+        .onChange(of: selectedTab) { _, newTab in
+            keyboardSelection.route = newTab.keyboardRoute
+        }
     }
 
     // MARK: - Title Bar
@@ -79,13 +111,15 @@ struct PanelView: View {
 
             Spacer()
 
-            Button(action: onOpenQuickCapture) {
+            Button {
+                selectedTab = .inbox
+            } label: {
                 Image(systemName: "square.and.pencil")
                     .font(.narcSubtitle)
                     .foregroundColor(.narcTextMuted)
             }
             .buttonStyle(.plain)
-            .help("Quick Capture（⌃⌥Q）")
+            .help(hotkeyService.activeShortcut(for: .quickCapture).map { "随手记（\($0.displayLabel)）" } ?? "随手记")
 
             Button(action: onOpenAssistant) {
                 Image(systemName: "sparkles")
@@ -150,46 +184,75 @@ struct PanelView: View {
 
     private var footerBar: some View {
         HStack(spacing: NarcSpacing.xs) {
-            // Keyboard hints
-            Group {
-                Text("↑↓")
+            if selectedTab == .inbox {
+                Text("↵")
                     .font(.narcMonoTiny)
-                    .padding(.horizontal, NarcSpacing.xxs + 1)
-                    .padding(.vertical, NarcSpacing.xxs / 2)
+                    .padding(.horizontal, NarcSpacing.xs)
+                    .padding(.vertical, NarcSpacing.xxs)
                     .background(Color.narcSurfaceMuted)
                     .cornerRadius(NarcRadius.xs / 2)
-                Text("select")
+                Text("记录")
                     .font(.narcMonoTiny)
+                    .foregroundColor(.narcTextMuted)
 
-                Text("↩")
+                Text("⌘↵")
                     .font(.narcMonoTiny)
-                    .padding(.horizontal, NarcSpacing.xxs + 1)
-                    .padding(.vertical, NarcSpacing.xxs / 2)
+                    .padding(.horizontal, NarcSpacing.xs)
+                    .padding(.vertical, NarcSpacing.xxs)
                     .background(Color.narcSurfaceMuted)
                     .cornerRadius(NarcRadius.xs / 2)
-                Text("open")
+                Text("Todo")
                     .font(.narcMonoTiny)
+                    .foregroundColor(.narcTextMuted)
+            } else if selectedTab == .notifications {
+                Group {
+                    Text("↑↓")
+                        .font(.narcMonoTiny)
+                        .padding(.horizontal, NarcSpacing.xxs + 1)
+                        .padding(.vertical, NarcSpacing.xxs / 2)
+                        .background(Color.narcSurfaceMuted)
+                        .cornerRadius(NarcRadius.xs / 2)
+                    Text("select")
+                        .font(.narcMonoTiny)
 
-                Text("esc")
+                    Text("↩")
+                        .font(.narcMonoTiny)
+                        .padding(.horizontal, NarcSpacing.xxs + 1)
+                        .padding(.vertical, NarcSpacing.xxs / 2)
+                        .background(Color.narcSurfaceMuted)
+                        .cornerRadius(NarcRadius.xs / 2)
+                    Text("open")
+                        .font(.narcMonoTiny)
+
+                    Text("esc")
+                        .font(.narcMonoTiny)
+                        .padding(.horizontal, NarcSpacing.xxs + 1)
+                        .padding(.vertical, NarcSpacing.xxs / 2)
+                        .background(Color.narcSurfaceMuted)
+                        .cornerRadius(NarcRadius.xs / 2)
+                    Text("close")
+                        .font(.narcMonoTiny)
+                }
+                .foregroundColor(.narcTextMuted)
+            } else {
+                Text("勾选启用布局 · 点击快捷键修改")
                     .font(.narcMonoTiny)
-                    .padding(.horizontal, NarcSpacing.xxs + 1)
-                    .padding(.vertical, NarcSpacing.xxs / 2)
-                    .background(Color.narcSurfaceMuted)
-                    .cornerRadius(NarcRadius.xs / 2)
-                Text("close")
-                    .font(.narcMonoTiny)
+                    .foregroundColor(.narcTextMuted)
             }
-            .foregroundColor(.narcTextMuted)
 
-            Spacer()
+            if selectedTab != .inbox {
+                Spacer()
 
-            Circle()
-                .fill(Color.narcSuccess)
-                .frame(width: 6, height: 6)
+                Circle()
+                    .fill(Color.narcSuccess)
+                    .frame(width: 6, height: 6)
 
-            Text("Live")
-                .font(.narcCaption)
-                .foregroundColor(.narcSuccess)
+                Text("Live")
+                    .font(.narcCaption)
+                    .foregroundColor(.narcSuccess)
+            } else {
+                Spacer()
+            }
         }
         .padding(.horizontal, NarcSpacing.lg)
         .padding(.vertical, NarcSpacing.sm)

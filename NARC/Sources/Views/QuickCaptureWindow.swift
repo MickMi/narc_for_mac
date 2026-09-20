@@ -1,19 +1,27 @@
 import AppKit
 import SwiftUI
 
-/// Lightweight floating host for Quick Capture.
+/// Lightweight floating host for the shared Inbox capture surface.
 ///
-/// The SwiftUI content is rebuilt for every presentation so a cancelled or
-/// closed draft never reappears the next time the window is summoned.
+/// Content is installed once. The draft state is owned by AppDelegate and is
+/// intentionally preserved when the window is hidden and summoned again.
 @MainActor
 final class QuickCaptureWindow: NSPanel, NSWindowDelegate {
     private let store: AssistantStore
+    private let captureState: InboxCaptureState
+    private let onOpenAssistant: () -> Void
 
-    init(store: AssistantStore) {
+    init(
+        store: AssistantStore,
+        captureState: InboxCaptureState,
+        onOpenAssistant: @escaping () -> Void
+    ) {
         self.store = store
+        self.captureState = captureState
+        self.onOpenAssistant = onOpenAssistant
 
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 310),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 500),
             styleMask: [.titled, .closable, .fullSizeContentView, .utilityWindow],
             backing: .buffered,
             defer: false
@@ -27,13 +35,24 @@ final class QuickCaptureWindow: NSPanel, NSWindowDelegate {
         level = .floating
         collectionBehavior = [.fullScreenAuxiliary, .moveToActiveSpace]
         delegate = self
+
+        contentView = NSHostingView(
+            rootView: QuickCaptureView(
+                store: store,
+                captureState: captureState,
+                onDismiss: { [weak self] in self?.dismiss() },
+                onOpenAssistant: { [weak self] in
+                    self?.dismiss()
+                    self?.onOpenAssistant()
+                }
+            )
+        )
     }
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
     func present(on preferredScreen: NSScreen? = nil) {
-        installFreshContent()
         position(on: preferredScreen ?? screenUnderMouse() ?? NSScreen.main)
         makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -46,15 +65,6 @@ final class QuickCaptureWindow: NSPanel, NSWindowDelegate {
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         dismiss()
         return false
-    }
-
-    private func installFreshContent() {
-        let rootView = QuickCaptureView(
-            store: store,
-            onSaved: { [weak self] in self?.dismiss() },
-            onCancel: { [weak self] in self?.dismiss() }
-        )
-        contentView = NSHostingView(rootView: rootView)
     }
 
     private func position(on screen: NSScreen?) {
