@@ -4,6 +4,7 @@ import SwiftUI
 /// Standard resizable window for the built-in personal assistant pages.
 @MainActor
 final class AssistantHubWindow: NSWindow {
+    private let navigation = AssistantHubNavigation()
     init(store: AssistantStore, captureState: InboxCaptureState) {
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 540),
@@ -22,13 +23,19 @@ final class AssistantHubWindow: NSWindow {
         contentView = NSHostingView(
             rootView: AssistantHubView(
                 store: store,
-                captureState: captureState
+                captureState: captureState,
+                navigation: navigation
             )
         )
     }
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    func selectTodos() {
+        // Defer until the hosting view has subscribed, including first launch.
+        DispatchQueue.main.async { [weak self] in self?.navigation.showTodosRequest = UUID() }
+    }
 
     func present(on preferredScreen: NSScreen? = nil) {
         position(on: preferredScreen ?? screenUnderMouse() ?? NSScreen.main)

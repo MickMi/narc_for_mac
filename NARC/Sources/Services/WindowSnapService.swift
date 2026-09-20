@@ -74,6 +74,9 @@ final class WindowSnapService {
         guard let snapLayout = layout else { return }
 
         lastSnapTime = now
-        WindowManagerService.moveActiveWindow(to: snapLayout)
+        // Drag snapping is a direct placement, never a repeated-hotkey signal to
+        // cross displays. This also prevents a delayed verifier from treating a
+        // long-lived hotkey placement as drag intent.
+        WindowManagerService.moveActiveWindow(to: snapLayout, allowCrossScreen: false)
     }
 }

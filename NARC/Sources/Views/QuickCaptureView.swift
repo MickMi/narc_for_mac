@@ -41,6 +41,28 @@ final class InboxCaptureState: ObservableObject {
 
     @discardableResult
     func submit() -> Bool {
+        submit(
+            save: { [store] content in
+                store.captureInbox(content)
+            },
+            success: "已存入随手箱"
+        )
+    }
+
+    @discardableResult
+    func submitTodo() -> Bool {
+        submit(
+            save: { [store] content in
+                store.createTodo(title: content)
+            },
+            success: "已创建 Todo"
+        )
+    }
+
+    private func submit(
+        save: (String) -> Bool,
+        success: String
+    ) -> Bool {
         guard !isSaving else { return false }
         guard !trimmedDraft.isEmpty else {
             validationMessage = AssistantStoreFailure.blankContent.errorDescription
@@ -50,7 +72,7 @@ final class InboxCaptureState: ObservableObject {
         validationMessage = nil
         successMessage = nil
         isSaving = true
-        let saved = store.captureInbox(trimmedDraft)
+        let saved = save(trimmedDraft)
         isSaving = false
 
         guard saved else {
@@ -60,7 +82,7 @@ final class InboxCaptureState: ObservableObject {
 
         draft = ""
         onCaptureCompleted()
-        successMessage = "已存入随手箱"
+        successMessage = success
         return true
     }
 
@@ -105,6 +127,7 @@ struct QuickCaptureView: View {
     var onOpenAssistant: (() -> Void)?
 
     @FocusState private var isInputFocused: Bool
+    @State private var isRecentInboxExpanded = false
 
     private var draftBinding: Binding<String> {
         Binding(
@@ -128,14 +151,11 @@ struct QuickCaptureView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? NarcSpacing.md : NarcSpacing.lg) {
-            header
-            if shouldShowOnboardingHint {
-                firstUseHint
+            if compact {
+                compactContent
+            } else {
+                regularContent
             }
-            inputArea
-            feedback
-            recentInbox
-            footer
         }
         .padding(compact ? NarcSpacing.md : NarcSpacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -151,6 +171,56 @@ struct QuickCaptureView: View {
         }
     }
 
+    @ViewBuilder
+    private var compactContent: some View {
+        // TodoAttentionCardView owns the minute-level availability refresh and
+        // becomes EmptyView when there is no actionable task. Keeping it in the
+        // first structural slot makes the Inbox hierarchy follow real state
+        // without duplicating Todo candidate logic here.
+        TodoAttentionCardView(store: store)
+        inputArea
+        feedback
+        if shouldShowOnboardingHint {
+            compactFirstUseHint
+        }
+        compactRecentInbox
+    }
+
+    @ViewBuilder
+    private var regularContent: some View {
+        header
+        if shouldShowOnboardingHint {
+            firstUseHint
+        }
+        inputArea
+        feedback
+        recentInbox
+        footer
+    }
+
+    private var compactFirstUseHint: some View {
+        HStack(spacing: NarcSpacing.sm) {
+            Image(systemName: "lightbulb.fill")
+                .foregroundColor(.narcAccent)
+                .accessibilityHidden(true)
+
+            Text("按 ↵ 先记下；明确是任务时按 ⌘↵。")
+                .font(.narcCaption)
+                .foregroundColor(.narcTextMuted)
+
+            Spacer(minLength: NarcSpacing.xs)
+
+            Button("知道了") {
+                captureState.hideOnboardingHintForThisSession()
+            }
+            .buttonStyle(.plain)
+            .font(.narcCaption)
+            .foregroundColor(.narcAccent)
+        }
+        .padding(.horizontal, NarcSpacing.xs)
+        .accessibilityElement(children: .contain)
+    }
+
     private var firstUseHint: some View {
         HStack(alignment: .top, spacing: NarcSpacing.sm) {
             Image(systemName: "1.circle.fill")
@@ -159,7 +229,7 @@ struct QuickCaptureView: View {
                 Text("先完成一次随手记")
                     .font(.narcSubtitle)
                     .foregroundColor(.narcText)
-                Text("输入现在想到的事，按 Return 保存。以后再转成 Todo 或 Note。")
+                Text("Return 存入随手箱；明确是任务时，按 ⌘Return 直接创建 Todo。")
                     .font(.narcCaption)
                     .foregroundColor(.narcTextMuted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -210,6 +280,16 @@ struct QuickCaptureView: View {
                 .focused($isInputFocused)
                 .onSubmit(submit)
                 .accessibilityLabel("随手记内容")
+
+            Button(action: submitTodo) {
+                Label("Todo", systemImage: "checkmark.circle")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.bordered)
+            .disabled(!captureState.canSubmit)
+            .keyboardShortcut(.return, modifiers: [.command])
+            .help("直接创建 Todo（⌘Return）")
+            .accessibilityLabel("直接创建 Todo")
 
             Button(action: submit) {
                 if captureState.isSaving {
@@ -292,9 +372,67 @@ struct QuickCaptureView: View {
         }
     }
 
+    @ViewBuilder
+    private var compactRecentInbox: some View {
+        if !store.inboxItems.isEmpty {
+            VStack(alignment: .leading, spacing: NarcSpacing.sm) {
+                Button {
+                    withAnimation(.narcSnap) {
+                        isRecentInboxExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: NarcSpacing.sm) {
+                        Image(systemName: "tray.full")
+                            .foregroundColor(.narcTextMuted)
+
+                        Text("待整理记录")
+                            .font(.narcCaption)
+                            .foregroundColor(.narcTextMuted)
+
+                        Text("\(store.inboxItems.count)")
+                            .font(.narcMonoTiny)
+                            .foregroundColor(.narcTextFaint)
+                            .padding(.horizontal, NarcSpacing.xs)
+                            .padding(.vertical, NarcSpacing.xxs)
+                            .background(Color.narcSurfaceMuted)
+                            .clipShape(Capsule())
+
+                        Spacer()
+
+                        Image(systemName: "chevron.right")
+                            .font(.narcCaption)
+                            .foregroundColor(.narcTextFaint)
+                            .rotationEffect(.degrees(isRecentInboxExpanded ? 90 : 0))
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("待整理记录，共 \(store.inboxItems.count) 条")
+                .accessibilityValue(isRecentInboxExpanded ? "已展开" : "已折叠")
+
+                if isRecentInboxExpanded {
+                    ForEach(store.recentInboxItems) { item in
+                        InboxItemRow(
+                            item: item,
+                            compact: true,
+                            onConvert: { kind in
+                                _ = captureState.convert(item, to: kind)
+                                isInputFocused = true
+                            },
+                            onDelete: {
+                                _ = captureState.delete(item)
+                                isInputFocused = true
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     private var footer: some View {
         HStack(spacing: NarcSpacing.md) {
-            Text("Return 保存 · 再转 Todo / Note")
+            Text("Return 随手箱 · ⌘Return Todo")
                 .font(.narcMonoTiny)
                 .foregroundColor(.narcTextFaint)
 
@@ -319,6 +457,11 @@ struct QuickCaptureView: View {
 
     private func submit() {
         _ = captureState.submit()
+        isInputFocused = true
+    }
+
+    private func submitTodo() {
+        _ = captureState.submitTodo()
         isInputFocused = true
     }
 }

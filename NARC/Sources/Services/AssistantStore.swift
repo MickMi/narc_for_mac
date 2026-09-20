@@ -52,19 +52,45 @@ final class AssistantStore: ObservableObject {
     }
 
     var incompleteTodos: [TodoItem] {
-        todos
-            .filter { !$0.isCompleted }
-            .sorted { $0.createdAt > $1.createdAt }
+        sortedTodos(todos.filter { !$0.isCompleted })
     }
 
     var completedTodos: [TodoItem] {
         todos
             .filter(\.isCompleted)
-            .sorted { ($0.completedAt ?? $0.updatedAt) > ($1.completedAt ?? $1.updatedAt) }
+            .sorted {
+                let lhsDate = $0.completedAt ?? $0.updatedAt
+                let rhsDate = $1.completedAt ?? $1.updatedAt
+                if lhsDate != rhsDate {
+                    return lhsDate > rhsDate
+                }
+                return $0.id.uuidString < $1.id.uuidString
+            }
     }
 
     var recentInboxItems: [InboxItem] {
         inboxItems.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    func availableTodos(now: Date = Date()) -> [TodoItem] {
+        sortedTodos(
+            todos.filter { todo in
+                guard !todo.isCompleted else { return false }
+                guard let deferredUntil = todo.deferredUntil else { return true }
+                return deferredUntil <= now
+            }
+        )
+    }
+
+    func nextTodo(after id: UUID?, now: Date = Date()) -> TodoItem? {
+        let candidates = availableTodos(now: now)
+        guard !candidates.isEmpty else { return nil }
+        guard let id,
+              let currentIndex = candidates.firstIndex(where: { $0.id == id }) else {
+            return candidates[0]
+        }
+
+        return candidates[(currentIndex + 1) % candidates.count]
     }
 
     @discardableResult
@@ -79,13 +105,42 @@ final class AssistantStore: ObservableObject {
 
     @discardableResult
     func createTodo(title: String, now: Date = Date()) -> Bool {
+        createTodoItem(title: title, now: now) != nil
+    }
+
+    /// Persist a Todo and return the exact item that was committed.
+    ///
+    /// Callers that offer Undo must retain this UUID instead of searching by
+    /// title or assuming the newest item is still the one they created.
+    @discardableResult
+    func createTodoItem(
+        title: String,
+        id: UUID = UUID(),
+        now: Date = Date()
+    ) -> TodoItem? {
         guard let title = normalizedContent(title) else {
             lastError = .blankContent
+            return nil
+        }
+
+        let item = TodoItem(id: id, title: title, createdAt: now)
+        var nextTodos = todos
+        nextTodos.append(item)
+        guard persist(todos: nextTodos, notes: notes, inboxItems: inboxItems) else {
+            return nil
+        }
+        return item
+    }
+
+    /// Atomically delete one exact Todo. Used by the short-lived Undo token
+    /// emitted from explicit selected-text capture.
+    @discardableResult
+    func deleteTodo(id: UUID) -> Bool {
+        guard todos.contains(where: { $0.id == id }) else {
             return false
         }
 
-        var nextTodos = todos
-        nextTodos.append(TodoItem(title: title, createdAt: now))
+        let nextTodos = todos.filter { $0.id != id }
         return persist(todos: nextTodos, notes: notes, inboxItems: inboxItems)
     }
 
@@ -97,6 +152,21 @@ final class AssistantStore: ObservableObject {
 
         var nextTodos = todos
         nextTodos[index].completedAt = completed ? now : nil
+        if completed { nextTodos[index].isNext = false }
+        nextTodos[index].deferredUntil = nil
+        nextTodos[index].updatedAt = now
+        return persist(todos: nextTodos, notes: notes, inboxItems: inboxItems)
+    }
+
+    @discardableResult
+    func setTodoDeferred(id: UUID, until: Date?, now: Date = Date()) -> Bool {
+        guard let index = todos.firstIndex(where: { $0.id == id }),
+              !todos[index].isCompleted else {
+            return false
+        }
+
+        var nextTodos = todos
+        nextTodos[index].deferredUntil = until
         nextTodos[index].updatedAt = now
         return persist(todos: nextTodos, notes: notes, inboxItems: inboxItems)
     }
@@ -209,8 +279,7 @@ final class AssistantStore: ObservableObject {
         do {
             let data = try Data(contentsOf: storageURL)
             let snapshot = try Self.makeDecoder().decode(AssistantSnapshot.self, from: data)
-            guard snapshot.schemaVersion == 1
-                    || snapshot.schemaVersion == AssistantSnapshot.currentSchemaVersion else {
+            guard (1...AssistantSnapshot.currentSchemaVersion).contains(snapshot.schemaVersion) else {
                 writesBlocked = true
                 lastError = .unsupportedSchema(snapshot.schemaVersion)
                 return
@@ -264,6 +333,44 @@ final class AssistantStore: ObservableObject {
     private func normalizedContent(_ content: String) -> String? {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Commit planning changes and the single explicit next task together.
+    @discardableResult
+    func updateTodoPlanning(
+        id: UUID, priority: TodoPriority, dueAt: Date?, isNext: Bool,
+        now: Date = Date()
+    ) -> Bool {
+        guard let index = todos.firstIndex(where: { $0.id == id && !$0.isCompleted }) else {
+            return false
+        }
+        var nextTodos = todos
+        if isNext {
+            for other in nextTodos.indices where nextTodos[other].isNext {
+                nextTodos[other].isNext = false
+                nextTodos[other].updatedAt = now
+            }
+            nextTodos[index].deferredUntil = nil
+        }
+        nextTodos[index].priority = priority
+        nextTodos[index].dueAt = dueAt
+        nextTodos[index].isNext = isNext
+        nextTodos[index].updatedAt = now
+        return persist(todos: nextTodos, notes: notes, inboxItems: inboxItems)
+    }
+
+    private func sortedTodos(_ items: [TodoItem]) -> [TodoItem] {
+        items.sorted {
+            if $0.isNext != $1.isNext { return $0.isNext }
+            if $0.priority != $1.priority { return $0.priority.rawValue < $1.priority.rawValue }
+            if $0.dueAt != $1.dueAt {
+                return ($0.dueAt ?? .distantFuture) < ($1.dueAt ?? .distantFuture)
+            }
+            if $0.createdAt != $1.createdAt {
+                return $0.createdAt > $1.createdAt
+            }
+            return $0.id.uuidString < $1.id.uuidString
+        }
     }
 
     private static func defaultStorageURL(fileManager: FileManager) -> URL {
