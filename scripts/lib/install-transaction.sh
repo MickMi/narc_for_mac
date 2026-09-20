@@ -3,6 +3,22 @@
 # Shared install transaction primitives. This file is sourced by install.sh
 # and by the isolated transaction tests; it must not be executed directly.
 
+narc_install_lock_descriptor() (
+    # Older supported macOS versions lack /usr/bin/lockf. Build this tiny
+    # fallback with the same Swift toolchain already required for installation.
+    if [ -x /usr/bin/lockf ]; then
+        /usr/bin/lockf -s -t 0 "$1"
+        exit $?
+    fi
+    local helper_dir
+    local library_dir
+    library_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    helper_dir="$(mktemp -d /private/tmp/narc-install-lock-helper.XXXXXX)" || exit 1
+    trap 'case "$helper_dir" in /private/tmp/narc-install-lock-helper.*) rm -rf -- "$helper_dir" ;; esac' EXIT
+    swiftc "${library_dir}/install-lock.swift" -o "${helper_dir}/lock" || exit 1
+    "${helper_dir}/lock" "$1"
+)
+
 narc_install_arm_signal_handlers() {
     # Bash does not run an EXIT trap for an unhandled terminating signal.
     # Convert the signal into an explicit exit so the currently installed App

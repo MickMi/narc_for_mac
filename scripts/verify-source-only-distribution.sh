@@ -108,9 +108,9 @@ grep -Fq 'ensure-local-signing-identity.sh' "$INSTALL_SCRIPT" \
     || fail "normal installation must provision or reuse the per-user local identity"
 grep -Fq 'NARC_SIGNING_MODE=local' "$INSTALL_SCRIPT" \
     || fail "normal installation must force stable local signing"
-grep -Fq 'LOCKF_BIN="/usr/bin/lockf"' "$INSTALL_SCRIPT" \
-    || fail "normal installation must use the system kernel-backed lock helper"
-grep -Fq '"$LOCKF_BIN" -s -t 0 9' "$INSTALL_SCRIPT" \
+grep -Fq 'flock(descriptor, LOCK_EX | LOCK_NB)' "${PROJECT_DIR}/scripts/lib/install-lock.swift" \
+    || fail "older macOS installation must retain a nonblocking kernel-backed lock"
+grep -Fq 'narc_install_lock_descriptor 9' "$INSTALL_SCRIPT" \
     || fail "normal installation must acquire its per-user lock without waiting or stale PID ownership"
 [ "$(grep -Ec 'exec 9>&-' "$INSTALL_SCRIPT")" -eq 2 ] \
     || fail "install.sh may close fd 9 only on the two pre-acquisition error paths"

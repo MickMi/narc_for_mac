@@ -15,7 +15,6 @@ MARKER_PATH="${MARKER_DIR}/signing-identity.sha1"
 CURRENT_SIGN_IDENTITY=""
 TRANSACTION_COMMITTED=0
 APP_SWITCHED=0
-LOCKF_BIN="/usr/bin/lockf"
 INSTALL_LOCK_PATH="${MARKER_DIR}/install.lock"
 INSTALL_LOCK_HELD=0
 STAGING_APP=""
@@ -33,7 +32,6 @@ fail() {
 }
 
 acquire_install_lock() {
-    [ -x "$LOCKF_BIN" ] || fail "缺少 macOS 安装互斥工具：$LOCKF_BIN" 2
     [ ! -L "$MARKER_DIR" ] \
         || fail "NARC 应用数据目录不能是符号链接：$MARKER_DIR" 4
     mkdir -p "$MARKER_DIR" || fail "无法创建 NARC 应用数据目录。" 4
@@ -47,14 +45,14 @@ acquire_install_lock() {
         fail "安装锁路径存在但不是普通文件：$INSTALL_LOCK_PATH" 4
     fi
 
-    # lockf operates on an inherited descriptor. The file is intentionally
+    # The kernel lock operates on an inherited descriptor. The file is intentionally
     # retained: kernel lock ownership, not file existence or a reusable PID,
     # is the source of truth, so crashed installers leave no stale lock state.
     exec 9>>"$INSTALL_LOCK_PATH" \
         || fail "无法打开当前用户的 NARC 安装锁。" 5
     chmod 600 "$INSTALL_LOCK_PATH" \
         || { exec 9>&-; fail "无法保护当前用户的 NARC 安装锁。" 5; }
-    if ! "$LOCKF_BIN" -s -t 0 9; then
+    if ! narc_install_lock_descriptor 9; then
         exec 9>&-
         fail "另一个 NARC 安装正在进行；本次未构建或替换任何文件。" 5
     fi

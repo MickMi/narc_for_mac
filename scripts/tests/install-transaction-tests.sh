@@ -28,7 +28,7 @@ run_probe() {
     INSTALL_LOCK_HELD=0
 
     exec 9>>"${MARKER_DIR}/install.lock"
-    /usr/bin/lockf -s -t 0 9
+    narc_install_lock_descriptor 9
     INSTALL_LOCK_HELD=1
     trap narc_install_early_cleanup EXIT
     narc_install_arm_signal_handlers
@@ -129,7 +129,7 @@ prepare_fixture() {
 
 assert_lock_released() {
     local lock_path="$1"
-    /usr/bin/lockf -s -t 0 -k "$lock_path" /usr/bin/true \
+    (exec 9>>"$lock_path"; narc_install_lock_descriptor 9) \
         || { printf '❌ Transaction lock remained held: %s\n' "$lock_path" >&2; exit 1; }
 }
 
@@ -196,15 +196,13 @@ bash "$0" --probe "$HOLD_ROOT" "hold-after-app-move" \
     >"${HOLD_ROOT}/probe.out" 2>"${HOLD_ROOT}/probe.err" &
 HOLD_PROBE_PID=$!
 hold_wait_attempt=0
-while [ ! -e "${HOLD_ROOT}/hold.ready" ] && [ "$hold_wait_attempt" -lt 200 ]; do
+while [ ! -e "${HOLD_ROOT}/hold.ready" ] && [ "$hold_wait_attempt" -lt 3000 ]; do
     /bin/sleep 0.01
     hold_wait_attempt=$((hold_wait_attempt + 1))
 done
 [ -e "${HOLD_ROOT}/hold.ready" ] \
     || { printf '❌ Transaction did not reach the post-move lock probe\n' >&2; exit 1; }
-if /usr/bin/lockf -s -t 0 -k \
-    "${HOLD_ROOT}/home/Library/Application Support/NARC/install.lock" \
-    /usr/bin/true; then
+if (exec 9>>"${HOLD_ROOT}/home/Library/Application Support/NARC/install.lock"; narc_install_lock_descriptor 9); then
     printf '❌ Install lock was released while the App switch was in progress\n' >&2
     exit 1
 fi
