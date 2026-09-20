@@ -139,7 +139,7 @@ final class CodexCompletionService: ObservableObject {
     func start() {
         guard timer == nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+            Task { @MainActor [weak self] in self?.refresh() }
         }
         refresh()
     }
@@ -267,7 +267,7 @@ final class CodexCompletionService: ObservableObject {
         let folder = eventFolder
         queue.async { [weak self] in
             let events = Self.readEvents(folder)
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.reading = false
                 self.ingest(events)

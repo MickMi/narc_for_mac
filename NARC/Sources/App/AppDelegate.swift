@@ -2706,10 +2706,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - UNUserNotificationCenterDelegate
 
-extension AppDelegate: @preconcurrency UNUserNotificationCenterDelegate {
+extension AppDelegate: UNUserNotificationCenterDelegate {
 
     /// Allow banners to appear even while NARC is in the foreground.
-    func userNotificationCenter(
+    nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
@@ -2718,7 +2718,7 @@ extension AppDelegate: @preconcurrency UNUserNotificationCenterDelegate {
     }
 
     /// User clicked the banner — extract carried tty/cwd/project and jump.
-    func userNotificationCenter(
+    nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
@@ -2727,7 +2727,9 @@ extension AppDelegate: @preconcurrency UNUserNotificationCenterDelegate {
         let tty = userInfo["narc.tty"] as? String
         let cwd = userInfo["narc.cwd"] as? String
         let projectName = userInfo["narc.project"] as? String
-        TerminalJumper.jump(tty: tty, cwd: cwd, projectName: projectName)
+        DispatchQueue.main.async {
+            TerminalJumper.jump(tty: tty, cwd: cwd, projectName: projectName)
+        }
         completionHandler()
     }
 }
