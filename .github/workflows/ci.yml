@@ -33,7 +33,15 @@ jobs:
       - name: Show Swift version
         run: swift --version
       - name: Run tests
-        run: swift test
+        # AppKit/Carbon tests share process-global framework state.
+        run: swift test --no-parallel
+      - name: Collect test crash diagnostics
+        if: failure()
+        run: |
+          for report in "$HOME"/Library/Logs/DiagnosticReports/NARCPackageTests*; do
+            [ -f "$report" ] || continue
+            cat "$report"
+          done
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
