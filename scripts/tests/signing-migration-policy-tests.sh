@@ -181,8 +181,10 @@ while ! grep -Fq 'LOCK_ACQUIRED' "${LOCK_TEST_ROOT}/first.out" 2>/dev/null \
     /bin/sleep 0.05
     lock_wait_attempt=$((lock_wait_attempt + 1))
 done
-grep -Fq 'LOCK_ACQUIRED' "${LOCK_TEST_ROOT}/first.out" \
-    || fail_test "first install probe did not acquire its lock"
+if ! grep -Fq 'LOCK_ACQUIRED' "${LOCK_TEST_ROOT}/first.out"; then
+    cat "${LOCK_TEST_ROOT}/first.out" "${LOCK_TEST_ROOT}/first.err" >&2
+    fail_test "first install probe did not acquire its lock"
+fi
 
 set +e
 SECOND_LOCK_OUTPUT="$(HOME="$LOCK_TEST_HOME" \
