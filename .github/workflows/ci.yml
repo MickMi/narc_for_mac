@@ -30,6 +30,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Test signing migration policy
+        run: |
+          bash scripts/tests/signing-migration-policy-tests.sh
+          bash scripts/tests/install-transaction-tests.sh
       - name: Show Swift version
         run: swift --version
       - name: Run tests
@@ -59,10 +63,6 @@ jobs:
           codesign --display --verbose=4 build/NARC.app 2>&1 | grep -F 'Signature=adhoc'
       - name: Enforce source-only distribution
         run: bash scripts/verify-source-only-distribution.sh
-      - name: Test signing migration policy
-        run: |
-          bash scripts/tests/signing-migration-policy-tests.sh
-          bash scripts/tests/install-transaction-tests.sh
       - name: Check shell scripts
         run: |
           bash -n scripts/build-app.sh
