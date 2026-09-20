@@ -122,7 +122,7 @@ struct OnboardingView: View {
     @ObservedObject var hotkeyService: HotkeyService
 
     let onOpenAssistant: () -> Void
-    let onOpenAccessibilitySettings: () -> Void
+    let onManageAccessibilityPermission: () -> Void
     let onDismiss: () -> Void
 
     var body: some View {
@@ -164,13 +164,13 @@ struct OnboardingView: View {
         VStack(spacing: NarcSpacing.md) {
             OnboardingActionRow(
                 icon: "scope",
-                title: "菜单栏 N 或 ⌃⌥N",
+                title: hotkeyService.activeShortcut(for: .summonWidget).map { "菜单栏 N 或 \($0.displayLabel)" } ?? "点击菜单栏 N",
                 detail: "把桌面悬浮 N 召回当前屏幕，并展开面板"
             )
 
             OnboardingActionRow(
                 icon: "square.and.pencil",
-                title: "按 ⌃⌥Q",
+                title: hotkeyService.activeShortcut(for: .quickCapture).map { "按 \($0.displayLabel)" } ?? "打开面板中的随手记",
                 detail: "直接写下内容并按 Return，先存入随手箱"
             )
         }
@@ -189,11 +189,13 @@ struct OnboardingView: View {
 
             VStack(alignment: .leading, spacing: NarcSpacing.xs) {
                 Text(hotkeyService.isAccessibilityGranted
-                    ? "窗口权限已开启"
-                    : "窗口快捷键还未开启")
+                    ? "可选工具权限已开启"
+                    : "可选工具权限尚未开启")
                     .font(.narcSubtitle)
                     .foregroundColor(.narcText)
-                Text("辅助功能只影响窗口排列、钉选和相关快捷键；随手箱、Todo、Notes 和未读角标可直接使用。")
+                Text(hotkeyService.isAccessibilityGranted
+                    ? "当前版本已确认权限，无需重启。辅助功能只用于窗口排列、窗口标记与召回，以及你主动触发的划词 Todo。"
+                    : "开启后会自动确认，通常无需重启。若开关已开启仍提示，请删除旧 NARC 条目并重新添加当前 App。手动记录、Todo 管理、Notes 和未读角标不需要这项权限。")
                     .font(.narcCaption)
                     .foregroundColor(.narcTextMuted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -202,12 +204,12 @@ struct OnboardingView: View {
             Spacer(minLength: NarcSpacing.md)
 
             Button(hotkeyService.isAccessibilityGranted ? "查看设置" : "开启权限") {
-                onOpenAccessibilitySettings()
+                onManageAccessibilityPermission()
             }
             .buttonStyle(.bordered)
             .accessibilityLabel(hotkeyService.isAccessibilityGranted
                 ? "查看辅助功能设置"
-                : "打开辅助功能设置")
+                : "开启辅助功能权限")
         }
         .padding(NarcSpacing.lg)
         .background(Color.narcSurface)

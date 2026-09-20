@@ -9,7 +9,7 @@ final class OnboardingWindow: NSWindow, NSWindowDelegate {
     init(
         hotkeyService: HotkeyService,
         onOpenAssistant: @escaping () -> Void,
-        onOpenAccessibilitySettings: @escaping () -> Void,
+        onManageAccessibilityPermission: @escaping () -> Void,
         onDismiss: @escaping () -> Void
     ) {
         self.onDismiss = onDismiss
@@ -36,7 +36,7 @@ final class OnboardingWindow: NSWindow, NSWindowDelegate {
                     self?.dismiss()
                     onOpenAssistant()
                 },
-                onOpenAccessibilitySettings: onOpenAccessibilitySettings,
+                onManageAccessibilityPermission: onManageAccessibilityPermission,
                 onDismiss: { [weak self] in
                     self?.dismiss()
                 }

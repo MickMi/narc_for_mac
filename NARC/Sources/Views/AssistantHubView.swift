@@ -1,8 +1,14 @@
 import SwiftUI
 
+@MainActor
+final class AssistantHubNavigation: ObservableObject {
+    @Published var showTodosRequest = UUID()
+}
+
 struct AssistantHubView: View {
     @ObservedObject var store: AssistantStore
     @ObservedObject var captureState: InboxCaptureState
+    @ObservedObject var navigation: AssistantHubNavigation
 
     @State private var selectedSection: Section = .inbox
 
@@ -51,6 +57,7 @@ struct AssistantHubView: View {
         }
         .frame(minWidth: 620, minHeight: 440)
         .background(Color.narcBackground)
+        .onChange(of: navigation.showTodosRequest) { _, _ in selectedSection = .todos }
     }
 
     private var header: some View {

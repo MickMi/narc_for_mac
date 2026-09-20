@@ -7,6 +7,7 @@ import SwiftUI
 struct NotificationListView: View {
     @ObservedObject var appMonitor: AppMonitorService
     @ObservedObject var pinnedWindowService: PinnedWindowService
+    @ObservedObject var hotkeyService: HotkeyService
     var onClose: () -> Void
     /// Resolves the floating widget's current screen at action time.
     var narcScreenProvider: () -> NSScreen?
@@ -142,7 +143,7 @@ struct NotificationListView: View {
             Text("Go to Settings to add apps →")
                 .font(.narcCaption)
                 .foregroundStyle(Color.narcTextMuted)
-            Text("or press ⌃⌥P to pin a window")
+            Text(hotkeyService.activeShortcut(for: .toggleCurrentWindowPin).map { "or press \($0.displayLabel) to mark a window" } ?? "Enable the marking shortcut in Preferences")
                 .font(.narcCaption)
                 .foregroundStyle(Color.narcTextMuted)
             Spacer()
@@ -191,76 +192,80 @@ struct PinnedWindowRow: View {
     @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: NarcSpacing.md) {
-            // Keyboard shortcut number badge
-            if keyboardIndex >= 0 && keyboardIndex < 10 {
-                Text("\(keyboardIndex + 1 < 10 ? keyboardIndex + 1 : 0)")
-                    .font(.narcMonoTiny)
-                    .foregroundColor(isKeyboardSelected ? .white : Color.narcTextMuted)
-                    .frame(width: NarcSize.keyBadgeSize, height: NarcSize.keyBadgeSize)
-                    .background(
-                        RoundedRectangle(cornerRadius: NarcRadius.xs)
-                            .fill(isKeyboardSelected ? Color.narcAccent : Color.narcSurfaceMuted)
-                    )
-            }
-
-            // App icon
-            appIcon
-
-            // Window info
-            VStack(alignment: .leading, spacing: NarcSpacing.xxs) {
-                Text(displayTitle)
-                    .font(.narcBody)
-                    .foregroundStyle(isAlive ? Color.narcText : Color.narcTextMuted)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-
-                Text(pinned.appDisplayName)
-                    .font(.narcCaption)
-                    .foregroundStyle(Color.narcTextMuted)
-                    .lineLimit(1)
-            }
-
-            Spacer()
-
-            // Action buttons (visible on hover)
-            if isHovering {
-                HStack(spacing: NarcSpacing.xs) {
-                    // Toggle persistence: pin ↔ pin.fill
-                    Button(action: onTogglePersistence) {
-                        Image(systemName: pinned.isPersistent ? "pin.fill" : "pin")
-                            .font(.narcCaption)
-                            .foregroundStyle(pinned.isPersistent ? Color.narcAccent : Color.narcTextMuted)
+        HStack(spacing: NarcSpacing.xs) {
+            // Recall and maintenance are siblings: clicking a pin must never
+            // also recall the window and close the panel.
+            Button(action: onTap) {
+                HStack(spacing: NarcSpacing.md) {
+                    if keyboardIndex >= 0 && keyboardIndex < 10 {
+                        Text("\(keyboardIndex + 1 < 10 ? keyboardIndex + 1 : 0)")
+                            .font(.narcMonoTiny)
+                            .foregroundColor(isKeyboardSelected ? .white : Color.narcTextMuted)
+                            .frame(width: NarcSize.keyBadgeSize, height: NarcSize.keyBadgeSize)
+                            .background(
+                                RoundedRectangle(cornerRadius: NarcRadius.xs)
+                                    .fill(isKeyboardSelected ? Color.narcAccent : Color.narcSurfaceMuted)
+                            )
                     }
-                    .buttonStyle(.plain)
-                    .help(pinned.isPersistent ? "Unlock (temporary)" : "Lock (persistent)")
 
-                    // Remove
-                    Button(action: onRemove) {
-                        Image(systemName: "xmark.circle.fill")
+                    appIcon
+
+                    VStack(alignment: .leading, spacing: NarcSpacing.xxs) {
+                        Text(displayTitle)
+                            .font(.narcBody)
+                            .foregroundStyle(isAlive ? Color.narcText : Color.narcTextMuted)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+
+                        Text(pinned.appDisplayName)
                             .font(.narcCaption)
                             .foregroundStyle(Color.narcTextMuted)
+                            .lineLimit(1)
                     }
-                    .buttonStyle(.plain)
-                    .help("Remove")
+
+                    Spacer(minLength: NarcSpacing.xs)
                 }
-            } else {
-                // Status indicator when not hovering
-                if !isAlive {
-                    // Gray dot — window/app not running
-                    Circle()
-                        .fill(Color.narcTextFaint)
-                        .frame(width: NarcSize.statusDotSmall, height: NarcSize.statusDotSmall)
-                } else {
-                    // Persistence indicator
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, NarcSpacing.sm)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .accessibilityLabel("召回窗口：\(displayTitle)")
+            .accessibilityIdentifier("pinned-window.recall.\(pinned.id)")
+
+            // Keep both targets present and equally sized in every hover and
+            // runtime state. Hover may change emphasis, never target identity.
+            HStack(spacing: NarcSpacing.xs) {
+                Button(action: onTogglePersistence) {
                     Image(systemName: pinned.isPersistent ? "pin.fill" : "pin")
-                        .font(.system(size: 10))
-                        .foregroundStyle(pinned.isPersistent ? Color.narcAccent : Color.narcTextFaint)
+                        .font(.narcCaption)
+                        .foregroundStyle(pinned.isPersistent ? Color.narcAccent : Color.narcTextMuted)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .help(pinned.isPersistent ? "改为临时标记：退出 NARC 后不保留" : "长期保留：重启 NARC 后仍保留")
+                .accessibilityLabel(pinned.isPersistent ? "取消长期保留" : "长期保留此窗口")
+                .accessibilityValue(pinned.isPersistent ? "长期保留" : "临时")
+                .accessibilityIdentifier("pinned-window.persistence.\(pinned.id)")
+
+                Button(role: .destructive, action: onRemove) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.narcCaption)
+                        .foregroundStyle(isHovering ? Color.narcTextMuted : Color.narcTextFaint)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .help("移除标记（不关闭窗口）")
+                .accessibilityLabel("移除此窗口标记")
+                .accessibilityIdentifier("pinned-window.remove.\(pinned.id)")
             }
         }
         .padding(.horizontal, NarcSpacing.lg)
-        .padding(.vertical, NarcSpacing.sm)
         .background(
             isKeyboardSelected ? Color.narcAccent.opacity(0.14) :
             (isHovering ? Color.narcSurfaceMuted : Color.clear)
@@ -268,9 +273,6 @@ struct PinnedWindowRow: View {
         .contentShape(Rectangle())
         .onHover { hovering in
             isHovering = hovering
-        }
-        .onTapGesture {
-            onTap()
         }
     }
 

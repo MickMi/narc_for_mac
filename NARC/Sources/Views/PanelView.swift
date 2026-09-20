@@ -7,10 +7,12 @@ struct PanelView: View {
     @ObservedObject var appMonitor: AppMonitorService
     @ObservedObject var windowManager: WindowManagerService
     @ObservedObject var pinnedWindowService: PinnedWindowService
+    @ObservedObject var hotkeyService: HotkeyService
     @ObservedObject var assistantStore: AssistantStore
     @ObservedObject var inboxCaptureState: InboxCaptureState
     var onClose: () -> Void
     var onOpenPreferences: () -> Void
+    var onEditShortcut: (ConfigurableHotkeyAction) -> Void = { _ in }
     var onOpenAssistant: () -> Void = {}
     /// Resolves the floating widget's current screen at action time.
     var narcScreenProvider: () -> NSScreen?
@@ -29,6 +31,14 @@ struct PanelView: View {
             case .inbox: return "tray.fill"
             case .notifications: return "bell.fill"
             case .windows: return "macwindow"
+            }
+        }
+
+        var keyboardRoute: PanelKeyboardRoute {
+            switch self {
+            case .inbox: return .inbox
+            case .notifications: return .notifications
+            case .windows: return .windows
             }
         }
     }
@@ -58,12 +68,17 @@ struct PanelView: View {
                     NotificationListView(
                         appMonitor: appMonitor,
                         pinnedWindowService: pinnedWindowService,
+                        hotkeyService: hotkeyService,
                         onClose: onClose,
                         narcScreenProvider: narcScreenProvider,
                         keyboardSelection: keyboardSelection
                     )
                 case .windows:
-                    WindowGridView(windowManager: windowManager)
+                    WindowGridView(
+                        windowManager: windowManager,
+                        hotkeyService: hotkeyService,
+                        onEditShortcut: onEditShortcut
+                    )
                 }
             }
             .frame(maxHeight: .infinity)
@@ -78,6 +93,12 @@ struct PanelView: View {
             RoundedRectangle(cornerRadius: NarcRadius.xl)
                 .strokeBorder(Color.narcBorder)
         )
+        .onAppear {
+            keyboardSelection.route = selectedTab.keyboardRoute
+        }
+        .onChange(of: selectedTab) { _, newTab in
+            keyboardSelection.route = newTab.keyboardRoute
+        }
     }
 
     // MARK: - Title Bar
@@ -98,7 +119,7 @@ struct PanelView: View {
                     .foregroundColor(.narcTextMuted)
             }
             .buttonStyle(.plain)
-            .help("随手记（⌃⌥Q）")
+            .help(hotkeyService.activeShortcut(for: .quickCapture).map { "随手记（\($0.displayLabel)）" } ?? "随手记")
 
             Button(action: onOpenAssistant) {
                 Image(systemName: "sparkles")
@@ -164,16 +185,26 @@ struct PanelView: View {
     private var footerBar: some View {
         HStack(spacing: NarcSpacing.xs) {
             if selectedTab == .inbox {
-                Text("Return")
+                Text("↵")
                     .font(.narcMonoTiny)
                     .padding(.horizontal, NarcSpacing.xs)
                     .padding(.vertical, NarcSpacing.xxs)
                     .background(Color.narcSurfaceMuted)
                     .cornerRadius(NarcRadius.xs / 2)
-                Text("save")
+                Text("记录")
                     .font(.narcMonoTiny)
                     .foregroundColor(.narcTextMuted)
-            } else {
+
+                Text("⌘↵")
+                    .font(.narcMonoTiny)
+                    .padding(.horizontal, NarcSpacing.xs)
+                    .padding(.vertical, NarcSpacing.xxs)
+                    .background(Color.narcSurfaceMuted)
+                    .cornerRadius(NarcRadius.xs / 2)
+                Text("Todo")
+                    .font(.narcMonoTiny)
+                    .foregroundColor(.narcTextMuted)
+            } else if selectedTab == .notifications {
                 Group {
                     Text("↑↓")
                         .font(.narcMonoTiny)
@@ -203,17 +234,25 @@ struct PanelView: View {
                         .font(.narcMonoTiny)
                 }
                 .foregroundColor(.narcTextMuted)
+            } else {
+                Text("勾选启用布局 · 点击快捷键修改")
+                    .font(.narcMonoTiny)
+                    .foregroundColor(.narcTextMuted)
             }
 
-            Spacer()
+            if selectedTab != .inbox {
+                Spacer()
 
-            Circle()
-                .fill(Color.narcSuccess)
-                .frame(width: 6, height: 6)
+                Circle()
+                    .fill(Color.narcSuccess)
+                    .frame(width: 6, height: 6)
 
-            Text("Live")
-                .font(.narcCaption)
-                .foregroundColor(.narcSuccess)
+                Text("Live")
+                    .font(.narcCaption)
+                    .foregroundColor(.narcSuccess)
+            } else {
+                Spacer()
+            }
         }
         .padding(.horizontal, NarcSpacing.lg)
         .padding(.vertical, NarcSpacing.sm)

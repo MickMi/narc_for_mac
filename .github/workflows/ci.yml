@@ -19,16 +19,34 @@ jobs:
         run: swift --version
       - name: Run tests
         run: swift test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Test reply reminders and UI structure
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/tests/codex-hook-tests.py
+          bash scripts/tests/pinned-window-row-structure-tests.sh
+          bash scripts/tests/build-app-output-tests.sh
       - name: Build and validate local app bundle
         run: |
-          bash scripts/build-app.sh release
+          NARC_SIGNING_MODE=adhoc bash scripts/build-app.sh release
           plutil -lint build/NARC.app/Contents/Info.plist
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' build/NARC.app/Contents/Info.plist)" = "true"
           codesign --verify --deep --strict build/NARC.app
+          codesign --display --verbose=4 build/NARC.app 2>&1 | grep -F 'Signature=adhoc'
       - name: Enforce source-only distribution
         run: bash scripts/verify-source-only-distribution.sh
+      - name: Test signing migration policy
+        run: |
+          bash scripts/tests/signing-migration-policy-tests.sh
+          bash scripts/tests/install-transaction-tests.sh
       - name: Check shell scripts
         run: |
           bash -n scripts/build-app.sh
+          bash -n scripts/ensure-local-signing-identity.sh
           bash -n scripts/install.sh
+          bash -n scripts/lib/install-transaction.sh
+          bash -n scripts/tests/install-transaction-tests.sh
+          bash -n scripts/tests/signing-migration-policy-tests.sh
+          bash -n scripts/dev-run-no-ax.sh
           bash -n scripts/verify-source-only-distribution.sh
