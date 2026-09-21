@@ -1,4 +1,6 @@
 import Foundation
+import AppKit
+import SwiftUI
 import Testing
 @testable import NARC
 
@@ -156,4 +158,137 @@ private func codexEvent(state: String = "replyReady", turn: String = "00000000-0
     #expect(CodexConnectionState.error.actionTitle == "重新检查")
     #expect(CodexConnectionState.connected.actionTitle == nil)
     #expect(CodexConnectionState.connected.guidance.contains("无需操作"))
+}
+
+@Test @MainActor func codexCompletionCardFitsMeasuredContentAndShrinks() {
+    let layout = CodexCompletionCardLayout()
+    #expect(layout.measure(52))
+    #expect(layout.cardHeight == 116)
+    #expect(!layout.measure(52)) // Avoid repeated resize/layout feedback.
+    layout.measure(80) // Wrapped title or an open-failure message.
+    #expect(layout.cardHeight == 144)
+    layout.measure(900)
+    #expect(layout.cardHeight == 360)
+    #expect(layout.listHeight == 296)
+    layout.measure(52) // Dismiss all but one conversation.
+    #expect(layout.cardHeight == 116)
+    layout.maximumHeight = 100
+    #expect(layout.cardHeight == 100)
+    #expect(!layout.measure(.nan))
+    #expect(!layout.measure(-1))
+}
+
+@Test @MainActor func codexCompletionPresenterOwnsOneAnchoredPanelAndClearsIt() async throws {
+    let suite = "narc-presenter-tests-" + UUID().uuidString
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let service = CodexCompletionService(defaults: defaults)
+    service.setEnabled(true, now: codexTestNow.addingTimeInterval(-1))
+    let presenter = CodexCompletionPresenter(service: service)
+    let app = NSApplication.shared
+    let previous = Set(app.windows.map(\.windowNumber))
+    func panels() -> [NSWindow] {
+        app.windows.filter { $0 is TodoNudgeWindow && !previous.contains($0.windowNumber) && $0.isVisible }
+    }
+    defer {
+        presenter.stop()
+        for window in panels() { window.close() }
+    }
+    var widget = NSRect(x: 900, y: 450, width: 100, height: 100)
+    var screen = NSRect(x: 0, y: 0, width: 1600, height: 1000)
+    var blocked = false
+    presenter.anchor = { (widget, 48, screen) }
+    presenter.isBlocked = { blocked }
+    service.onRefresh = { [weak presenter] in presenter?.reconcile() }
+    for _ in 0..<3 {
+        let event = codexEvent(turn: UUID().uuidString.lowercased())
+        service.ingest([event], now: codexTestNow)
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(panels().count == 1)
+        if let panel = panels().first {
+            let expected = TodoNudgePlacement.frame(adjacentTo: widget, visibleWidgetSize: 48,
+                cardSize: panel.frame.size, targetVisibleFrame: screen)
+            #expect(abs(panel.frame.midY - expected.midY) < 1)
+            #expect(abs(panel.frame.minX - expected.minX) < 1)
+        }
+        blocked = true // Dragging hides the card immediately.
+        presenter.reconcile()
+        #expect(panels().isEmpty)
+        screen.origin.x -= 1600 // Recall onto an adjacent display.
+        widget.origin.x -= 1600
+        widget.origin.y += 30
+        blocked = false
+        presenter.reconcile()
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(panels().count == 1)
+        if let panel = panels().first {
+            let expected = TodoNudgePlacement.frame(adjacentTo: widget, visibleWidgetSize: 48,
+                cardSize: panel.frame.size, targetVisibleFrame: screen)
+            #expect(panel.frame == expected)
+        }
+        service.acknowledge(identity: event.identity)
+        try await Task.sleep(for: .milliseconds(250))
+        #expect(service.pendingEvents.isEmpty)
+        #expect(!presenter.isVisible)
+        #expect(panels().isEmpty)
+    }
+}
+
+@Test @MainActor func codexCompletionCardRealLayoutPreview() async throws {
+    let suite = "narc-card-layout-tests-" + UUID().uuidString
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let service = CodexCompletionService(defaults: defaults)
+    service.setEnabled(true, now: codexTestNow.addingTimeInterval(-1))
+    let layout = CodexCompletionCardLayout()
+    let panel = TodoNudgeWindow(rootView: CodexCompletionCard(
+        service: service, layout: layout, onResize: {}, onOpen: { _, done in done(false) }
+    ).environment(\.colorScheme, .light))
+    defer { panel.close() }
+    let titles = ["检查服务状态", "核对新版本发布前的安装流程与多屏幕窗口召回体验，整理需要继续处理的问题", "整理今天的项目进度", "确认明天的日程", "回顾本周待办", "准备项目说明"]
+    var events: [CodexCompletionEvent] = []
+    for (index, title) in titles.enumerated() {
+        let thread = String(format: "00000000-0000-0000-0000-%012d", index + 10)
+        events.append(codexEvent(thread: thread))
+        service.setName(title, threadID: thread)
+    }
+    var singleHeight: CGFloat = 0
+    for (name, sample) in [("single", [events[0]]), ("long", [events[1]]), ("multiple", events), ("reduced", [events[0]])] {
+        // Keep the same view/window alive to verify content changes shrink it too.
+        if name == "reduced" {
+            for event in service.pendingEvents where event.threadID != events[0].threadID {
+                service.acknowledge(identity: event.identity)
+            }
+        } else {
+            for event in service.pendingEvents { service.acknowledge(identity: event.identity) }
+            let fresh = sample.map { event in
+                codexEvent(turn: UUID().uuidString.lowercased(), thread: event.threadID)
+            }
+            service.ingest(fresh, now: codexTestNow)
+        }
+        for _ in 0..<5 {
+            panel.setContentSize(NSSize(width: 340, height: layout.cardHeight))
+            panel.contentView?.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(40))
+        }
+        if name == "single" {
+            singleHeight = layout.cardHeight
+            #expect(singleHeight > 95 && singleHeight < 155)
+        } else if name == "long" {
+            #expect(layout.cardHeight > singleHeight)
+        } else if name == "multiple" {
+            #expect(layout.cardHeight == 360)
+            #expect(layout.contentHeight > layout.listHeight)
+        } else {
+            #expect(layout.cardHeight == singleHeight)
+        }
+        if let path = ProcessInfo.processInfo.environment["NARC_CARD_SNAPSHOT_DIR"], path.hasPrefix("/private/tmp/") {
+            let view = try #require(panel.contentView)
+            let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            let png = try #require(bitmap.representation(using: .png, properties: [:]))
+            try png.write(to: URL(fileURLWithPath: path).appendingPathComponent("reply-\(name).png"))
+        }
+        print("Card layout \(name): \(layout.cardHeight)pt; content \(layout.contentHeight)pt")
+    }
 }

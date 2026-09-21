@@ -483,15 +483,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.onDragStart = { [weak self] in
             self?.widgetDragState.isDragging = true
             self?.postponeTodoNudge(for: TodoNudgePolicy.todoChangeSilence)
+            self?.codexCompletionPresenter.reconcile()
         }
         window.onDragEnd = { [weak self] in
             self?.widgetDragState.isDragging = false
+            self?.codexCompletionPresenter.reconcile()
         }
 
         // When the widget is dragged, reposition the panel and persist the origin.
         window.onWindowMoved = { [weak self] in
             self?.repositionPanel()
             self?.repositionTodoNudge()
+            self?.codexCompletionPresenter.reconcile()
             if let win = self?.floatingWindow {
                 let origin = win.frame.origin
                 UserDefaults.standard.set("\(Int(origin.x)),\(Int(origin.y))", forKey: "widgetOrigin")
