@@ -3,28 +3,57 @@ import SwiftUI
 
 @MainActor
 final class CodexCompletionPresenter {
-    let service = CodexCompletionService()
+    let service: CodexCompletionService
     private var panel: TodoNudgeWindow?
+    private let layout = CodexCompletionCardLayout()
+    private var resizeTask: Task<Void, Never>?
+    private var presentationID = UUID()
     var anchor: (() -> (NSRect, CGFloat, NSRect)?)?
     var isBlocked: (() -> Bool)?
     var isVisible: Bool { panel?.isVisible == true }
+
+    init(service: CodexCompletionService? = nil) {
+        self.service = service ?? CodexCompletionService()
+    }
 
     func start() {
         service.onRefresh = { [weak self] in self?.reconcile() }
         service.start()
     }
 
-    func stop() { service.stop(); hide() }
+    func stop() { service.stop(); service.onRefresh = nil; hide() }
 
-    private func hide() { panel?.orderOut(nil); panel = nil }
+    private func hide() {
+        presentationID = UUID()
+        resizeTask?.cancel()
+        resizeTask = nil
+        panel?.orderOut(nil)
+        panel?.contentView = nil
+        panel?.close()
+        panel = nil
+    }
 
-    private func reconcile() {
+    private func requestResize(for id: UUID) {
+        guard id == presentationID, resizeTask == nil else { return }
+        // NSHostingView can measure synchronously during window construction.
+        // Re-entering reconcile there creates a second, unowned visible panel.
+        resizeTask = Task { @MainActor [weak self] in
+            guard !Task.isCancelled, let self, self.presentationID == id else { return }
+            self.resizeTask = nil
+            self.reconcile()
+        }
+    }
+
+    func reconcile() {
         guard !service.pendingEvents.isEmpty, isBlocked?() != true,
               let (widget, visibleSize, screen) = anchor?() else { hide(); return }
-        let contentHeight = min(380, 105 + service.pendingEvents.count * 115)
-        let size = NSSize(width: 380, height: min(CGFloat(contentHeight), screen.height - 20))
+        let maximumHeight = max(1, min(360, screen.height - 20))
+        if layout.maximumHeight != maximumHeight { layout.maximumHeight = maximumHeight }
+        let size = NSSize(width: min(340, max(1, screen.width - 20)), height: layout.cardHeight)
         if panel == nil {
-            let card = CodexCompletionCard(service: service, onOpen: { [weak self] event, completion in
+            let id = presentationID
+            let card = CodexCompletionCard(service: service, layout: layout,
+                onResize: { [weak self] in self?.requestResize(for: id) }, onOpen: { [weak self] event, completion in
                 guard let self else { completion(false); return }
                 self.open(event, completion: completion)
             })
@@ -55,30 +84,67 @@ final class CodexCompletionPresenter {
     }
 }
 
-private struct CodexCompletionCard: View {
+/// Share measured content height with the AppKit panel; never estimate by row count.
+@MainActor
+final class CodexCompletionCardLayout: ObservableObject {
+    static let chromeHeight: CGFloat = 64 // 16pt padding × 2 + 20pt header + 12pt gap.
+    @Published var maximumHeight: CGFloat = 360
+    @Published private(set) var contentHeight: CGFloat = 64
+
+    var listHeight: CGFloat { min(contentHeight, max(0, maximumHeight - Self.chromeHeight)) }
+    var cardHeight: CGFloat { min(maximumHeight, Self.chromeHeight + listHeight) }
+
+    @discardableResult func measure(_ height: CGFloat) -> Bool {
+        guard height.isFinite, height >= 0 else { return false }
+        let rounded = ceil(height)
+        guard rounded != contentHeight else { return false }
+        contentHeight = rounded
+        return true
+    }
+}
+
+private struct CodexCompletionContentHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+struct CodexCompletionCard: View {
     @ObservedObject var service: CodexCompletionService
+    @ObservedObject var layout: CodexCompletionCardLayout
+    let onResize: () -> Void
     let onOpen: (CodexCompletionEvent, @escaping (Bool) -> Void) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("\(service.pendingEvents.count) 个对话已回复", systemImage: "bubble.left.and.bubble.right")
-                .font(.narcSubtitle).foregroundStyle(Color.narcAccent)
-            Text("ChatGPT / Codex · 等待你继续")
-                .font(.narcCaption).foregroundStyle(.secondary)
+            HStack {
+                Label("\(service.pendingEvents.count) 个对话已回复", systemImage: "bubble.left.and.bubble.right")
+                    .font(.narcBody).foregroundStyle(Color.narcAccent)
+                Spacer(minLength: 8)
+                Text("ChatGPT / Codex").font(.narcCaption).foregroundStyle(.secondary)
+            }
+            .lineLimit(1).frame(height: 20)
             ScrollView {
                 VStack(spacing: 12) {
                     ForEach(service.pendingEvents, id: \.identity) { event in
+                        if event.identity != service.pendingEvents.first?.identity { Divider() }
                         CodexCompletionRow(event: event,
                             title: service.displayTitle(threadID: event.threadID, fallback: event.title),
                             onDismiss: { service.acknowledge(identity: event.identity) },
                             onMute: { service.setMuted(true, threadID: event.threadID) },
                             onOpen: { onOpen(event, $0) })
-                        Divider()
                     }
                 }
+                .frame(maxWidth: .infinity)
+                .background(GeometryReader { geometry in
+                    Color.clear.preference(key: CodexCompletionContentHeight.self, value: geometry.size.height)
+                })
+            }
+            .frame(height: layout.listHeight)
+            .onPreferenceChange(CodexCompletionContentHeight.self) { height in
+                if layout.measure(height) { onResize() }
             }
         }
-        .padding(18).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(16).frame(maxWidth: .infinity, alignment: .topLeading)
         .background(VisualEffectBackground(material: .hudWindow))
         .clipShape(RoundedRectangle(cornerRadius: NarcRadius.lg))
     }
@@ -95,14 +161,17 @@ private struct CodexCompletionRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(alignment: .top, spacing: 8) {
                 Text(event.isPreview ? "测试提示 · \(title)" : title).font(.narcSubtitle).lineLimit(2)
-                Spacer()
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
                 Button(action: onDismiss) { Image(systemName: "xmark") }
+                    .frame(width: 20, height: 20)
                     .buttonStyle(.plain).accessibilityLabel("忽略本轮回复提醒")
             }
             HStack {
                 Button("不再提醒", action: onMute).buttonStyle(.borderless)
+                    .font(.narcCaption).foregroundStyle(.secondary)
                     .help("不再提醒此对话；可在设置的 AI 回复中恢复")
                 Spacer()
                 Button(opening ? "正在打开…" : "继续对话") {

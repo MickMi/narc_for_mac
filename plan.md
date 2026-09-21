@@ -1,6 +1,32 @@
-> 🧭 状态：用户确认连接页可用，并明确要求代码与 README 一起更新；进行完整源码预览发布核验 | 当前归属：Executor | 通过 PR 更新 main，不发布二进制、不改个人数据或权限
+> 🧭 状态：用户授权将卡片修复更新到 GitHub，执行发布前验证 | 当前归属：Executor | 保持源码测试预览，不制作 DMG
 
 # Plan: NARC 双入口个人助手
+
+## v2.0.0 · 2026-09-21 · 更新供外部测试的源码预览
+
+- task: `release-card-fix-20260921`。用户要求“再发一下 git，更新一下”，本次允许提交、推送并经 PR/CI 合入 main，取代前述卡片阶段“不推送”的限制。
+- 范围：紧凑提醒卡片、重复窗口/空态残留修复、悬浮球移动同步及对应回归；保留现有 README 安装方式和预览版边界，不制作 DMG、不更改真实配置或再次安装本机应用。
+- [x] 1. 审查完整 diff，运行全量测试和分发/安装安全检查。
+  - 本轮 Swift 全量 234/234、Python 32/32、Pin 结构 8/8、构建输出 6/6、签名策略 19/19、安装事务 6/6、source-only 和 diff 检查通过，exit 0；未发现与本次无关的待提交文件。旧工具链 Release 编译与完整 bundle 校验交由远端 CI 再验。
+- [ ] 2. 推送独立修复分支，创建 PR，等待旧工具链和完整 CI 通过后合并。
+- [ ] 3. 核对 main 已包含代码及修复记录，提供给测试人员的安装入口和优先测试场景；多屏、多桌面、应用兼容仍是外部测试重点，不宣称全部验收。
+
+## v2.0.0 · 2026-09-21 · 紧凑的回复提醒卡片
+
+- task: `codex-reply-card-compact`。用户指出单条回复下方空白过大；已定位为固定高度估算与撑满的滚动区域，不是事件数据为空。
+- 反馈修复（2026-09-21）：实机出现「0 个对话」残留及卡片脱离悬浮球；重新打开本阶段。先用真实 Presenter/NSPanel 生命周期复现，再局部修正窗口持有与定位，补清空、重开、位置及多窗口数量回归；保留原样式和提醒链路，不推送。
+- 根因与回归：NSHostingView 在创建窗口期间同步测量内容，高度回调重入 reconcile，此时 panel 尚未赋值，重复创建出无持有者的可见窗口。新增真实 Presenter 生命周期测试在旧实现上出现 9 个失败（可见窗口 2→3→4、清空后仍残留、位置偏离）；将尺寸刷新延后并合并、用展示代次丢弃旧回调、关闭时取消刷新并释放内容后转绿。悬浮球拖动开始/结束及移动立即同步提醒，不再仅等轮询。
+- 修复版实机确认（2026-09-21）：用户回复“能看到，关闭后整张消失”，确认独立测试卡片显示和最后一项关闭后无空卡片残留；关闭路径验收通过，不扩展为多屏拖动或所有打开失败路径已验证。
+- 修复验证：`swift test --scratch-path /private/tmp/narc-card-check-20260921 --disable-sandbox --no-parallel --filter 'codexCompletion|todoNudge'` → 28/28、exit 0，覆盖连续三轮创建/关闭、拖动隐藏、负坐标屏幕定位；原卡片测量仍为 116/130/360/116pt。测试最初独立运行缺少 NSApplication 初始化而退出，补齐测试环境后才取得上述旧实现失败基线。沿用原签名正常安装、严格验签及安装主程序 cmp 通过；实机确认旧空卡片已随旧进程退出清除，新版悬浮球可见。已投递独立 preview 提醒，当前 UI 工具仅定位到悬浮球，无法据此声明真实卡片显示/点击通过，已请用户确认；未把测试事件作为连接成功证据。
+- 用户确认（2026-09-21）：“是的，这个才对”，接受前述紧凑预览并进入本机安装体验；保留签名、授权、个人数据及原通知配置。
+- 范围：复用 CodexCompletionPresenter/Card 与非激活窗口；沿用现有颜色，合并头部信息、实际测量列表高度、只在项间显示分隔线；保留继续、忽略本轮和单会话静音语义。不改连接配置/个人数据，不自动安装或推送。
+- [x] 1. 内容自适应高度，支持单条、长标题、失败提示、多条上限滚动以及关闭后收缩。
+- [x] 2. 聚焦回归与真实 SwiftUI 排版预览；用户确认前不标完整验收或发布。
+- [x] 3. 用户确认紧凑方向后按原签名安装并启动；实机点击、失败反馈及跨屏确认仍待执行，不自动发布。
+- 安装验证（2026-09-21）：`swift test --scratch-path /private/tmp/narc-card-check-20260921 --disable-sandbox --no-parallel --quiet` → 233/233；`PYTHONDONTWRITEBYTECODE=1 python3 scripts/tests/codex-hook-tests.py` → 32/32；`bash scripts/verify-source-only-distribution.sh` → PASS，均 exit 0。正常退出旧进程后运行 `NARC_BUILD_CONFIG=debug NARC_SKIP_LAUNCH=1 SWIFT_BUILD_FLAGS='--scratch-path /private/tmp/narc-card-check-20260921 --disable-sandbox' bash scripts/install.sh` → exit 0。安装目录 `/Users/mickmi/Applications/NARC.app` 严格验签通过，指定签名身份与安装前相同；主程序及 adapter 与构建产物 cmp 一致，Assistant 数据、签名标记、Codex config/hooks 的 SHA-256 前后相同。实际启动后 AX 显示 NARC 悬浮球及 3 项 Todo；未注入真实提醒数据，未把启动检查当作真实卡片点击或跨屏验收。
+- 验证：独立缓存基线 25/25；改后 `swift test --scratch-path /private/tmp/narc-card-check-20260921 --disable-sandbox --no-parallel --filter 'codexCompletion|todoNudge'` → 27/27、exit 0，diff 检查通过。实际 SwiftUI/NSPanel 离屏排版：短标题 116pt、长标题 130pt、6 条封顶 360pt，逐条 acknowledge 后回到 116pt；PNG 在 `/private/tmp/narc-card-preview-20260921/`。保留非激活窗口；未安装、不改真实提醒数据。
+- 回归夹具首次没有 acknowledge 旧事件，误把 ingest 当作替换列表，导致收缩断言失败；修正为真实逐条关闭语义后转绿，生产提醒状态机未改。高度测量/封顶/回缩已加入自动回归，整仓 QA 留待体验确认。
+- 基线：旧临时编译缓存丢失依赖源文件，改用独立临时构建目录，不清理已有缓存或项目数据。
 
 ## v2.0.0 · 2026-09-20 · 代码与用户说明一起更新
 
