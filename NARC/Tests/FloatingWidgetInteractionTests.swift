@@ -1,4 +1,5 @@
 import Cocoa
+import SwiftUI
 import Testing
 @testable import NARC
 
@@ -33,6 +34,80 @@ func draggingNeverCountsAsATap() {
             isDragging: true
         )
     )
+}
+
+@Test(arguments: [CGFloat(40), CGFloat(48), CGFloat(58)])
+func codexReplyCueHasIndependentClickableTarget(visibleSize: CGFloat) {
+    let canvasSize = visibleSize + 80
+    let cue = WidgetPointerInteractionPolicy.codexCueRect(
+        canvasSize: canvasSize, visibleSize: visibleSize
+    )
+    let circle = NSRect(x: 40, y: 40, width: visibleSize, height: visibleSize)
+    #expect(cue.width == 32)
+    #expect(cue.height == 19)
+    #expect(cue.minX < circle.minX)
+    #expect(cue.maxY > circle.maxY)
+    #expect(cue.minX >= 0 && cue.maxY <= canvasSize)
+    let cueCenter = NSPoint(x: cue.midX, y: cue.midY)
+    #expect(WidgetPointerInteractionPolicy.tapTarget(
+        at: cueCenter, canvasSize: canvasSize, visibleSize: visibleSize,
+        showsCodexCue: true
+    ) == .codexReply)
+    #expect(WidgetPointerInteractionPolicy.tapTarget(
+        at: NSPoint(x: cue.minX + 1, y: cue.maxY - 1),
+        canvasSize: canvasSize, visibleSize: visibleSize, showsCodexCue: true
+    ) == .codexReply)
+    #expect(WidgetPointerInteractionPolicy.tapTarget(
+        at: cueCenter, canvasSize: canvasSize, visibleSize: visibleSize,
+        showsCodexCue: false
+    ) == .widget)
+    #expect(WidgetPointerInteractionPolicy.tapTarget(
+        at: NSPoint(x: circle.midX, y: circle.midY), canvasSize: canvasSize,
+        visibleSize: visibleSize, showsCodexCue: true
+    ) == .widget)
+    #expect(CodexReplyCuePresentation.resolve(count: 0).text == nil)
+    #expect(CodexReplyCuePresentation.resolve(count: 1).text == "1")
+    #expect(CodexReplyCuePresentation.resolve(count: 10).text == "9+")
+}
+
+@Test(arguments: [CGFloat(40), CGFloat(48), CGFloat(58)])
+@MainActor
+func visibleReplyAndTodoCuesAcceptClicksOutsideTheCircle(visibleSize: CGFloat) throws {
+    _ = NSApplication.shared
+    let window = FloatingWidgetWindow()
+    defer { window.close() }
+    window.applyWidgetSize(visibleSize)
+    window.contentView = NSHostingView(rootView: FloatingWidgetView(
+        state: .idle, availableTodoCount: 3, codexReplyCount: 2,
+        widgetSize: visibleSize == 40 ? "Small" : (visibleSize == 58 ? "Large" : "Medium")
+    ))
+    let view = try #require(window.contentView)
+    window.showsCodexCue = true
+    window.todoCueCount = 3
+    let canvas = window.canvasSize
+    let reply = WidgetPointerInteractionPolicy.codexCueRect(
+        canvasSize: canvas, visibleSize: visibleSize
+    )
+    let todo = WidgetPointerInteractionPolicy.todoCueRect(
+        canvasSize: canvas, visibleSize: visibleSize, count: 3
+    )
+    let replyPoint = NSPoint(x: reply.minX + 2, y: reply.maxY - 2)
+    let todoPoint = NSPoint(x: todo.minX + 2, y: todo.minY + 2)
+    #expect(view.hitTest(replyPoint) != nil)
+    #expect(view.hitTest(todoPoint) != nil)
+    #expect(WidgetPointerInteractionPolicy.tapTarget(
+        at: replyPoint, canvasSize: canvas, visibleSize: visibleSize,
+        showsCodexCue: true, todoCueCount: 3
+    ) == .codexReply)
+    #expect(WidgetPointerInteractionPolicy.tapTarget(
+        at: todoPoint, canvasSize: canvas, visibleSize: visibleSize,
+        showsCodexCue: true, todoCueCount: 3
+    ) == .todo)
+    #expect(view.hitTest(NSPoint(x: 2, y: 2)) == nil)
+    window.todoCueCount = 0
+    window.showsCodexCue = false
+    #expect(view.hitTest(replyPoint) == nil)
+    #expect(view.hitTest(todoPoint) == nil)
 }
 
 @Test
@@ -171,14 +246,50 @@ func panelPlacementKeepsPanelInsideNegativeCoordinateDisplay() {
     let panel = FloatingPanelPlacement.frame(
         adjacentTo: widgetFrame,
         visibleWidgetSize: 48,
-        panelSize: NSSize(width: 320, height: 420),
         targetVisibleFrame: target
     )
 
+    #expect(panel.size == NSSize(width: NarcSize.panelWidth, height: NarcSize.panelHeight))
     #expect(panel.minX >= target.minX)
     #expect(panel.maxX <= target.maxX)
     #expect(panel.minY >= target.minY)
     #expect(panel.maxY <= target.maxY)
+}
+
+@Test
+func summonedPanelUsesCurrentContentSizeAtRightScreenEdge() {
+    let target = NSRect(x: 0, y: 0, width: 1512, height: 982)
+    let widgetFrame = NSRect(x: 1384, y: 427, width: 128, height: 128)
+
+    let panel = FloatingPanelPlacement.frame(
+        adjacentTo: widgetFrame,
+        visibleWidgetSize: 48,
+        targetVisibleFrame: target
+    )
+
+    #expect(panel.width == NarcSize.panelWidth)
+    #expect(panel.height == NarcSize.panelHeight)
+    #expect(panel.maxX == target.maxX - 4)
+    #expect(panel.minX >= target.minX)
+    #expect(panel.maxY <= target.maxY)
+}
+
+@Test @MainActor
+func mainPanelAllowsBackgroundDraggingWithoutChangingOtherPanelWindows() {
+    _ = NSApplication.shared
+    let mainPanel = PanelWindow.mainPanel(
+        contentRect: NSRect(x: 100, y: 100, width: 360, height: 480)
+    )
+    let regularPanel = PanelWindow(
+        contentRect: NSRect(x: 100, y: 100, width: 320, height: 240),
+        styleMask: [.borderless, .nonactivatingPanel],
+        backing: .buffered,
+        defer: false
+    )
+
+    #expect(mainPanel.isMovable)
+    #expect(mainPanel.isMovableByWindowBackground)
+    #expect(!regularPanel.isMovableByWindowBackground)
 }
 
 @Test

@@ -2,10 +2,11 @@ import SwiftUI
 
 struct TodoListView: View {
     @ObservedObject var store: AssistantStore
-    let onCreate: () -> Void
+    var compact = false
 
     @State private var showsCompleted = false
     @State private var editingTodo: TodoItem?
+    @State private var pendingDeletion: TodoItem?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,23 +19,9 @@ struct TodoListView: View {
                     if store.incompleteTodos.isEmpty {
                         emptyState
                     } else {
-                        sectionHeader(
-                            title: "待完成",
-                            count: store.incompleteTodos.count,
-                            icon: "circle"
-                        )
-
+                        sectionHeader(title: "待完成", count: store.incompleteTodos.count, icon: "circle")
                         ForEach(store.incompleteTodos) { todo in
-                            TodoItemRow(
-                                todo: todo,
-                                onToggleCompleted: {
-                                    _ = store.setTodoCompleted(id: todo.id, completed: true)
-                                },
-                                onResume: {
-                                    _ = store.setTodoDeferred(id: todo.id, until: nil)
-                                },
-                                onPlan: { editingTodo = todo }
-                            )
+                            row(todo)
                         }
                     }
 
@@ -42,13 +29,7 @@ struct TodoListView: View {
                         DisclosureGroup(isExpanded: $showsCompleted) {
                             LazyVStack(spacing: NarcSpacing.sm) {
                                 ForEach(store.completedTodos) { todo in
-                                    TodoItemRow(
-                                        todo: todo,
-                                        onToggleCompleted: {
-                                            _ = store.setTodoCompleted(id: todo.id, completed: false)
-                                        },
-                                        onResume: nil
-                                    )
+                                    row(todo)
                                 }
                             }
                             .padding(.top, NarcSpacing.sm)
@@ -69,10 +50,39 @@ struct TodoListView: View {
                 .padding(NarcSpacing.lg)
             }
         }
-        .background(Color.narcBackground)
+        .background(compact ? Color.clear : Color.narcBackground)
         .sheet(item: $editingTodo) { todo in
-            TodoPlanningEditor(store: store, todo: todo)
+            TodoTitleEditor(store: store, todo: todo)
         }
+        .alert("删除这条 Todo？", isPresented: deletionConfirmation) {
+            Button("删除", role: .destructive) {
+                if let pendingDeletion {
+                    _ = store.deleteTodo(id: pendingDeletion.id)
+                }
+                pendingDeletion = nil
+            }
+            Button("取消", role: .cancel) { pendingDeletion = nil }
+        } message: {
+            Text("删除后将从本机数据中移除，当前版本不提供撤销。")
+        }
+    }
+
+    private func row(_ todo: TodoItem) -> some View {
+        TodoItemRow(
+            todo: todo,
+            onToggleCompleted: {
+                _ = store.setTodoCompleted(id: todo.id, completed: !todo.isCompleted)
+            },
+            onEdit: { editingTodo = todo },
+            onDelete: { pendingDeletion = todo }
+        )
+    }
+
+    private var deletionConfirmation: Binding<Bool> {
+        Binding(
+            get: { pendingDeletion != nil },
+            set: { if !$0 { pendingDeletion = nil } }
+        )
     }
 
     private var emptyState: some View {
@@ -80,18 +90,9 @@ struct TodoListView: View {
             Image(systemName: "checkmark.circle")
                 .font(.system(size: 34))
                 .foregroundColor(.narcTextMuted)
-
             Text(store.completedTodos.isEmpty ? "还没有 Todo" : "当前没有待完成 Todo")
                 .font(.narcSubtitle)
                 .foregroundColor(.narcText)
-
-            Text("快速记下下一件需要处理的事。")
-                .font(.narcCaption)
-                .foregroundColor(.narcTextMuted)
-
-            Button("新建 Todo", action: onCreate)
-                .buttonStyle(.borderedProminent)
-                .accessibilityLabel("新建 Todo")
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, NarcSpacing.xxxxl)
@@ -114,8 +115,7 @@ struct TodoListView: View {
     private func errorBanner(_ message: String) -> some View {
         HStack(spacing: NarcSpacing.sm) {
             Image(systemName: "exclamationmark.triangle.fill")
-            Text(message)
-                .fixedSize(horizontal: false, vertical: true)
+            Text(message).fixedSize(horizontal: false, vertical: true)
             Spacer()
         }
         .font(.narcCaption)
@@ -130,18 +130,12 @@ struct TodoListView: View {
 private struct TodoItemRow: View {
     let todo: TodoItem
     let onToggleCompleted: () -> Void
-    let onResume: (() -> Void)?
-    var onPlan: (() -> Void)? = nil
+    let onEdit: () -> Void
+    let onDelete: () -> Void
 
     @State private var isHovering = false
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 60)) { context in
-            row(now: context.date)
-        }
-    }
-
-    private func row(now: Date) -> some View {
         HStack(alignment: .top, spacing: NarcSpacing.md) {
             Button(action: onToggleCompleted) {
                 Image(systemName: todo.isCompleted ? "checkmark.circle.fill" : "circle")
@@ -151,118 +145,72 @@ private struct TodoItemRow: View {
             .buttonStyle(.plain)
             .accessibilityLabel(todo.isCompleted ? "将 Todo 标记为未完成" : "将 Todo 标记为已完成")
 
-            VStack(alignment: .leading, spacing: NarcSpacing.xs) {
-                Text(todo.title)
-                    .font(.narcBody)
-                    .foregroundColor(todo.isCompleted ? .narcTextMuted : .narcText)
-                    .strikethrough(todo.isCompleted)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            Text(todo.title)
+                .font(.narcBody)
+                .foregroundColor(todo.isCompleted ? .narcTextMuted : .narcText)
+                .strikethrough(todo.isCompleted)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-                Text(todo.createdAt, style: .relative)
-                    .font(.narcCaption)
-                    .foregroundColor(.narcTextFaint)
-
-                if !todo.isCompleted {
-                    HStack(spacing: NarcSpacing.xs) {
-                        if todo.isNext { Text("下一件事 ·") }
-                        Text(todo.priority.label)
-                        if let dueAt = todo.dueAt {
-                            Text("· 截止")
-                            Text(dueAt, format: .dateTime.month().day().hour().minute())
-                        }
-                    }
-                    .font(.narcCaption)
-                    .foregroundColor(todo.isNext ? .narcAccent : .narcTextMuted)
-                }
-
-                if let deferredUntil = todo.deferredUntil,
-                   deferredUntil > now,
-                   let onResume {
-                    HStack(spacing: NarcSpacing.sm) {
-                        HStack(spacing: NarcSpacing.xs) {
-                            Image(systemName: "clock.arrow.circlepath")
-                            Text("稍后")
-                            Text(deferredUntil, style: .relative)
-                        }
-                        .font(.narcCaption)
-                        .foregroundColor(.narcWarn)
-
-                        Button("现在处理", action: onResume)
-                            .buttonStyle(.link)
-                            .font(.narcCaption)
-                            .accessibilityLabel("现在处理 Todo：\(todo.title)")
-                    }
-                }
+            Button(action: onEdit) {
+                Image(systemName: "pencil")
             }
-            if let onPlan {
-                Button("安排", action: onPlan)
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel("安排 Todo：\(todo.title)")
+            .buttonStyle(.plain)
+            .help("修改 Todo")
+            .accessibilityLabel("修改 Todo：\(todo.title)")
+
+            Button(action: onDelete) {
+                Image(systemName: "trash")
             }
+            .buttonStyle(.plain)
+            .help("删除 Todo")
+            .accessibilityLabel("删除 Todo：\(todo.title)")
         }
         .padding(NarcSpacing.md)
-        .softRowBackground(
-            isSelected: false,
-            needsAttention: false,
-            isHovering: isHovering
-        )
+        .softRowBackground(isSelected: false, needsAttention: false, isHovering: isHovering)
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
     }
 }
 
-private struct TodoPlanningEditor: View {
+private struct TodoTitleEditor: View {
     @ObservedObject var store: AssistantStore
     let todo: TodoItem
     @Environment(\.dismiss) private var dismiss
-    @State private var priority: TodoPriority
-    @State private var hasDueDate: Bool
-    @State private var dueAt: Date
-    @State private var isNext: Bool
+    @State private var title: String
     @State private var saveError: String?
 
     init(store: AssistantStore, todo: TodoItem) {
         self.store = store
         self.todo = todo
-        _priority = State(initialValue: todo.priority)
-        _hasDueDate = State(initialValue: todo.dueAt != nil)
-        _dueAt = State(initialValue: todo.dueAt ?? Date())
-        _isNext = State(initialValue: todo.isNext)
+        _title = State(initialValue: todo.title)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: NarcSpacing.md) {
-            Text("安排 Todo").font(.narcTitle)
-            Text(todo.title).font(.narcBody).lineLimit(3)
-            Form {
-                Toggle("设为下一件事", isOn: $isNext)
-                Text("优先于其他任务；会替换此前指定的下一件事，并取消此任务的延期。")
-                    .font(.narcCaption).foregroundStyle(.secondary)
-                Picker("优先级", selection: $priority) {
-                    ForEach(TodoPriority.allCases) { value in
-                        Text(value.label).tag(value)
-                    }
-                }
-                Toggle("设置截止时间", isOn: $hasDueDate)
-                if hasDueDate {
-                    DatePicker("截止", selection: $dueAt, displayedComponents: [.date, .hourAndMinute])
-                }
+            Text("修改 Todo").font(.narcTitle)
+            TextField("要做什么？", text: $title)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(save)
+            if let saveError {
+                Text(saveError).font(.narcCaption).foregroundStyle(.red)
             }
-            if let saveError { Text(saveError).font(.narcCaption).foregroundStyle(.red) }
             HStack {
                 Spacer()
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("保存") {
-                    if store.updateTodoPlanning(id: todo.id, priority: priority,
-                                                dueAt: hasDueDate ? dueAt : nil, isNext: isNext) {
-                        dismiss()
-                    } else {
-                        saveError = store.lastError?.errorDescription ?? "任务已改变，请关闭后重试。"
-                    }
-                }.keyboardShortcut(.defaultAction)
+                Button("保存", action: save)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(NarcSpacing.xl)
         .frame(width: 420)
+    }
+
+    private func save() {
+        if store.updateTodoTitle(id: todo.id, title: title) {
+            dismiss()
+        } else {
+            saveError = store.lastError?.errorDescription ?? "任务已改变，请关闭后重试。"
+        }
     }
 }

@@ -96,22 +96,22 @@ struct TodoAttentionCardView: View {
         cardSurface(
             VStack(alignment: .leading, spacing: NarcSpacing.md) {
                 HStack(spacing: NarcSpacing.sm) {
-                    Label("下一件事", systemImage: "checklist")
+                    Label("未完成 Todo", systemImage: "checklist")
                         .font(.narcCaption)
-                        .foregroundColor(.narcInfo)
+                        .foregroundColor(.narcTextMuted)
 
                     Spacer()
 
                     if let position = selection.position {
                         Text("\(position) / \(selection.total)")
-                            .font(.narcMonoTiny)
-                            .foregroundColor(.narcTextFaint)
+                            .font(.narcCaption)
+                            .foregroundColor(.narcTextMuted)
                             .accessibilityLabel("第 \(position) 项，共 \(selection.total) 项")
                     }
                 }
 
                 Text(todo.title)
-                    .font(.narcTitle)
+                    .font(.system(size: presentation == .inbox ? 22 : 18, weight: .semibold))
                     .foregroundColor(.narcText)
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -131,16 +131,10 @@ struct TodoAttentionCardView: View {
                     } label: {
                         Label("完成", systemImage: "checkmark")
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(NarcFocusPrimaryButtonStyle())
                     .accessibilityLabel("完成 Todo：\(todo.title)")
 
-                    Button {
-                        deferForOneHour(todo)
-                    } label: {
-                        Label("1 小时后", systemImage: "clock.arrow.circlepath")
-                    }
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel("将 Todo 延后 1 小时：\(todo.title)")
+                    Spacer(minLength: 0)
 
                     if presentation == .nudge {
                         Button {
@@ -148,22 +142,24 @@ struct TodoAttentionCardView: View {
                         } label: {
                             Label("收起", systemImage: "xmark")
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.borderless)
                         .accessibilityLabel("收起 Todo 提醒")
                     } else {
                         Button {
                             showNext(after: todo.id)
                         } label: {
-                            Label("下一项", systemImage: "arrow.right")
+                            Image(systemName: "arrow.right")
+                                .frame(width: 28, height: 28)
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.borderless)
+                        .help("查看下一项 Todo")
                         .disabled(!selection.canAdvance)
                         .accessibilityLabel("查看下一项 Todo")
                     }
                 }
                 .controlSize(.small)
             }
-            .padding(NarcSpacing.md)
+            .padding(.vertical, NarcSpacing.sm)
         )
         .accessibilityElement(children: .contain)
     }
@@ -173,13 +169,9 @@ struct TodoAttentionCardView: View {
         switch presentation {
         case .inbox:
             content
-                .background(Color.narcInfo.opacity(0.08))
-                .clipShape(
-                    RoundedRectangle(cornerRadius: NarcRadius.md, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: NarcRadius.md, style: .continuous)
-                        .strokeBorder(Color.narcInfo.opacity(0.32), lineWidth: 1)
+                .padding(.bottom, NarcSpacing.md)
+                .overlay(alignment: .bottom) {
+                    Rectangle().fill(Color.narcBorder.opacity(0.35)).frame(height: 0.5)
                 }
         case .nudge:
             content
@@ -194,29 +186,6 @@ struct TodoAttentionCardView: View {
 
         guard store.setTodoCompleted(id: todo.id, completed: true, now: now) else {
             actionError = store.lastError?.errorDescription ?? "无法完成 Todo，请稍后重试。"
-            store.clearError()
-            onActionFailed?()
-            return
-        }
-
-        actionError = nil
-        currentTodoID = successorID
-        onSuccessfulAction?()
-    }
-
-    private func deferForOneHour(_ todo: TodoItem) {
-        let now = Date()
-        let successorID = store.nextTodo(after: todo.id, now: now)?.id
-        let deferredUntil = now.addingTimeInterval(60 * 60)
-        store.clearError()
-        onActionStarted?()
-
-        guard store.setTodoDeferred(
-            id: todo.id,
-            until: deferredUntil,
-            now: now
-        ) else {
-            actionError = store.lastError?.errorDescription ?? "无法延后 Todo，请稍后重试。"
             store.clearError()
             onActionFailed?()
             return

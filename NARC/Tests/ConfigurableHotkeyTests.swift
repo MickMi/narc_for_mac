@@ -47,16 +47,146 @@ func configurableHotkeyActionsKeepStableDefaultsAndStorageKeys() {
         .layoutBottomRight,
         .pinnedWindowSwitcher,
         .toggleCurrentWindowPin,
+        .pinnedWindowSlot1,
+        .pinnedWindowSlot2,
+        .pinnedWindowSlot3,
+        .pinnedWindowSlot4,
+        .pinnedWindowSlot5,
+        .pinnedWindowSlot6,
+        .pinnedWindowSlot7,
+        .pinnedWindowSlot8,
+        .pinnedWindowSlot9,
         .summonWidget,
         .quickCapture,
         .selectedTextTodo,
+        .askAI,
+        .webSearch,
+        .googleSearch,
     ])
     #expect(ConfigurableHotkeyAction.pinnedWindowSwitcher.defaultShortcut.displayLabel == "⌃⌥P")
     #expect(ConfigurableHotkeyAction.toggleCurrentWindowPin.defaultShortcut.displayLabel == "⌃⌥⇧P")
+    #expect(ConfigurableHotkeyAction.pinnedWindowSlotActions.map(\.defaultShortcut.displayLabel) == [
+        "⌃⌥1", "⌃⌥2", "⌃⌥3", "⌃⌥4", "⌃⌥5", "⌃⌥6", "⌃⌥7", "⌃⌥8", "⌃⌥9",
+    ])
+    #expect(ConfigurableHotkeyAction.askAI.defaultShortcut.displayLabel == "⌃⌥⇧D")
+    #expect(ConfigurableHotkeyAction.webSearch.defaultShortcut.displayLabel == "⌃⌥B")
+    #expect(ConfigurableHotkeyAction.googleSearch.defaultShortcut.displayLabel == "⌃⌥G")
     #expect(
         ConfigurableHotkeyAction.pinnedWindowSwitcher.defaultsKey
             != ConfigurableHotkeyAction.toggleCurrentWindowPin.defaultsKey
     )
+}
+
+@Test
+@MainActor
+func instantSearchHotkeysDispatchOncePerPhysicalPress() async {
+    let (defaults, suiteName) = isolatedConfigurableHotkeyDefaults()
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let registrar = RecordingConfigurableHotkeyRegistrar(defaults: defaults)
+    let service = makeConfigurableHotkeyService(defaults: defaults, registrar: registrar)
+    var actions: [String] = []
+    service.onAskAIHotkeyPressed = { actions.append("ask") }
+    service.onWebSearchHotkeyPressed = { actions.append("bing") }
+    service.onGoogleSearchHotkeyPressed = { actions.append("google") }
+
+    let askShortcut = ConfigurableHotkeyAction.askAI.defaultShortcut
+    let searchShortcut = ConfigurableHotkeyAction.webSearch.defaultShortcut
+    #expect(service.updateShortcut(askShortcut, for: .askAI) == .applied(askShortcut))
+    #expect(service.updateShortcut(searchShortcut, for: .webSearch) == .applied(searchShortcut))
+    let googleShortcut = ConfigurableHotkeyAction.googleSearch.defaultShortcut
+    #expect(service.updateShortcut(googleShortcut, for: .googleSearch) == .applied(googleShortcut))
+    service.handleConfigurableHotkeyEvent(slotID: 120, isPressed: true)
+    service.handleConfigurableHotkeyEvent(slotID: 120, isPressed: true)
+    service.handleConfigurableHotkeyEvent(slotID: 120, isPressed: false)
+    service.handleConfigurableHotkeyEvent(slotID: 121, isPressed: true)
+    service.handleConfigurableHotkeyEvent(slotID: 124, isPressed: true)
+    service.handleConfigurableHotkeyEvent(slotID: 124, isPressed: true)
+    await withCheckedContinuation { continuation in
+        DispatchQueue.main.async { continuation.resume() }
+    }
+    #expect(actions == ["ask", "bing", "google"])
+}
+
+@Test
+@MainActor
+func newSearchDefaultDoesNotDisplaceAnOlderSavedShortcut() {
+    let (defaults, suiteName) = isolatedConfigurableHotkeyDefaults()
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    defaults.set(
+        SelectedTextTodoShortcut.controlOptionD.rawValue,
+        forKey: HotkeyService.selectedTextTodoShortcutDefaultsKey
+    )
+    let registrar = RecordingConfigurableHotkeyRegistrar(defaults: defaults)
+    let service = makeConfigurableHotkeyService(defaults: defaults, registrar: registrar)
+
+    service.registerConfiguredHotkeys(noAX: false)
+
+    #expect(
+        service.activeShortcut(for: .selectedTextTodo)
+            == SelectedTextTodoShortcut.controlOptionD.configurableShortcut
+    )
+    #expect(service.activeShortcut(for: .askAI) == ConfigurableHotkeyAction.askAI.defaultShortcut)
+}
+
+@Test @MainActor
+func googleSearchDefaultPreservesOlderBingCustomization() throws {
+    let (defaults, suiteName) = isolatedConfigurableHotkeyDefaults()
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let shortcut = ConfigurableHotkeyAction.googleSearch.defaultShortcut
+    defaults.set(try JSONEncoder().encode(shortcut), forKey: ConfigurableHotkeyAction.webSearch.defaultsKey)
+    let registrar = RecordingConfigurableHotkeyRegistrar(defaults: defaults)
+    let service = makeConfigurableHotkeyService(defaults: defaults, registrar: registrar)
+    service.registerConfiguredHotkeys(noAX: true)
+    #expect(service.activeShortcut(for: .webSearch) == shortcut)
+    #expect(service.activeShortcut(for: .googleSearch) == nil)
+    #expect(service.hotkeyState(for: .googleSearch) == .unavailable(
+        requested: shortcut, reason: .conflictsWithNARC("Bing 搜索")))
+    #expect(defaults.data(forKey: ConfigurableHotkeyAction.googleSearch.defaultsKey) == nil)
+}
+
+@Test @MainActor
+func googleSearchCustomizationPersistsAndUsesReplacementSlot() async throws {
+    let (defaults, suiteName) = isolatedConfigurableHotkeyDefaults()
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let registrar = RecordingConfigurableHotkeyRegistrar(defaults: defaults)
+    let service = makeConfigurableHotkeyService(defaults: defaults, registrar: registrar)
+    service.registerConfiguredHotkeys(noAX: true)
+    let custom = ConfigurableShortcut(keyCode: 5, modifiers: UInt32(controlKey | optionKey | shiftKey))
+    #expect(service.updateShortcut(custom, for: .googleSearch) == .applied(custom))
+    var count = 0
+    service.onGoogleSearchHotkeyPressed = { count += 1 }
+    service.handleConfigurableHotkeyEvent(slotID: 124, isPressed: true)
+    service.handleConfigurableHotkeyEvent(slotID: 125, isPressed: true)
+    service.handleConfigurableHotkeyEvent(slotID: 125, isPressed: true)
+    await withCheckedContinuation { continuation in
+        DispatchQueue.main.async { continuation.resume() }
+    }
+    #expect(count == 1)
+    let restored = makeConfigurableHotkeyService(defaults: defaults, registrar: registrar)
+    #expect(restored.shortcut(for: .googleSearch) == custom)
+}
+
+@Test @MainActor
+func oldAskAIDefaultMigratesWithoutRewritingCustomShortcuts() throws {
+    let (defaults, suiteName) = isolatedConfigurableHotkeyDefaults()
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let oldDefault = ConfigurableShortcut(keyCode: 2, modifiers: UInt32(controlKey | optionKey))
+    defaults.set(try JSONEncoder().encode(oldDefault), forKey: ConfigurableHotkeyAction.askAI.defaultsKey)
+    let registrar = RecordingConfigurableHotkeyRegistrar(defaults: defaults)
+    let service = makeConfigurableHotkeyService(defaults: defaults, registrar: registrar)
+    #expect(service.shortcut(for: .askAI) == ConfigurableHotkeyAction.askAI.defaultShortcut)
+    service.registerConfiguredHotkeys(noAX: false)
+    #expect(service.activeShortcut(for: .askAI) == ConfigurableHotkeyAction.askAI.defaultShortcut)
+    let saved = try #require(defaults.data(forKey: ConfigurableHotkeyAction.askAI.defaultsKey))
+    #expect(
+        try JSONDecoder().decode(ConfigurableShortcut.self, from: saved)
+            == ConfigurableHotkeyAction.askAI.defaultShortcut
+    )
+
+    let custom = ConfigurableShortcut(keyCode: 0, modifiers: UInt32(controlKey | cmdKey))
+    defaults.set(try JSONEncoder().encode(custom), forKey: ConfigurableHotkeyAction.askAI.defaultsKey)
+    let restored = makeConfigurableHotkeyService(defaults: defaults, registrar: registrar)
+    #expect(restored.shortcut(for: .askAI) == custom)
 }
 
 @Test
@@ -617,24 +747,108 @@ func noAXRegistrationPolicyUsesSavedNavigationShortcutsAndBlocksAXActions() thro
     let service = makeConfigurableHotkeyService(defaults: defaults, registrar: registrar)
     service.registerConfiguredHotkeys(noAX: true)
 
-    #expect(registrar.events == ["register:101:0", "register:103:11"])
+    #expect(registrar.events == [
+        "register:101:0", "register:103:11", "register:120:2", "register:121:11",
+        "register:124:5",
+    ])
     #expect(service.activeShortcut(for: .summonWidget) == summon)
     #expect(service.activeShortcut(for: .quickCapture) == capture)
+    #expect(service.activeShortcut(for: .askAI) == ConfigurableHotkeyAction.askAI.defaultShortcut)
+    #expect(service.activeShortcut(for: .webSearch) == ConfigurableHotkeyAction.webSearch.defaultShortcut)
+    #expect(service.activeShortcut(for: .googleSearch) == ConfigurableHotkeyAction.googleSearch.defaultShortcut)
     for action in ConfigurableHotkeyAction.allCases where action.requiresAccessibility {
         #expect(service.activeShortcut(for: action) == nil)
         #expect(service.updateShortcut(action.defaultShortcut, for: action)
                 == .rejected(.unavailableInCurrentRuntime))
     }
-    #expect(registrar.events.count == 2)
+    #expect(registrar.events.count == 5)
 }
 
 @Test
 func configurableHotkeyRegistrationRetainsHistoricalExclusivity() {
     for action in ConfigurableHotkeyAction.allCases {
-        let expected: OptionBits = [.pinnedWindowSwitcher, .toggleCurrentWindowPin].contains(action)
+        let expected: OptionBits = ([.pinnedWindowSwitcher, .toggleCurrentWindowPin].contains(action)
+            || action.pinnedWindowSlotIndex != nil)
             ? OptionBits(kEventHotKeyExclusive) : 0
         #expect(HotkeyService.registrationOptions(for: action) == expected)
     }
+}
+
+@Test
+@MainActor
+func numericPinSlotsRegisterOnlyWhenOccupiedAndIgnoreReleasedSlots() async {
+    let (defaults, suiteName) = isolatedConfigurableHotkeyDefaults()
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let registrar = RecordingConfigurableHotkeyRegistrar(defaults: defaults)
+    let service = makeConfigurableHotkeyService(defaults: defaults, registrar: registrar)
+    var recalledIndices: [Int] = []
+    service.onPinnedWindowSlotHotkeyPressed = { recalledIndices.append($0) }
+
+    service.registerConfiguredHotkeys(noAX: false)
+    #expect(service.pinnedWindowSlotCount == 0)
+    #expect(service.activeShortcut(for: .pinnedWindowSlot1) == nil)
+    #expect(!registrar.events.contains(where: { $0.hasPrefix("register:130:") }))
+
+    service.updatePinnedWindowSlotCount(2)
+    #expect(service.activeShortcut(for: .pinnedWindowSlot1)?.displayLabel == "⌃⌥1")
+    #expect(service.activeShortcut(for: .pinnedWindowSlot2)?.displayLabel == "⌃⌥2")
+    #expect(service.activeShortcut(for: .pinnedWindowSlot3) == nil)
+    service.handleConfigurableHotkeyEvent(slotID: 130, isPressed: true)
+    service.handleConfigurableHotkeyEvent(slotID: 130, isPressed: true)
+    service.handleConfigurableHotkeyEvent(slotID: 131, isPressed: true)
+    await withCheckedContinuation { continuation in
+        DispatchQueue.main.async { continuation.resume() }
+    }
+    #expect(recalledIndices == [0, 1])
+
+    service.updatePinnedWindowSlotCount(1)
+    #expect(registrar.events.contains("unregister:131"))
+    service.handleConfigurableHotkeyEvent(slotID: 131, isPressed: true)
+    await withCheckedContinuation { continuation in
+        DispatchQueue.main.async { continuation.resume() }
+    }
+    #expect(recalledIndices == [0, 1])
+    service.updatePinnedWindowSlotCount(2)
+    #expect(registrar.events.contains("register:141:19"))
+}
+
+@Test
+@MainActor
+func numericPinSlotConflictDoesNotBlockOtherOccupiedSlots() {
+    let (defaults, suiteName) = isolatedConfigurableHotkeyDefaults()
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let registrar = RecordingConfigurableHotkeyRegistrar(defaults: defaults)
+    registrar.failuresByShortcut[ConfigurableHotkeyAction.pinnedWindowSlot2.defaultShortcut] = .occupied
+    let service = makeConfigurableHotkeyService(defaults: defaults, registrar: registrar)
+    service.registerConfiguredHotkeys(noAX: false)
+    service.updatePinnedWindowSlotCount(2)
+
+    #expect(service.activeShortcut(for: .pinnedWindowSlot1) != nil)
+    #expect(service.activeShortcut(for: .pinnedWindowSlot2) == nil)
+    #expect(service.hotkeyState(for: .pinnedWindowSlot2) == .unavailable(
+        requested: ConfigurableHotkeyAction.pinnedWindowSlot2.defaultShortcut,
+        reason: .occupied
+    ))
+}
+
+@Test
+@MainActor
+func newNumericPinDefaultDoesNotDisplaceAnOlderSavedShortcut() throws {
+    let (defaults, suiteName) = isolatedConfigurableHotkeyDefaults()
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let oldChoice = ConfigurableHotkeyAction.pinnedWindowSlot1.defaultShortcut
+    defaults.set(try JSONEncoder().encode(oldChoice), forKey: ConfigurableHotkeyAction.summonWidget.defaultsKey)
+    let registrar = RecordingConfigurableHotkeyRegistrar(defaults: defaults)
+    let service = makeConfigurableHotkeyService(defaults: defaults, registrar: registrar)
+    service.updatePinnedWindowSlotCount(1)
+    service.registerConfiguredHotkeys(noAX: false)
+
+    #expect(service.activeShortcut(for: .summonWidget) == oldChoice)
+    #expect(service.activeShortcut(for: .pinnedWindowSlot1) == nil)
+    #expect(service.hotkeyState(for: .pinnedWindowSlot1) == .unavailable(
+        requested: oldChoice,
+        reason: .conflictsWithNARC(ConfigurableHotkeyAction.summonWidget.title)
+    ))
 }
 
 private func makeConfigurableHotkeyEvent(

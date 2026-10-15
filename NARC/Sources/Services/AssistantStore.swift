@@ -73,13 +73,7 @@ final class AssistantStore: ObservableObject {
     }
 
     func availableTodos(now: Date = Date()) -> [TodoItem] {
-        sortedTodos(
-            todos.filter { todo in
-                guard !todo.isCompleted else { return false }
-                guard let deferredUntil = todo.deferredUntil else { return true }
-                return deferredUntil <= now
-            }
-        )
+        incompleteTodos
     }
 
     func nextTodo(after id: UUID?, now: Date = Date()) -> TodoItem? {
@@ -130,6 +124,20 @@ final class AssistantStore: ObservableObject {
             return nil
         }
         return item
+    }
+
+    @discardableResult
+    func updateTodoTitle(id: UUID, title: String, now: Date = Date()) -> Bool {
+        guard let title = normalizedContent(title) else {
+            lastError = .blankContent
+            return false
+        }
+        guard let index = todos.firstIndex(where: { $0.id == id }) else { return false }
+
+        var nextTodos = todos
+        nextTodos[index].title = title
+        nextTodos[index].updatedAt = now
+        return persist(todos: nextTodos, notes: notes, inboxItems: inboxItems)
     }
 
     /// Atomically delete one exact Todo. Used by the short-lived Undo token
@@ -285,10 +293,20 @@ final class AssistantStore: ObservableObject {
                 return
             }
 
-            todos = snapshot.todos
+            // Legacy Inbox records become regular Todos. Keep the original
+            // snapshot untouched until one atomic write commits the migration.
+            let migratedTodos = snapshot.todos + snapshot.inboxItems.map { item in
+                TodoItem(id: item.id, title: item.content,
+                         createdAt: item.createdAt, updatedAt: item.updatedAt)
+            }
+            todos = migratedTodos
             notes = snapshot.notes
-            inboxItems = snapshot.inboxItems
-            lastError = nil
+            inboxItems = []
+            if snapshot.inboxItems.isEmpty {
+                lastError = nil
+            } else {
+                _ = persist(todos: migratedTodos, notes: snapshot.notes, inboxItems: [])
+            }
         } catch {
             writesBlocked = true
             lastError = .loadFailed(error.localizedDescription)
@@ -361,11 +379,6 @@ final class AssistantStore: ObservableObject {
 
     private func sortedTodos(_ items: [TodoItem]) -> [TodoItem] {
         items.sorted {
-            if $0.isNext != $1.isNext { return $0.isNext }
-            if $0.priority != $1.priority { return $0.priority.rawValue < $1.priority.rawValue }
-            if $0.dueAt != $1.dueAt {
-                return ($0.dueAt ?? .distantFuture) < ($1.dueAt ?? .distantFuture)
-            }
             if $0.createdAt != $1.createdAt {
                 return $0.createdAt > $1.createdAt
             }

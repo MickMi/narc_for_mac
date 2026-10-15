@@ -9,6 +9,7 @@ import shlex
 import time
 import uuid
 import tomllib
+import sqlite3
 from unittest.mock import Mock, patch
 from concurrent.futures import ThreadPoolExecutor
 
@@ -28,6 +29,23 @@ class CodexHookTests(unittest.TestCase):
         self.assertEqual(event["state"], "replyReady")
         self.assertNotIn("PRIVATE", json.dumps(event))
         self.assertEqual(set(event), {"schemaVersion", "threadID", "turnID", "state", "title", "timestamp", "isPreview"})
+
+    def test_extracts_only_existing_harness_round_card_fields(self):
+        message = """普通回答正文不应进入提醒。\n━━━━━━ 回合卡片 · 搜索 ━━━━━━\n✅ 本回合：直接复用已有摘要\n➡️ 下一步：确认字号层级\n🧠 推理深度：轻\n🚧 阻塞：无\n普通结尾也不应进入提醒。"""
+        self.assertEqual(adapter.extract_round_card(message), {
+            "roundSummary": "直接复用已有摘要",
+            "nextStep": "确认字号层级",
+        })
+        self.assertEqual(adapter.extract_round_card("🚧 阻塞：需要用户确认安装"), {
+            "blocker": "需要用户确认安装",
+        })
+        self.assertEqual(adapter.extract_round_card("本回合：没有固定图标\n✅ 结果：不是固定字段"), {})
+
+    def test_round_card_fields_are_bounded_without_generating_new_text(self):
+        value = "原" * 200
+        extracted = adapter.extract_round_card("✅ 本回合：" + value)
+        self.assertEqual(len(extracted["roundSummary"]), 160)
+        self.assertTrue(extracted["roundSummary"].endswith("…"))
 
     def test_other_thread_is_ignored(self):
         self.assertIsNone(adapter.normalize(self.payload(), TURN, "Test"))
@@ -174,6 +192,12 @@ class NotifyTests(unittest.TestCase):
         self.home = Path(self.tmp.name).resolve()
         self.config = self.home / ".codex/config.toml"
         self.config.parent.mkdir()
+        sessions = self.home / ".codex/sessions/2026/10/09"
+        sessions.mkdir(parents=True)
+        (sessions / ("rollout-2026-10-09T11-00-00-" + THREAD + ".jsonl")).touch()
+        with sqlite3.connect(self.home / ".codex/state_5.sqlite") as db:
+            db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, source TEXT)")
+            db.execute("INSERT INTO threads VALUES (?, 'vscode')", (THREAD,))
         self.previous = ["/old application/notify", "turn-ended", "quoted ' argument"]
         self.config.write_text('notify = ' + json.dumps(self.previous) + '\n# KEEP\n[features]\nhooks = true\n')
         self.payload = json.dumps({"type": "agent-turn-complete", "thread-id": THREAD, "turn-id": TURN,
@@ -203,6 +227,29 @@ class NotifyTests(unittest.TestCase):
         self.assertEqual(hooks.read_text(), '{"unchanged":true}')
         self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
 
+    def test_connect_also_upgrades_referenced_legacy_helper_without_changing_hooks(self):
+        folder = adapter.secure_folder(adapter.notify_folder(self.home))
+        helper = folder / "narc-codex-hook-v2.py"
+        helper.write_text("# old helper")
+        handler = {"type": "command", "command": shlex.join(["python3", str(helper), "--all"])}
+        raw = json.dumps({"hooks": {"Stop": [{"hooks": [handler]}]}, "trust_hash": "KEEP"}).encode()
+        hooks = self.home / ".codex/hooks.json"
+        hooks.write_bytes(raw)
+        self.connect()
+        self.assertEqual(helper.read_bytes(), Path(spec.origin).read_bytes())
+        self.assertEqual(hooks.read_bytes(), raw)
+        helper.write_text("# drift after connection")
+        self.connect()  # Idempotent notify connection must still repair the legacy entry point.
+        self.assertEqual(helper.read_bytes(), Path(spec.origin).read_bytes())
+        self.assertEqual(hooks.read_bytes(), raw)
+
+    def test_connect_does_not_replace_an_unreferenced_legacy_helper(self):
+        folder = adapter.secure_folder(adapter.notify_folder(self.home))
+        helper = folder / "narc-codex-hook-v2.py"
+        helper.write_text("# leave unrelated helper")
+        self.connect()
+        self.assertEqual(helper.read_text(), "# leave unrelated helper")
+
     def test_forwards_exact_payload_but_narc_persists_metadata_only(self):
         _, connection = self.connect()
         callback = Mock()
@@ -219,6 +266,71 @@ class NotifyTests(unittest.TestCase):
         adapter.receive_notify(self.home, connection, self.payload, launch=callback)
         self.assertEqual(len(list((folder / "events").glob("*.json"))), 1)
 
+    def test_untitled_first_reply_keeps_stable_id_after_title_appears(self):
+        _, connection = self.connect()
+        adapter.receive_notify(self.home, connection, self.payload, launch=Mock())
+        folder = adapter.notify_folder(self.home) / "events"
+        first = json.loads(next(folder.glob("*.json")).read_text())
+        self.assertEqual(first["title"], "对话 " + THREAD[-8:])
+        index = self.home / ".codex/session_index.jsonl"
+        index.write_text(json.dumps({"id": THREAD, "thread_name": "已生成的标题"}))
+        next_turn = json.dumps({**json.loads(self.payload), "turn-id": str(uuid.uuid4())})
+        adapter.receive_notify(self.home, connection, next_turn, launch=Mock())
+        events = [json.loads(path.read_text()) for path in folder.glob("*.json")]
+        self.assertEqual({event["threadID"] for event in events}, {THREAD})
+        self.assertEqual({event["title"] for event in events}, {first["title"], "已生成的标题"})
+
+    def test_unlisted_internal_session_does_not_create_unopenable_reminder(self):
+        _, connection = self.connect()
+        unknown = str(uuid.uuid4())
+        (self.home / ".codex/sessions/2026/10/09" / ("rollout-2026-10-09T11-00-00-" + unknown + ".jsonl")).touch()
+        payload = json.dumps({**json.loads(self.payload), "thread-id": unknown})
+        callback = Mock()
+        adapter.receive_notify(self.home, connection, payload, launch=callback)
+        callback.assert_called_once()
+        self.assertEqual(list((adapter.notify_folder(self.home) / "events").glob("*.json")), [])
+        self.assertEqual(adapter.notify_status(self.home)["status"], "waiting")
+
+    def test_subagent_with_rollout_but_no_payload_agent_id_is_filtered(self):
+        _, connection = self.connect()
+        database = self.home / ".codex/state_5.sqlite"
+        with sqlite3.connect(database) as db:
+            db.execute("UPDATE threads SET source = ? WHERE id = ?",
+                       (json.dumps({"subagent": {"thread_spawn": {"parent_thread_id": str(uuid.uuid4())}}}), THREAD))
+        callback = Mock()
+        adapter.receive_notify(self.home, connection, self.payload, launch=callback)
+        callback.assert_called_once()  # Original notification still forwarded unchanged.
+        self.assertEqual(list((adapter.notify_folder(self.home) / "events").glob("*.json")), [])
+        with sqlite3.connect(database) as db:
+            db.execute("UPDATE threads SET source = 'vscode' WHERE id = ?", (THREAD,))
+        adapter.receive_notify(self.home, connection, self.payload, launch=Mock())
+        self.assertEqual(len(list((adapter.notify_folder(self.home) / "events").glob("*.json"))), 1)
+
+    def test_metadata_failure_does_not_emit_unknown_ids_or_break_original_callback(self):
+        _, connection = self.connect()
+        callback = Mock()
+        with patch.object(adapter.sqlite3, "connect", side_effect=sqlite3.OperationalError("unavailable")):
+            adapter.receive_notify(self.home, connection, self.payload, launch=callback)
+        callback.assert_called_once()
+        self.assertEqual(list((adapter.notify_folder(self.home) / "events").glob("*.json")), [])
+        self.assertEqual(adapter.notify_status(self.home)["status"], "waiting")
+
+    def test_notify_copies_harness_fields_but_not_free_form_answer(self):
+        _, connection = self.connect()
+        payload = json.loads(self.payload)
+        payload["last-assistant-message"] = (
+            "这里是完整回答，不保存。\n"
+            "✅ 本回合：通知直接复用回合卡片\n"
+            "➡️ 下一步：检查预览\n"
+            "🚧 阻塞：无"
+        )
+        adapter.receive_notify(self.home, connection, json.dumps(payload), launch=Mock())
+        event = json.loads(next((adapter.notify_folder(self.home) / "events").glob("*.json")).read_text())
+        self.assertEqual(event["roundSummary"], "通知直接复用回合卡片")
+        self.assertEqual(event["nextStep"], "检查预览")
+        self.assertNotIn("blocker", event)
+        self.assertNotIn("完整回答", json.dumps(event, ensure_ascii=False))
+
     def wrap_connection(self, command):
         helper = self.home / ".codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient"
         return [str(helper), "turn-ended", "--previous-notify", json.dumps(command)]
@@ -234,16 +346,24 @@ class NotifyTests(unittest.TestCase):
         self.assertEqual(adapter.notify_status(self.home)["status"], "connected")
         self.assertEqual(self.config.read_bytes(), before)
 
-    def test_wrapped_reconnect_and_upgrade_do_not_rewrite_client_chain(self):
+    def test_wrapped_reconnect_is_stable_and_upgrade_replaces_only_inner_adapter(self):
         _, connection = self.connect()
         command = tomllib.loads(self.config.read_text())["notify"]
-        self.config.write_text("notify=" + json.dumps(self.wrap_connection(command)))
+        wrapped = self.wrap_connection(command)
+        self.config.write_text("notify=" + json.dumps(wrapped))
         before = self.config.read_bytes()
         script = self.home / "new.py"
         script.write_bytes(Path(spec.origin).read_bytes() + b"\n# upgrade\n")
-        for source in [spec.origin, script]:
-            self.assertEqual(adapter.install_notify(self.home, source)["status"], "waiting")
-            self.assertEqual(self.config.read_bytes(), before)
+        self.assertEqual(adapter.install_notify(self.home, spec.origin)["status"], "waiting")
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertEqual(adapter.install_notify(self.home, script)["status"], "waiting")
+        updated = tomllib.loads(self.config.read_text())["notify"]
+        self.assertEqual(updated[:3], wrapped[:3])
+        inner = json.loads(updated[3])
+        self.assertNotEqual(inner, command)
+        self.assertEqual(inner[:1] + inner[2:3], command[:1] + command[2:3])
+        record = adapter.connection_record(self.home, inner[3])
+        self.assertEqual(record["previous"], self.previous)
 
     def test_unknown_wrapper_is_not_a_connection(self):
         self.connect()

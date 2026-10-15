@@ -2,17 +2,37 @@
 
 # NARC for Mac
 
-**Attention Is All You Need. Save it for what matters.**
+**Capture a thought. Ask a question. Get back to what matters.**
 
-NARC brings your attention back to what matters when you juggle multiple tasks. Todos, AI reply reminders, and frequently used windows come together around a floating desktop `N`, with a permanent menu-bar entry and no Dock icon.
+NARC is a lightweight Mac utility that lives in your menu bar and a floating desktop **N**. Capture a Todo, ask AI, search the web, or recover a working window without first switching to a separate workspace. While Codex is working, do something else and let NARC remind you when a reply is ready.
 
-For Codex reply reminders, open **Preferences → AI Replies** and follow the connection guidance. Replies can trigger a reminder you click to return to the task; individual conversations can be muted. This requires Python 3.11 or newer and currently supports Codex tasks, not ordinary GPT chats or chatting with AI inside NARC.
+It has no Dock icon by default. Click the menu-bar or floating **N** for the panel, or use shortcuts to go straight to a feature.
 
-> **Status: v2 development preview.** Source installation, local data, and summon-placement logic have been verified locally or through automated tests. The refocused Inbox, proactive floating Todo reminder, and keyboard-first pinned-window switcher are now experience previews. Menu-bar clicks, real multi-display summon, full-screen Spaces, first-time permission flows, exact-window recall, and selected-text Todo compatibility in specific app surfaces still need hands-on validation. This is not a stable-release promise.
+| What you need | What NARC does |
+|---|---|
+| Remember something | Summon capture and press Return to create a Todo |
+| Ask a question or explain a screenshot | Ask DeepSeek, with follow-ups, streaming answers, and Markdown |
+| Find current information | Search embedded Bing / Google; open results in your default browser |
+| Stop watching an AI task | Get a Codex reply reminder and return to the conversation |
+| Find a window among many | Mark it and recall it by number; arrange windows with shortcuts |
 
-## Start with one command
+**Status: v2 development preview, not a stable release.** This README describes the current source; older installed versions may differ. Selected-text capture, multiple displays, full-screen Spaces, and target-app window compatibility still need hands-on validation.
 
-NARC requires macOS 14 or later, Git, and Xcode Command Line Tools. The first build needs internet access.
+## Install
+
+Requires macOS 14 or later, Git, and Xcode Command Line Tools. Initial download and compilation need internet access. No Apple developer account or `sudo` is required.
+
+### 1. Prepare the developer tools
+
+If you do not already have them, run this in Terminal and follow the system instructions:
+
+```bash
+xcode-select --install
+```
+
+Skip this step if the tools are installed.
+
+### 2. Download and install
 
 Paste this line into Terminal:
 
@@ -20,236 +40,122 @@ Paste this line into Terminal:
 git clone https://github.com/MickMi/narc_for_mac.git && cd narc_for_mac && bash scripts/install.sh
 ```
 
-The script builds NARC locally from source, places it at `~/Applications/NARC.app`, and launches it. It does not need `sudo`, and Terminal does not need to remain open afterward. If the target already contains a strictly valid NARC whose private key is still available, the installer inherits that local signer (including legacy `NARC Dev`). Only a clean new user gets a new `NARC Local Code Signing Identity v1`; later updates keep reusing the locked identity.
+The script builds on your Mac, prepares a local signing identity, installs to `~/Applications/NARC.app`, and launches NARC. You can close Terminal afterward.
 
-If Xcode Command Line Tools are missing, run:
+Already have the source? Run `bash scripts/install.sh` from the repository instead of cloning it again.
 
-```bash
-xcode-select --install
-```
+NARC is source-only: no DMG, PKG, or prebuilt App download. A new installation creates a local self-signing identity and updates reuse it; an eligible existing NARC identity is preserved. The private key stays on your Mac and is not uploaded or distributed with the source.
 
-NARC is source-only. This is the only supported setup path for regular users. The project does not provide a DMG, PKG, prebuilt app ZIP, or binary GitHub Release, and users do not need to prepare a developer certificate, notarize the app, or run a separate signing step. The local identity is not a Developer ID or distribution certificate and never leaves the current Mac.
+### 3. Find NARC
 
-## Where NARC lives
+- Click the menu-bar or floating desktop **N** to open the panel. You can drag the widget.
+- Right-click **N** for Preferences or the User Guide.
+- Cannot find it? Search for **NARC** in Spotlight, or run `open ~/Applications/NARC.app`. No Dock icon is expected.
 
-NARC is a menu-bar app. It does not show a Dock icon by default.
+## Get started
 
-| Entry point | Action |
-|---|---|
-| Left-click the menu bar `N` | Summon the floating `N` and open its adjacent lightweight panel |
-| Right-click the menu bar `N` | Open the User Guide, Preferences, About, or Quit menu |
-| Left-click the floating `N` | Open or close the lightweight panel |
-| Right-click the floating `N` | Open Assistant, the User Guide, or Preferences |
-| Default `⌃⌥N` (editable) | Summon the floating `N` to the display under the pointer and keep the panel open |
+These are defaults. Edit them under **Preferences → Shortcuts (快捷键)**. Existing custom bindings are preserved; use the actual combination and enabled status shown in Preferences.
 
-The floating `N` can be dragged. Its size and position can also be adjusted or reset in Preferences. Summoning preserves a valid position on the same display and uses a safe visible position when moving to another display.
-
-## Three core workflows
-
-### 1. Capture first, organize later
-
-Use your Quick Capture shortcut (default `⌃⌥Q`, editable), or the Inbox in the lightweight panel:
-
-1. Enter the thought without first choosing Todo or Note.
-2. Press Return to save it to the local Inbox. Blank content is not submitted.
-3. If it is already clearly a task, press `⌘Return` or click the Todo button to create a Todo directly.
-4. Unsorted Inbox items are collapsed by default into a one-line count. Expand them only when you want to organize a record into Todo or Note; the original Inbox item is removed after a successful conversion.
-
-Summoning capture again does not discard an unsubmitted draft. If saving fails, the content remains in place with a visible error.
-
-This entire path works without AI, an account, or a network connection. When actionable Todos exist, a separate blue count appears at the lower-left of the floating `N`. It never reveals task text or changes the app-unread number at the upper-right. In the panel, “Next action” moves above capture and becomes the primary visual when a Todo is available; when none is available, capture naturally returns to the top. The card can complete the task, defer it for one hour, or show the next item. Deferral is stored locally and the task returns when it expires; “Next” changes only the current view and does not rewrite task order.
-
-Configure daily review times under **Preferences → Reminders (提醒)**. Defaults are 11:00 and 14:30; add, edit, remove, or disable them. A separate nonactivating card beside the widget highlights the top task, previews up to three others, and shows the remaining count. It does not open the main panel, steal keyboard focus, or use system notifications or sound.
-
-Under **Assistant → Todo → Plan (安排)**, optionally choose one explicit next task, high/normal/low priority, and a deadline. Explicit next comes first, then priority, then earlier deadlines (undated tasks last), with newer creation time as the tie-breaker. Completed or deferred tasks are excluded. Quick capture requires none of these fields.
-
-The review offers Complete, 1 Hour, View All, and Dismiss. Snoozing the review postpones the whole review without changing task deadlines; the main panel's existing deferral still applies to one task. NARC must be running. Times follow the local time zone; empty lists stay quiet and each slot is consumed once. Typing, NARC management windows, and screen sleep defer presentation; only the latest slot within ten minutes can catch up. Startup warm-up and card visibility are both 30 seconds. Settings include a read-only preview; long-running behavior still awaits user validation.
-
-The full Assistant opens in a separate window. Todo supports completion, shows when a task is deferred, and lets you restore it to “Now”; Notes supports search and deletion.
-
-If the content already exists in another app, select it and press the default `⌃⌥T` shortcut to create a local Todo. Choose supported modifiers and a key under **Preferences → Shortcuts**; existing preset choices migrate without being reset. If registration fails, NARC keeps the previously active binding.
-
-- When the shortcut fires, NARC locks the frontmost app and focused control, then immediately starts one standard Accessibility selection read. It does not continuously monitor the screen or keyboard input.
-- A selection of at most 240 characters and three non-empty lines is saved directly; other normal selections require confirmation first. A successful read becomes one snapshot, which confirmation uses without rereading after focus changes.
-- One capture is limited to 65,536 UTF-16 text units. Anything larger asks you to narrow the selection, is not saved or shown in feedback, and creates no Todo; the range fallback stops before fetching its body.
-- The success notice does not reveal the selected text and briefly offers Undo. Undo deletes the exact UUID created by that capture, never another Todo with the same title.
-- An empty selection, protected input, or a surface without a standard selection creates nothing. NARC does not fall back to the clipboard, simulated `⌘C`, OCR, or AI.
-
-Compatibility must be checked per app surface. Web content and text fields, text-layer and scanned PDFs, and WeCom message and compose areas cannot share one blanket result. Every row in the current [compatibility matrix](docs/research/selected-text-todo-compatibility.md) still awaits hands-on validation in the real app.
-
-### 2. See app-level unread activity
-
-NARC aggregates Dock badges that enabled apps expose to macOS. WeChat, WeCom, and Lark are monitored by default. The aggregate appears in the menu bar and on the floating `N`; values above 99 are shown as `99+`.
-
-This number is app-level only:
-
-- The app-level unread path does not read message content.
-- NARC cannot identify which conversation produced an unread item.
-- Multiple system instances of the same app are reconciled using the largest trustworthy value, never added together.
-- If an app does not expose a trustworthy badge, NARC appends `?` to the last trusted value (for example, `14?`). With no trusted prior value it shows `?`, never a fabricated new zero.
-
-### 3. Recover and arrange windows
-
-These actions require macOS Accessibility permission:
+`⌃` = Control, `⌥` = Option, `⇧` = Shift, `⌘` = Command.
 
 | Shortcut | Action |
 |---|---|
-| Default `⌃⌥P` | Open the pinned-window switcher on the display under the pointer |
-| Default `⌃⌥⇧P` | Mark or unmark the currently focused exact window |
-| Default `⌃⌥←` / `⌃⌥→` | Left half / right half |
-| Default `⌃⌥↑` / `⌃⌥↓` | Top half / bottom half |
-| Default `⌃⌥U` / `⌃⌥I` / `⌃⌥J` / `⌃⌥K` | Four corners |
-| Default `⌃⌥↩` / `⌃⌥C` | Full screen / centered |
+| `⌃⌥Q` | Capture a Todo |
+| `⌃⌥⇧D` | Ask AI |
+| `⌃⌥B` | Bing search |
+| `⌃⌥G` | Google search |
+| `⌃⌥N` | Summon the widget and panel to the display under your pointer |
+| `⌃⌥T` | Create a Todo from text selected in another app |
+| `⌃⌥⇧P` | Mark / unmark the current window |
+| `⌃⌥P` | Open the marked-window switcher |
+| `⌃⌥1–9` | Recall marked windows 1–9 directly |
 
-**All 15 global actions are configurable** under **Preferences → Shortcuts**. Select at least two modifiers and a supported primary key, then Apply. Changes take effect immediately, survive restarts, and can be reset individually. NARC-internal conflicts or a registration failure keep the previous binding intact; other apps' shortcuts are not always detectable.
+### Capture Todos without sorting first
 
-Window layouts can also be configured directly in **Floating panel → Windows**. Each card has an enable checkbox and an editable shortcut. Disabling releases its binding but keeps the card available for editing; a conflict when re-enabling leaves it disabled with an explanation. Editing or checking a card does not move a window: use the corresponding shortcut to arrange it. Standard in-window Return, Esc, and list navigation remain unchanged.
+Press `⌃⌥Q`, type a task, and press Return to save a Todo. The panel's Todo page also lets you capture, edit, complete, restore, or delete tasks.
 
-The switcher selects its first row immediately; no click is required. Press `1`–`9` to recall one of the first nine marked windows, use the arrow keys and Return to choose, or press Esc to close. NARC keeps at most ten marked windows, so the tenth remains available through the arrow keys or mouse rather than a new global number shortcut. Number slots contain only marked windows and never shift when the monitored-app list changes.
+Select text in another app and press `⌃⌥T` to capture it. Long selections require confirmation. This depends on the target app exposing a readable selection; scanned images and some app surfaces are unsupported.
 
-NARC first tries to recover the marked window. A window already on a visible desktop can move to the display captured when the switcher opens. A window in another Space or native full screen is revealed in place when macOS permits it. If exact recovery is unavailable, NARC attempts to open the owning app and clearly reports the app-level fallback; re-marking is not a prerequisite for opening the app. Space switching depends on the macOS setting “When switching to an application, switch to a Space with open windows for the application” and the target app. This remains a development preview.
+Set daily review times under **Preferences → Reminders (提醒)**. NARC must remain running; these do not sync to Apple Reminders. Legacy Inbox records merge into Todos. Existing Notes are retained, but the empty Notes tab is hidden when there are no notes.
 
-Once a window is stably placed in a directional layout, pressing the same direction again attempts to move it to an adjacent display; this decision no longer depends on a fixed five-second window. Multi-display and full-screen Space behavior remains part of preview validation.
+### Ask AI or search the web: one window, three separate modes
 
-## Current maturity
+Press `⌃⌥⇧D`, or click the sparkle button at the top of the floating panel, to open **NARC Search**. Switch between DeepSeek, Bing, and Google without going through Assistant.
 
-| Capability | Status | Boundary |
-|---|---|---|
-| One-command setup from GitHub source | Verified | Builds locally, installs under the user account, prepares a local identity once, and creates no installer package |
-| Menu bar + floating `N` | Development preview | No Dock icon and floating-widget clicks have been checked locally; placement has automated coverage, while menu-bar, global-shortcut, and real multi-display QA remain |
-| Inbox capture | Development preview | “Next action” leads when a Todo is available, capture leads when none is available, and unsorted records are collapsed by default; the latest hierarchy still needs experience confirmation |
-| Todo / Notes / Assistant | Development preview | Direct Todo capture, the blue numeric cue, single-task card, local deferral, and a separate nonactivating reminder are in the experience preview; an isolated hands-on check covered the first background click without focus theft, while the default cadence still needs experience confirmation |
-| Selected text to Todo | Development preview | Defaults to `⌃⌥T`, with configurable modifiers and key; locks the trigger-time control for one standard AX read. Confirmation, Undo, and configuration migration have automated coverage; the target-app matrix still needs hands-on validation |
-| App-level unread aggregation | Depends on the source app | Reads only the badge macOS can see; not every app provides a reliable value at all times |
-| Pinned-window keyboard recall | Development preview | Defaults to `⌃⌥P` for recall and `⌃⌥⇧P` for marking; both are editable in Preferences. Full multi-display, same-app multi-window, and cross-Space validation remains |
-| Window arrangement | Development preview | Enable or edit each shortcut directly from its Windows card; arranging windows requires permission and remains subject to macOS multi-display, Space, and window-type limitations |
+**Set up AI first:**
 
-See [Features](docs/FEATURES.md) for detailed maturity and [Version Plan](docs/VERSIONS.md) for release scope.
+1. Open **Preferences → Instant Questions (即时问答)**, enter your own DeepSeek API Key, and save it.
+2. If the status says the key has not been authorized for reading, click **Authorize Key Reading (授权读取密钥)**. macOS presents a Keychain prompt only when needed. Authorization sends no AI request.
+3. Once the key is ready, ask a question or use **Verify Connection (验证连接)**. Verification sends a real request and may consume your DeepSeek quota.
 
-## First use and permissions
+AI requests use your DeepSeek account and are billed by the provider. The current source requests `deepseek-flash`; availability of text and image requests also depends on the provider and your account.
 
-The first time the Inbox opens, a short inline guide introduces capture. The core guide is completed only after the first successful record; choosing “Later” applies only to the current run.
+**In everyday use:**
 
-Manual Inbox, Todo, and Notes actions and app-level badges do not require Accessibility permission. Selected-text Todo capture, window arrangement, and marking, unmarking, or recalling windows do require it because they read a selection or window state explicitly exposed by another app. NARC does not request Accessibility or notification access on launch. It explains the need when one of those capabilities is first invoked; notification access is requested only when a real notification is first delivered.
+- Summon AI and type immediately. Press `⌘Return` or click Send. Answers appear incrementally, render Markdown, and support follow-up questions.
+- Paste clipboard images with `⌘V` in the input, or use the paperclip inside it to choose a file. Click a thumbnail to enlarge it; Esc or Done returns to the composer.
+- An image belongs to one round only: successful completion removes it; failure preserves it for retry. Later text questions retain conversation context but do not resend that image. Add it again to analyze it again.
+- **Save This Conversation (保存本次对话)** saves all text turns. **Copy This Answer (复制本轮回答)** copies only the latest AI answer. Images are not saved with the conversation.
+- **Clear Current (清空当前)** clears the current session, not saved records. Closing the search window also clears unsaved questions and answers. Save explicitly before closing if you need them.
 
-The local signing identity and Accessibility are separate concerns. The installer first creates or inherits a local identity for the current user; the first real selected-text or window action then asks you to grant Accessibility. Later source updates keep the same authorization identity unless you change Mac or macOS user, delete the locked keychain identity, reset privacy permissions, or manually change NARC's signer.
+**AI Q&A is not web-enabled search.** NARC currently does not connect DeepSeek to web retrieval. For current news, web pages, or sources, switch to Bing / Google or press `⌃⌥B` / `⌃⌥G`. Search pages are embedded; result links open in the system default browser. Refresh reloads the current page. No search API Key is required, and search results are not automatically sent to DeepSeek.
 
-For selected-text and window tools, enable NARC under:
+### AI reply reminders: work elsewhere while you wait
 
-**System Settings → Privacy & Security → Accessibility → NARC**
+Open **Preferences → AI Replies (AI 回复)** and follow the opt-in connection steps. This needs Python 3.11 or later and adjusts local Codex notification configuration while preserving existing notification entry points. If first-time setup asks for a client restart, save your work before fully quitting and reopening it.
 
-NARC rechecks the permission every three seconds after you enable it, and a quit or restart is normally unnecessary. Once confirmed, close System Settings and return to the original app. Press a window shortcut again for a window action; for selected-text Todo, select the text again and press the currently configured shortcut. NARC deliberately does not replay the interrupted action automatically because System Settings would usually be frontmost by then. If macOS still rejects the current app while the switch is on, NARC shows the actual running path and stale-entry recovery guidance; reopening NARC is only the fallback.
+When a Codex task replies, NARC shows a card beside the widget. Automatically presented cards collapse after about 10 seconds. Unread replies remain accessible through the widget's blue number or the panel's AI Replies tab. Continue Conversation returns to the corresponding task; dismiss a card or mute a conversation in Preferences.
 
-## Data and privacy
+These are **Codex task reminders**, not ordinary GPT chat notifications or DeepSeek Q&A. When round details are available, NARC uses content already present in the reply, without a separate model call to generate a notification summary. Not every reply contains those details.
 
-- Inbox, Todo, and Notes are stored locally by default.
-- The data file is `~/Library/Application Support/NARC/assistant-v1.json`.
-- The installer stores only the signing certificate's public SHA-1 fingerprint to detect identity loss. For a new Local v1 identity, it imports the private key as non-extractable and initially limits access to the system `codesign` tool. An inherited legacy identity is never exported, copied, or rewritten. Private keys never enter Git, logs, CI, or the network.
-- To avoid a confirmation on every later update, another local process running as the same user may also invoke the system `codesign` tool with an installer-created Local v1 identity. It cannot obtain the private-key file, and this local identity does not provide Developer ID publisher assurance. This is the explicit tradeoff between automatic local update builds and approving every signature manually.
-- Existing data migrates to schema v4 on the first successful save; loading alone does not rewrite it. Priority, deadlines, the explicit next task, and task deferrals stay in the local file. Daily schedules, consumption timestamps, and review snoozes are stored in local preferences without Todo text or task UUIDs.
-- This version does not call an external model API and has no cloud sync or team collaboration.
-- NARC does not continuously monitor or automatically read message content in WeChat, WeCom, or other apps. Only when you explicitly select text and press the selected-text Todo shortcut does it lock the frontmost app and focused control, then immediately begin one standard AX selection read; the successful read becomes the capture snapshot. It does not read or modify the clipboard, simulate `⌘C`, or use screenshot OCR, AI, private databases, process injection, or private hooks.
+### Windows and unread activity: less searching, less switching
 
-Removing the app does not automatically erase personal records.
+Focus a window and press `⌃⌥⇧P` to mark it. Recall it with `⌃⌥1–9`, or open `⌃⌥P` and select using a number, arrow keys + Return, or the mouse. Esc cancels.
 
-## Current boundaries
+Numbers follow the marked-window list and change when you reorder it. Up to 10 windows can be marked; the tenth is available through the switcher. A mark identifies a specific window, not an entire app. Closed windows may need re-marking, and cross-Space recovery depends on macOS and the target app.
 
-- No Dock icon, Workspace entry point, or embedded terminal entry point.
-- No conversational AI, automatic classification, or cross-module AI execution. Basic Todo surfacing and deferral do not depend on AI.
-- No recurring tasks or macOS system-notification reminders. Deadlines affect ordering, not extra alerts; daily reviews follow your configured times.
-- No Apple Notes, Reminders, Calendar, GitHub, or other external connectors.
-- No per-conversation WeChat/WeCom unread state or automatic message-content reading. Explicitly selecting text and pressing the Todo shortcut is one user-initiated capture, not message monitoring.
-- No third-party dynamic plugins, script marketplace, or plugin permission system.
-- No automatic updater, DMG, PKG, prebuilt app, or certificate/notarization distribution chain.
+Layout defaults are `⌃⌥←/→/↑/↓` for left/right/top/bottom halves, `⌃⌥U/I/J/K` for corners, `⌃⌥Return` to fill the screen, and `⌃⌥C` to center. Repeating a directional layout can attempt a move to an adjacent display. Enable, disable, or edit layout bindings in the panel's Windows tab.
 
-These boundaries keep capture, awareness, and recovery focused on a reliable, low-interruption local loop.
+The Messages tab also shows unread badges that apps such as WeChat, WeCom, and Lark expose to macOS. This does not read chat messages or identify an individual conversation. Counts depend on the source app; unknown state is shown as `?`.
 
-## Update
+## Permissions and data
 
-Choose **Quit NARC**, then run this from the repository directory:
+- **Accessibility:** Required for selected-text Todo and window marking, recall, and arrangement. Follow the prompt to **System Settings → Privacy & Security → Accessibility**, enable NARC, then retry in the target app. Manual Todo, AI Q&A, and web search do not need this permission.
+- **API Key:** Persisted in macOS Keychain, then cached in the current process after explicit reading. After restarting, authorize from Preferences if the key is not ready. macOS decides whether a password prompt is necessary. Always Allow is not a guarantee of prompt-free updates: Keychain or signing-identity changes may require authorization again.
+- **Local records:** Todos and existing Notes are in `~/Library/Application Support/NARC/assistant-v1.json`. Explicitly saved conversations are in `instant-questions-v1.json` in the same directory. There is no cloud sync.
+- **External requests:** Sending an AI question sends the question, recent text context, and this round's image to DeepSeek. Web queries go to the chosen search engine. Not saving locally does not imply the provider keeps no records; its policies govern external data handling.
+- **Reply reminders:** Locally process conversation identifiers, titles, state, and limited round-summary / next-step / blocker excerpts extracted from existing replies, not full conversation bodies. Existing notification programs may still receive original events. Disabling or muting reminders stops display, not necessarily event reception.
+
+## Update and uninstall
+
+Save any conversation you want to keep, then choose **Quit NARC**. From the original repository directory, run:
 
 ```bash
 git pull --ff-only && bash scripts/install.sh
 ```
 
-The installer does not force-quit a running NARC instance or delete personal records. It reconciles the installed app, fingerprint marker, and keychain identity before reusing a signer. It can safely inherit an eligible legacy signer when no marker exists, but stops when two stable identities conflict; it never silently rotates or falls back to ad-hoc signing. Only one install command per user can proceed at a time, even across separate clones. If switching is interrupted or final verification fails, the previous app and fingerprint marker are restored together.
+Updates preserve local records and the existing signing identity. If your source changes prevent a pull, resolve them without forcing an overwrite. To reinstall your current checkout only, run `bash scripts/install.sh`.
 
-## Uninstall
-
-1. Choose **Quit NARC**.
-2. Delete `~/Applications/NARC.app`.
-
-Personal records remain. Only if you are sure you no longer need them, delete the data file:
-
-`~/Library/Application Support/NARC/assistant-v1.json`
-
-A normal uninstall leaves the locked local signing identity and its public fingerprint marker in place, so a later reinstall can reuse it. That identity may be a new Local v1 or an inherited legacy `NARC Dev`; the installer stops on a fingerprint mismatch instead of replacing it silently.
+To uninstall, quit NARC and move `~/Applications/NARC.app` to Trash. Local records, the API Key, and the signing identity are not automatically deleted. Back up records before separately removing them.
 
 ## Troubleshooting
 
-### NARC is not visible
+**A shortcut does nothing?** Confirm NARC is running, then check the enabled status and actual binding under Preferences → Shortcuts. Selected-text and window actions also need Accessibility permission. Choose a different combination if another app conflicts.
 
-NARC does not appear in the Dock by default. Look for the `N` in the menu bar, or run:
+**The key is saved, but AI asks for authorization?** Saved and readable in this run are different states. Authorize key reading from Preferences → Instant Questions. Successful authorization is not proof of an API connection; verify the connection separately.
 
-```bash
-open ~/Applications/NARC.app
-```
+**Installation says NARC is running?** Quit normally through its menu and retry. The installer does not force-quit NARC or overwrite a running app.
 
-If NARC is running, use your configured summon shortcut (default `⌃⌥N`) or click the menu bar `N`.
+**Signing or Keychain errors?** Keep the original Terminal error and check that your login keychain is accessible. The installer performs an actual signing and verification test before compiling; failure retains the existing app and does not rotate its identity. If errors such as `errSecInternalComponent` repeat despite an unlocked keychain, do not repeatedly install or delete certificates. Check again after logging out / in or restarting.
 
-### A shortcut does nothing
+## Development and further reading
 
-- Summon Widget and Quick Capture use saved bindings at startup (defaults `⌃⌥N` / `⌃⌥Q`) without Accessibility permission.
-- Selected-text Todo defaults to `⌃⌥T`; like window pinning and arrangement, it explains and requests Accessibility permission on first use.
-- Check the actual status under **Preferences → Shortcuts**, and ensure a layout's Windows checkbox is enabled. Failed replacements preserve the old binding. If a saved shortcut cannot register on startup, choose another combination or resolve its conflict and retry.
-
-### The WeCom or WeChat number does not match
-
-NARC reads the Dock badge that macOS LaunchServices exposes. The value may lag while an app is signed out, does not expose a badge, has multiple instances, or has not refreshed its state. Unknown state appears as `?`, or as a last trusted value such as `14?`.
-
-### Update says NARC is running
-
-Choose **Quit NARC**, then run:
+Run these from the repository root. They are not additional installation steps for regular users:
 
 ```bash
-bash scripts/install.sh
-```
-
-### Selected-text or window tools still ask after Accessibility is enabled
-
-Check the running path shown in the message first. Regular use should open `~/Applications/NARC.app` unless you chose a different install directory. A manually built ad-hoc development app under the repository's `build/` directory cannot inherit the stable installation's signing authorization. Quit that temporary app and reopen the installed app; do not delete the existing grant or rebuild the identity just because the temporary app is rejected. For no-permission UI development, use `bash scripts/dev-run-no-ax.sh debug`; for real window tools, use the normal installer to preserve the existing identity.
-
-An early v2 preview installer replaced legacy `NARC Dev` with Local v1, which can leave the System Settings switch on while macOS rejects the current app. If the unique legacy private key is still available, quit NARC and run this from the repository:
-
-```bash
-bash scripts/install.sh --restore-legacy-signer
-```
-
-The installer shows the full old fingerprint and changes both the app and local marker only after you enter that exact value in Terminal. It deletes no identity and never resets TCC. If no legacy signer can be recovered, or macOS still retains a stale row afterward, remove the old NARC row under **System Settings → Privacy & Security → Accessibility** and add the current path shown by NARC once.
-
-### Setup reports an unavailable login keychain or `errSecInternalComponent`
-
-The installer stops before replacing the app, so the existing NARC and permission remain unchanged. Open Keychain Access, unlock the **login** keychain in the sidebar, and rerun `bash scripts/install.sh`. Do not delete certificates or reset Accessibility.
-
-### Rebuild the local signing identity
-
-An installer-created Local v1 identity is valid for ten years. Rebuild it only if you deliberately deleted it, it became damaged, or it expired: quit NARC, remove any remaining `NARC Local Code Signing Identity v1` item in Keychain Access, delete the public marker at `~/Library/Application Support/NARC/signing-identity.sha1`, then run `bash scripts/install.sh` again. A new identity requires enabling Accessibility once more for selected-text and window tools; the installer never resets TCC automatically. If NARC currently inherits legacy `NARC Dev`, do not delete it through this procedure—preserving it is what preserves the existing grant.
-
-## Development and verification
-
-```bash
-# Build a runnable Debug app
-NARC_SIGNING_MODE=adhoc bash scripts/build-app.sh debug
-open build/NARC.app
-
-# Full test suite
-swift test
-
-# Guard against installers, distributable certificate chains, and automatic updaters
-bash scripts/verify-source-only-distribution.sh
-
-# Build the Swift package only
 swift build
+swift test --disable-sandbox
+bash scripts/verify-source-only-distribution.sh
 ```
 
-Stack: Swift 5.9 Package, SwiftUI + AppKit, and macOS 14+. See [Project Profile](docs/PROJECT.md) for product goals and boundaries.
+Stack: Swift, SwiftUI, and AppKit. See [Features](docs/FEATURES.md), [Version Plan](docs/VERSIONS.md), and [Selected-Text Compatibility](docs/research/selected-text-todo-compatibility.md).

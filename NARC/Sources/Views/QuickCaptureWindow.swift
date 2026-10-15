@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Lightweight floating host for the shared Inbox capture surface.
+/// Lightweight floating host for the shared Todo capture surface.
 ///
 /// Content is installed once. The draft state is owned by AppDelegate and is
 /// intentionally preserved when the window is hidden and summoned again.
@@ -27,7 +27,7 @@ final class QuickCaptureWindow: NSPanel, NSWindowDelegate {
             defer: false
         )
 
-        title = "Quick Capture"
+        title = "记 Todo"
         titlebarAppearsTransparent = true
         titleVisibility = .hidden
         isMovableByWindowBackground = true

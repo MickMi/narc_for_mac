@@ -3,9 +3,13 @@ import SwiftUI
 
 /// Standard resizable window for the built-in personal assistant pages.
 @MainActor
-final class AssistantHubWindow: NSWindow {
+final class AssistantHubWindow: NSWindow, NSWindowDelegate {
     private let navigation = AssistantHubNavigation()
-    init(store: AssistantStore, captureState: InboxCaptureState) {
+
+    init(
+        store: AssistantStore,
+        captureState: InboxCaptureState
+    ) {
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 540),
             styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
@@ -20,6 +24,7 @@ final class AssistantHubWindow: NSWindow {
         isReleasedWhenClosed = false
         collectionBehavior = [.fullScreenAuxiliary, .moveToActiveSpace]
         minSize = NSSize(width: 620, height: 440)
+        delegate = self
         contentView = NSHostingView(
             rootView: AssistantHubView(
                 store: store,

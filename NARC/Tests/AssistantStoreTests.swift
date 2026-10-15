@@ -79,28 +79,66 @@ func assistantStoreDoesNotPublishTodoDeletionWhenSaveFails() throws {
 
 @Test
 @MainActor
-func assistantStorePersistsSortsAndDeletesInboxItems() throws {
+func assistantStoreEditsTodoTitleAndPersistsIt() throws {
+    let location = try makeAssistantTestLocation()
+    defer { try? FileManager.default.removeItem(at: location.directory) }
+
+    let store = AssistantStore(storageURL: location.file)
+    let item = try #require(store.createTodoItem(title: "First wording"))
+
+    #expect(!store.updateTodoTitle(id: item.id, title: "  \n  "))
+    #expect(store.todos.first?.title == "First wording")
+    #expect(store.updateTodoTitle(id: item.id, title: "  Clear next action  "))
+    #expect(AssistantStore(storageURL: location.file).todos.first?.title == "Clear next action")
+}
+
+@Test
+@MainActor
+func assistantStoreMigratesLegacyInboxIntoTodosOnce() throws {
     let location = try makeAssistantTestLocation()
     defer { try? FileManager.default.removeItem(at: location.directory) }
 
     let olderDate = Date(timeIntervalSince1970: 1_700_000_000)
     let newerDate = Date(timeIntervalSince1970: 1_700_000_100)
-    let store = AssistantStore(storageURL: location.file)
+    let first = InboxItem(content: "First thought", createdAt: olderDate)
+    let second = InboxItem(content: "Second thought", createdAt: newerDate)
+    let legacy = AssistantSnapshot(inboxItems: [first, second])
+    try makeAssistantEncoder().encode(legacy).write(to: location.file, options: .atomic)
 
-    #expect(store.captureInbox("  First thought  ", now: olderDate))
-    #expect(store.captureInbox("Second thought", now: newerDate))
-    #expect(store.inboxItems.map(\.content) == ["First thought", "Second thought"])
-    #expect(store.recentInboxItems.map(\.content) == ["Second thought", "First thought"])
+    let migrated = AssistantStore(storageURL: location.file)
+    #expect(migrated.inboxItems.isEmpty)
+    #expect(migrated.incompleteTodos.map(\.title) == ["Second thought", "First thought"])
+    #expect(migrated.todos.map(\.id) == [first.id, second.id])
+    #expect(migrated.todos.map(\.createdAt) == [olderDate, newerDate])
 
     let reloaded = AssistantStore(storageURL: location.file)
-    #expect(reloaded.inboxItems == store.inboxItems)
-    #expect(reloaded.recentInboxItems.map(\.content) == ["Second thought", "First thought"])
+    #expect(reloaded.todos == migrated.todos)
+    #expect(reloaded.inboxItems.isEmpty)
+    #expect(reloaded.lastError == nil)
+}
 
-    let firstID = try #require(reloaded.inboxItems.first?.id)
-    #expect(reloaded.deleteInbox(id: firstID))
+@Test
+@MainActor
+func assistantStoreKeepsLegacyFileAndVisibleTodoWhenMigrationCannotSave() throws {
+    let location = try makeAssistantTestLocation()
+    defer {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: location.directory.path)
+        try? FileManager.default.removeItem(at: location.directory)
+    }
 
-    let afterDeletion = AssistantStore(storageURL: location.file)
-    #expect(afterDeletion.inboxItems.map(\.content) == ["Second thought"])
+    let inbox = InboxItem(content: "Keep this thought")
+    let original = try makeAssistantEncoder().encode(AssistantSnapshot(inboxItems: [inbox]))
+    try original.write(to: location.file, options: .atomic)
+    try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: location.directory.path)
+
+    let store = AssistantStore(storageURL: location.file)
+    #expect(store.todos.contains { $0.id == inbox.id && $0.title == inbox.content })
+    #expect(store.inboxItems.isEmpty)
+    guard case .saveFailed = store.lastError else {
+        Issue.record("Expected migration save failure")
+        return
+    }
+    #expect(try Data(contentsOf: location.file) == original)
 }
 
 @Test
@@ -119,9 +157,10 @@ func inboxCaptureStatePersistsDraftUntilASuccessfulSave() throws {
     #expect(captureState.draft == "  Keep this draft  ")
     #expect(captureState.submit())
     #expect(captureState.draft.isEmpty)
-    #expect(captureState.successMessage == "已存入随手箱")
+    #expect(captureState.successMessage == "已创建 Todo")
     #expect(completionCount == 1)
-    #expect(store.inboxItems.map(\.content) == ["Keep this draft"])
+    #expect(store.todos.map(\.title) == ["Keep this draft"])
+    #expect(store.inboxItems.isEmpty)
 }
 
 @Test
@@ -221,7 +260,7 @@ func assistantStorePersistsTodoCompletion() throws {
 
 @Test
 @MainActor
-func assistantStorePersistsDeferralAndHonorsAvailabilityBoundary() throws {
+func assistantStorePreservesLegacyDeferralWithoutHidingTodo() throws {
     let location = try makeAssistantTestLocation()
     defer { try? FileManager.default.removeItem(at: location.directory) }
 
@@ -235,12 +274,12 @@ func assistantStorePersistsDeferralAndHonorsAvailabilityBoundary() throws {
     #expect(store.setTodoDeferred(id: todoID, until: deferredUntil, now: deferredAt))
     #expect(store.todos.first?.deferredUntil == deferredUntil)
     #expect(store.todos.first?.updatedAt == deferredAt)
-    #expect(store.availableTodos(now: deferredUntil.addingTimeInterval(-1)).isEmpty)
+    #expect(store.availableTodos(now: deferredUntil.addingTimeInterval(-1)).map(\.id) == [todoID])
     #expect(store.availableTodos(now: deferredUntil).map(\.id) == [todoID])
 
     let reloaded = AssistantStore(storageURL: location.file)
     #expect(reloaded.todos.first?.deferredUntil == deferredUntil)
-    #expect(reloaded.availableTodos(now: deferredUntil.addingTimeInterval(-1)).isEmpty)
+    #expect(reloaded.availableTodos(now: deferredUntil.addingTimeInterval(-1)).map(\.id) == [todoID])
     #expect(reloaded.availableTodos(now: deferredUntil).map(\.id) == [todoID])
 }
 
@@ -365,7 +404,7 @@ func assistantStoreNextTodoHandlesEmptyAndSingleCandidate() throws {
 
 @Test
 @MainActor
-func assistantStoreNextTodoCyclesAndSkipsUnavailableItems() throws {
+func assistantStoreNextTodoCyclesThroughAllIncompleteItems() throws {
     let location = try makeAssistantTestLocation()
     defer { try? FileManager.default.removeItem(at: location.directory) }
 
@@ -394,7 +433,7 @@ func assistantStoreNextTodoCyclesAndSkipsUnavailableItems() throws {
         )
     )
     #expect(store.setTodoCompleted(id: oldest.id, completed: true, now: now))
-    #expect(store.availableTodos(now: now).map(\.id) == [newest.id])
+    #expect(store.availableTodos(now: now).map(\.id) == [newest.id, middle.id])
     #expect(store.nextTodo(after: middle.id, now: now)?.id == newest.id)
 }
 
@@ -595,7 +634,8 @@ func assistantStoreLoadsV2AndWritesCurrentSchemaWithoutLosingData() throws {
     #expect(store.todos.first?.title == legacyTodo.title)
     #expect(store.todos.first?.deferredUntil == nil)
     #expect(store.notes == [legacyNote])
-    #expect(store.inboxItems == [legacyInbox])
+    #expect(store.inboxItems.isEmpty)
+    #expect(store.todos.contains { $0.id == legacyInbox.id && $0.title == legacyInbox.content })
     #expect(store.lastError == nil)
 
     let deferredUntil = createdAt.addingTimeInterval(3_600)
@@ -615,7 +655,8 @@ func assistantStoreLoadsV2AndWritesCurrentSchemaWithoutLosingData() throws {
     #expect(migrated.todos.first?.id == todoID)
     #expect(migrated.todos.first?.deferredUntil == deferredUntil)
     #expect(migrated.notes == [legacyNote])
-    #expect(migrated.inboxItems == [legacyInbox])
+    #expect(migrated.inboxItems.isEmpty)
+    #expect(migrated.todos.contains { $0.id == legacyInbox.id && $0.title == legacyInbox.content })
 }
 
 @Test
@@ -714,32 +755,24 @@ func assistantStoreBlocksWritesForFutureSchema() throws {
 
 @Test
 @MainActor
-func assistantStorePlanningSortsByExplicitNextThenPriorityThenDeadline() throws {
+func assistantStoreSortsByCreationEvenWithLegacyPlanningFields() throws {
     let location = try makeAssistantTestLocation()
     defer { try? FileManager.default.removeItem(at: location.directory) }
     let now = Date(timeIntervalSince1970: 1_800_000_000)
     let items = [
-        TodoItem(title: "normal due", createdAt: now, dueAt: now),
-        TodoItem(title: "high late", createdAt: now, priority: .high, dueAt: now.addingTimeInterval(600)),
-        TodoItem(title: "high early", createdAt: now, priority: .high, dueAt: now),
-        TodoItem(title: "high undated", createdAt: now, priority: .high),
-        TodoItem(title: "explicit low", createdAt: now, priority: .low, isNext: true),
-        TodoItem(title: "completed", createdAt: now, completedAt: now, priority: .high),
-        TodoItem(title: "deferred", createdAt: now, deferredUntil: now.addingTimeInterval(300), priority: .high),
+        TodoItem(title: "old explicit next", createdAt: now, priority: .high, isNext: true),
+        TodoItem(title: "middle deadline", createdAt: now.addingTimeInterval(60), dueAt: now),
+        TodoItem(title: "new deferred", createdAt: now.addingTimeInterval(120), deferredUntil: now.addingTimeInterval(300)),
+        TodoItem(title: "completed", createdAt: now.addingTimeInterval(180), completedAt: now),
     ]
     try makeAssistantEncoder().encode(AssistantSnapshot(todos: items)).write(to: location.file)
     let store = AssistantStore(storageURL: location.file)
-    #expect(store.availableTodos(now: now).map(\.title) == ["explicit low", "high early", "high late", "high undated", "normal due"])
-    #expect(store.updateTodoPlanning(id: items[0].id, priority: .normal, dueAt: now, isNext: true, now: now))
-    #expect(store.todos.filter(\.isNext).map(\.id) == [items[0].id])
-    #expect(store.availableTodos(now: now).first?.id == items[0].id)
+    #expect(store.availableTodos(now: now).map(\.title) == ["new deferred", "middle deadline", "old explicit next"])
+    #expect(store.updateTodoPlanning(id: items[1].id, priority: .low, dueAt: nil, isNext: true, now: now))
+    #expect(store.availableTodos(now: now).map(\.title) == ["new deferred", "middle deadline", "old explicit next"])
     #expect(AssistantStore(storageURL: location.file).todos == store.todos)
-    #expect(store.setTodoCompleted(id: items[0].id, completed: true, now: now))
-    #expect(!store.todos.contains { $0.isNext })
-    #expect(store.availableTodos(now: now).first?.id == items[2].id)
-    #expect(store.updateTodoPlanning(id: items[6].id, priority: .low, dueAt: nil, isNext: true, now: now))
-    #expect(store.availableTodos(now: now).first?.id == items[6].id)
-    #expect(store.todos.first(where: { $0.id == items[6].id })?.deferredUntil == nil)
+    #expect(store.setTodoCompleted(id: items[2].id, completed: true, now: now))
+    #expect(store.availableTodos(now: now).map(\.title) == ["middle deadline", "old explicit next"])
 }
 
 @Test
@@ -761,7 +794,7 @@ func assistantStorePlanningSaveFailureDoesNotPublishPartialNextChoice() throws {
 
 @Test
 @MainActor
-func assistantStoreLoadsV3WithoutWritingThenMigratesPlanningAndPreservesContent() throws {
+func assistantStoreMigratesV3InboxAndPreservesLegacyTodoFields() throws {
     let location = try makeAssistantTestLocation()
     defer { try? FileManager.default.removeItem(at: location.directory) }
     let now = Date(timeIntervalSince1970: 1_800_000_000)
@@ -779,8 +812,10 @@ func assistantStoreLoadsV3WithoutWritingThenMigratesPlanningAndPreservesContent(
     try legacy.write(to: location.file)
     let store = AssistantStore(storageURL: location.file)
     #expect(store.lastError == nil)
-    #expect(store.todos == [todo])
-    #expect(try Data(contentsOf: location.file) == legacy)
+    #expect(store.todos.contains(todo))
+    #expect(store.todos.contains { $0.id == inbox.id && $0.title == inbox.content })
+    #expect(store.inboxItems.isEmpty)
+    #expect(try Data(contentsOf: location.file) != legacy)
     #expect(store.updateTodoPlanning(id: todo.id, priority: .high, dueAt: now, isNext: false, now: now))
     let snapshot = try makeAssistantDecoder().decode(AssistantSnapshot.self, from: Data(contentsOf: location.file))
     #expect(snapshot.schemaVersion == 4)
@@ -788,7 +823,25 @@ func assistantStoreLoadsV3WithoutWritingThenMigratesPlanningAndPreservesContent(
     #expect(snapshot.todos.first?.dueAt == now)
     #expect(snapshot.todos.first?.deferredUntil == todo.deferredUntil)
     #expect(snapshot.notes == [note])
-    #expect(snapshot.inboxItems == [inbox])
+    #expect(snapshot.inboxItems.isEmpty)
+    #expect(snapshot.todos.contains { $0.id == inbox.id && $0.title == inbox.content })
+}
+
+@Test @MainActor func assistantHubShowsNotesOnlyWhileSavedNotesExist() throws {
+    let location = try makeAssistantTestLocation()
+    defer { try? FileManager.default.removeItem(at: location.directory) }
+    let store = AssistantStore(storageURL: location.file)
+    #expect(AssistantHubView.Section.visible(noteCount: store.notes.count) == [.todos])
+
+    #expect(store.createNote(content: "保留的笔记"))
+    #expect(AssistantHubView.Section.visible(noteCount: store.notes.count) == [.todos, .notes])
+    let reloaded = AssistantStore(storageURL: location.file)
+    #expect(reloaded.notes.map(\.content) == ["保留的笔记"])
+    #expect(AssistantHubView.Section.visible(noteCount: reloaded.notes.count) == [.todos, .notes])
+
+    let note = try #require(reloaded.notes.first)
+    #expect(reloaded.deleteNote(id: note.id))
+    #expect(AssistantHubView.Section.visible(noteCount: reloaded.notes.count) == [.todos])
 }
 
 private struct LegacyAssistantSnapshot: Encodable {

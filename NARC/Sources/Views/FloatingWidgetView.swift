@@ -49,12 +49,25 @@ struct TodoCuePresentation: Equatable {
     }
 }
 
+struct CodexReplyCuePresentation: Equatable {
+    let text: String?
+
+    static func resolve(count: Int) -> Self {
+        guard count > 0 else { return Self(text: nil) }
+        return Self(text: count > 9 ? "9+" : "\(count)")
+    }
+}
+
 // MARK: - 2. Drag state
 
 /// Drives the `.dragging` state transition. AppDelegate flips this when the
 /// floating panel detects mouse-drag movement.
 final class WidgetDragState: ObservableObject {
     @Published var isDragging: Bool = false
+}
+
+final class WidgetCueHoverState: ObservableObject {
+    @Published var target: WidgetPointerInteractionPolicy.TapTarget?
 }
 
 // MARK: - 3. Container — projects app data sources onto FloatingWidgetState
@@ -65,6 +78,8 @@ struct FloatingWidgetContainer: View {
     @ObservedObject var appMonitor: AppMonitorService
     @ObservedObject var assistantStore: AssistantStore
     @ObservedObject var dragState: WidgetDragState
+    @ObservedObject var codexCompletionService: CodexCompletionService
+    @ObservedObject var cueHoverState: WidgetCueHoverState
     @AppStorage("widgetSize") private var widgetSize = "Medium"
 
     var body: some View {
@@ -76,6 +91,8 @@ struct FloatingWidgetContainer: View {
                     isDragging: dragState.isDragging
                 ),
                 availableTodoCount: assistantStore.availableTodos(now: context.date).count,
+                codexReplyCount: codexCompletionService.pendingEvents.count,
+                hoveredCue: cueHoverState.target,
                 widgetSize: widgetSize
             )
         }
@@ -87,7 +104,7 @@ struct FloatingWidgetContainer: View {
 /// Canvas size for a given visible circle size. Includes transparent padding
 /// so SwiftUI's drop shadow (radius 32) doesn't clip at the frame edge.
 private func widgetCanvasSize(visible: CGFloat) -> CGFloat {
-    // 80pt padding (40pt each side) gives radius-32 shadow room to breathe.
+    // Preserve the established canvas and hit geometry even with a quieter shadow.
     visible + 80
 }
 
@@ -103,6 +120,8 @@ private func widgetVisibleSize(for preset: String) -> CGFloat {
 struct FloatingWidgetView: View {
     let state: FloatingWidgetState
     var availableTodoCount = 0
+    var codexReplyCount = 0
+    var hoveredCue: WidgetPointerInteractionPolicy.TapTarget?
     var widgetSize: String = "Medium"
 
     private var visibleSize: CGFloat { widgetVisibleSize(for: widgetSize) }
@@ -120,7 +139,7 @@ struct FloatingWidgetView: View {
     private var widget: some View {
         ZStack(alignment: .topTrailing) {
             Circle()
-                .fill(Color(NSColor.windowBackgroundColor))
+                .fill(Color.narcFocusSurface)
                 .frame(width: visibleSize, height: visibleSize)
                 .overlay {
                     HaloInnerView(state: state, visibleSize: visibleSize)
@@ -129,18 +148,27 @@ struct FloatingWidgetView: View {
                 .overlay {
                     Circle()
                         .strokeBorder(
-                            Color(NSColor.separatorColor).opacity(0.6),
-                            lineWidth: 1
+                            Color.narcBorder.opacity(0.25),
+                            lineWidth: 0.5
                         )
                 }
                 .overlay(alignment: .bottomLeading) {
                     if state.showsTodoCue(availableTodoCount: availableTodoCount) {
-                        TodoAvailabilityCue(count: availableTodoCount)
+                        TodoAvailabilityCue(count: availableTodoCount,
+                                            isHovered: hoveredCue == .todo)
                             .offset(x: -6, y: 6)
                     }
                 }
-                .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
-                .shadow(color: .black.opacity(0.12), radius: 32, y: 12)
+                .overlay(alignment: .topLeading) {
+                    if state != .dragging, codexReplyCount > 0 {
+                        CodexReplyCue(count: codexReplyCount,
+                                      isHovered: hoveredCue == .codexReply)
+                            .offset(x: WidgetPointerInteractionPolicy.codexCueOffsetX,
+                                    y: WidgetPointerInteractionPolicy.codexCueOffsetY)
+                    }
+                }
+                .shadow(color: .black.opacity(0.06), radius: 6, y: 2)
+                .shadow(color: .black.opacity(0.09), radius: 16, y: 6)
 
             // Badge — sibling of the Circle, NOT inside its overlay, so the
             // capsule overflows the 48pt circle's top-right corner. Per design
@@ -164,12 +192,41 @@ struct FloatingWidgetView: View {
     }
 }
 
-// MARK: - 5. Todo availability cue
+// MARK: - 5. Reply and Todo cues
+
+private struct CodexReplyCue: View {
+    let count: Int
+    let isHovered: Bool
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Image(systemName: "bubble.left")
+                .font(.system(size: 9, weight: .bold))
+            Text(CodexReplyCuePresentation.resolve(count: count).text ?? "")
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .monospacedDigit()
+        }
+            .foregroundStyle(.white)
+            .frame(width: WidgetPointerInteractionPolicy.codexCueWidth,
+                   height: WidgetPointerInteractionPolicy.codexCueHeight)
+            .background(Capsule().fill(Color.narcAccent))
+            .overlay {
+                Capsule().strokeBorder(Color(NSColor.windowBackgroundColor), lineWidth: 1.5)
+            }
+            .scaleEffect(isHovered ? 1.14 : 1)
+            .shadow(color: Color.narcAccent.opacity(isHovered ? 0.28 : 0),
+                    radius: isHovered ? 6 : 0)
+            .animation(.easeOut(duration: 0.15), value: isHovered)
+            .help("\(count) 个 Codex 回复，点击查看")
+            .accessibilityLabel("\(count) 个 Codex 回复，点击查看")
+    }
+}
 
 /// A blue, count-bearing second status axis for actionable Todo. Application
 /// unread keeps exclusive ownership of the red badge in the opposite corner.
 private struct TodoAvailabilityCue: View {
     let count: Int
+    let isHovered: Bool
 
     var body: some View {
         let presentation = TodoCuePresentation.resolve(count: count)
@@ -185,13 +242,17 @@ private struct TodoAvailabilityCue: View {
             }
         }
             .foregroundStyle(.white)
-            .padding(.horizontal, 5)
-            .frame(height: 19)
+            .frame(width: WidgetPointerInteractionPolicy.todoCueWidth(count: count),
+                   height: WidgetPointerInteractionPolicy.todoCueHeight)
             .background(Capsule().fill(Color.narcInfo))
             .overlay {
                 Capsule()
                     .strokeBorder(Color(NSColor.windowBackgroundColor), lineWidth: 1.5)
             }
+            .scaleEffect(isHovered ? 1.14 : 1)
+            .shadow(color: Color.narcInfo.opacity(isHovered ? 0.28 : 0),
+                    radius: isHovered ? 6 : 0)
+            .animation(.easeOut(duration: 0.15), value: isHovered)
             .help("有 \(count) 项可处理 Todo")
             .accessibilityLabel("有 \(count) 项可处理 Todo")
     }
@@ -206,16 +267,12 @@ private struct HaloInnerView: View {
 
     var body: some View {
         ZStack {
-            BloomView(reduceMotion: reduceMotion, active: state != .dragging)
-
-            if case .hasNotification = state, !reduceMotion {
-                RippleView(delay: 0)
-                RippleView(delay: 3.5)
-            }
+            // State is communicated by the independent badges, not perpetual motion.
+            BloomView(reduceMotion: true, active: false)
 
             if state != .dragging {
                 FloatingMarkView(
-                    reduceMotion: reduceMotion,
+                    reduceMotion: true,
                     visibleSize: visibleSize
                 )
             }
@@ -236,7 +293,7 @@ private struct BloomView: View {
             .fill(
                 RadialGradient(
                     colors: [
-                        Color.narcAccent.opacity(1.0),
+                        Color.narcAccent.opacity(0.45),
                         Color.narcAccent.opacity(0.14),
                         .clear
                     ],

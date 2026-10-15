@@ -74,6 +74,7 @@ class PinnedWindowService: ObservableObject {
     private var pollTimer: Timer?
     private let pollInterval: TimeInterval = 2.0
     private var activationGeneration: UInt64 = 0
+    private let defaults: UserDefaults
 
     /// Runtime state for each pinned window (not persisted).
     /// Key = PinnedWindow.id
@@ -81,9 +82,10 @@ class PinnedWindowService: ObservableObject {
 
     // MARK: - Init
 
-    init() {
+    init(defaults: UserDefaults = .standard, startsPolling: Bool = true) {
+        self.defaults = defaults
         loadPersistentWindows()
-        startPolling()
+        if startsPolling { startPolling() }
     }
 
     deinit {
@@ -167,6 +169,29 @@ class PinnedWindowService: ObservableObject {
         print("[NARC] 📌 Unpinned window: \(id)")
     }
 
+    /// Move one Pin by one slot. Numeric shortcuts always use this array order.
+    @discardableResult
+    func movePin(id: UUID, by offset: Int) -> Int? {
+        guard let index = pinnedWindows.firstIndex(where: { $0.id == id }),
+              let reordered = Self.reorderedPins(pinnedWindows, from: index, by: offset) else {
+            return nil
+        }
+        pinnedWindows = reordered
+        save()
+        return index + offset
+    }
+
+    static func reorderedPins(_ pins: [PinnedWindow], from index: Int, by offset: Int) -> [PinnedWindow]? {
+        guard offset == -1 || offset == 1 else { return nil }
+        let destination = index + offset
+        guard pins.indices.contains(index), pins.indices.contains(destination) else {
+            return nil
+        }
+        var reordered = pins
+        reordered.swapAt(index, destination)
+        return reordered
+    }
+
     /// Toggle the persistence state of a pinned window (📌 ↔ 🔒).
     func togglePersistence(id: UUID) {
         guard let index = pinnedWindows.firstIndex(where: { $0.id == id }) else { return }
@@ -229,6 +254,36 @@ class PinnedWindowService: ObservableObject {
     }
 
     // MARK: - Window Activation
+
+    /// A direct slot must still refer to the exact window the user marked.
+    /// CG's full list covers minimized windows and windows on another Space;
+    /// AX is used as a second source when the target app exposes its windows.
+    func exactPinnedWindowExists(_ pinned: PinnedWindow) -> Bool {
+        guard let app = NSRunningApplication.runningApplications(
+            withBundleIdentifier: pinned.bundleID
+        ).first else { return false }
+
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.15)
+        if let windows = AXWindowHelper.getWindows(appElement),
+           case .found = Self.resolvePinnedWindow(
+                in: windows,
+                expectedWindowID: pinned.cgWindowID,
+                titleHint: pinned.windowTitle,
+                allowsTitleFallback: pinned.cgWindowID == 0
+           ) {
+            return true
+        }
+
+        guard pinned.cgWindowID != 0 else { return false }
+        let allWindows = CGWindowListCopyWindowInfo(
+            [.optionAll, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] ?? []
+        return allWindows.contains { row in
+            (row[kCGWindowOwnerPID as String] as? pid_t) == app.processIdentifier
+                && (row[kCGWindowNumber as String] as? CGWindowID) == pinned.cgWindowID
+        }
+    }
 
     /// Recall a known window when possible, otherwise visibly open its app.
     /// AX window lists may temporarily omit windows in inactive Spaces.
@@ -712,12 +767,12 @@ class PinnedWindowService: ObservableObject {
         // Only persist windows marked as persistent
         let persistentWindows = pinnedWindows.filter { $0.isPersistent }
         if let data = try? JSONEncoder().encode(persistentWindows) {
-            UserDefaults.standard.set(data, forKey: "narc.pinnedWindows")
+            defaults.set(data, forKey: "narc.pinnedWindows")
         }
     }
 
     private func loadPersistentWindows() {
-        if let data = UserDefaults.standard.data(forKey: "narc.pinnedWindows"),
+        if let data = defaults.data(forKey: "narc.pinnedWindows"),
            let saved = try? JSONDecoder().decode([PinnedWindow].self, from: data) {
             pinnedWindows = saved
             for pinned in saved {

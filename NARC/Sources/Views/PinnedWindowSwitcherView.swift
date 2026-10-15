@@ -44,8 +44,7 @@ struct PinnedWindowSwitcherView: View {
     let onItemCountChanged: (Int) -> Void
 
     private var pins: [PinnedWindow] {
-        // Array order is the stable slot order. It changes only when the user
-        // explicitly marks, removes, or changes persistence for a window.
+        // Array order defines both panel digits and direct global number slots.
         pinnedWindowService.pinnedWindows
     }
 
@@ -66,13 +65,8 @@ struct PinnedWindowSwitcherView: View {
             width: PinnedWindowSwitcherLayout.panelSize(itemCount: pins.count).width,
             height: PinnedWindowSwitcherLayout.panelSize(itemCount: pins.count).height
         )
-        .background(VisualEffectBackground(material: .hudWindow))
-        .clipShape(RoundedRectangle(cornerRadius: NarcRadius.xl, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: NarcRadius.xl, style: .continuous)
-                .strokeBorder(Color.narcBorder, lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.18), radius: 22, y: 10)
+        .background(Color.narcFocusSurface)
+        .clipShape(RoundedRectangle(cornerRadius: NarcRadius.focus, style: .continuous))
         .onAppear {
             selection.clamp(itemCount: pins.count)
         }
@@ -93,7 +87,7 @@ struct PinnedWindowSwitcherView: View {
                 Text("已标记窗口")
                     .font(.narcSubtitle)
                     .foregroundColor(.narcText)
-                Text("直接选择一个具体窗口")
+                Text("按数字召回；右侧箭头调整顺序")
                     .font(.narcCaption)
                     .foregroundColor(.narcTextMuted)
             }
@@ -129,7 +123,19 @@ struct PinnedWindowSwitcherView: View {
                             },
                             onRemove: {
                                 pinnedWindowService.unpin(id: pinned.id)
-                            }
+                            },
+                            onMoveUp: {
+                                if let newIndex = pinnedWindowService.movePin(id: pinned.id, by: -1) {
+                                    selection.selectedIndex = newIndex
+                                }
+                            },
+                            onMoveDown: {
+                                if let newIndex = pinnedWindowService.movePin(id: pinned.id, by: 1) {
+                                    selection.selectedIndex = newIndex
+                                }
+                            },
+                            canMoveUp: index > 0,
+                            canMoveDown: index < pins.count - 1
                         )
                         .id(index)
 
@@ -182,7 +188,7 @@ struct PinnedWindowSwitcherView: View {
         }
         .padding(.horizontal, NarcSpacing.lg)
         .padding(.vertical, NarcSpacing.sm)
-        .background(Color.narcBackground)
+        .background(Color.narcFocusSurface)
     }
 
     private func shortcutHint(_ key: String, label: String) -> some View {

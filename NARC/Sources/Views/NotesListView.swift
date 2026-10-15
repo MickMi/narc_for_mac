@@ -2,10 +2,12 @@ import SwiftUI
 
 struct NotesListView: View {
     @ObservedObject var store: AssistantStore
-    let onCreate: () -> Void
 
     @State private var query = ""
     @State private var pendingDeletion: NoteItem?
+    @State private var isCreating = false
+    @State private var newNote = ""
+    @State private var creationError: String?
 
     private var filteredNotes: [NoteItem] {
         store.searchNotes(query: query)
@@ -45,6 +47,34 @@ struct NotesListView: View {
         } message: {
             Text("删除后将从本机数据中移除，当前版本不提供撤销。")
         }
+        .sheet(isPresented: $isCreating) {
+            VStack(alignment: .leading, spacing: NarcSpacing.md) {
+                Text("新建 Note").font(.narcTitle)
+                TextEditor(text: $newNote)
+                    .font(.narcBody)
+                    .frame(minHeight: 140)
+                if let creationError {
+                    Text(creationError).font(.narcCaption).foregroundStyle(.red)
+                }
+                HStack {
+                    Spacer()
+                    Button("取消") { isCreating = false }
+                        .keyboardShortcut(.cancelAction)
+                    Button("保存") {
+                        if store.createNote(content: newNote) {
+                            newNote = ""
+                            creationError = nil
+                            isCreating = false
+                        } else {
+                            creationError = store.lastError?.errorDescription ?? "保存失败，请重试。"
+                        }
+                    }
+                    .disabled(newNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .padding(NarcSpacing.xl)
+            .frame(width: 420)
+        }
     }
 
     private var searchBar: some View {
@@ -56,6 +86,13 @@ struct NotesListView: View {
                 .textFieldStyle(.plain)
                 .font(.narcBody)
                 .accessibilityLabel("搜索 Notes")
+
+            Button("新建 Note") {
+                creationError = nil
+                isCreating = true
+            }
+            .buttonStyle(.borderedProminent)
+            .fixedSize(horizontal: true, vertical: false)
 
             if hasQuery {
                 Button {
@@ -105,7 +142,10 @@ struct NotesListView: View {
             Text("快速保存一段想法、决定或备忘。")
                 .font(.narcCaption)
                 .foregroundColor(.narcTextMuted)
-            Button("新建 Note", action: onCreate)
+            Button("新建 Note") {
+                creationError = nil
+                isCreating = true
+            }
                 .buttonStyle(.borderedProminent)
                 .accessibilityLabel("新建 Note")
             Spacer()

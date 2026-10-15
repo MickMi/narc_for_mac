@@ -32,8 +32,8 @@ expect_count '.onTapGesture' 0 'Recall must not be an ancestor gesture of mainte
 expect_count 'Button(action: onTap)' 1 'Recall needs its own semantic button'
 expect_count 'Button(action: onTogglePersistence)' 1 'Persistence must always be a semantic button'
 expect_count 'Button(role: .destructive, action: onRemove)' 1 'Removal must have a distinct semantic button'
-expect_count '.frame(width: 28, height: 28)' 2 'Both maintenance buttons need stable, usable hit areas'
-expect_count '.focusable(false)' 3 'Row controls must not take over the existing keyboard-selection route'
+expect_count '.frame(width: 28, height: 28)' 4 'Maintenance and optional move buttons need stable, usable hit areas'
+expect_count '.focusable(false)' 5 'Row controls must not take over the existing keyboard-selection route'
 expect_count '.accessibilityValue(pinned.isPersistent ? "长期保留" : "临时")' 1 'Persistence state must be exposed to assistive technology'
 
 printf 'Pinned row structure checks passed: %d\n' "$PASS_COUNT"

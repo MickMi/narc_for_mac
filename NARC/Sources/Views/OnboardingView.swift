@@ -83,7 +83,7 @@ enum OnboardingPresentationPolicy {
         advance(to: .entrySeen, in: defaults)
     }
 
-    /// Call only after the first Inbox item has been saved successfully.
+    /// Call only after the first Todo has been saved successfully.
     static func markFirstCaptureCompleted(in defaults: UserDefaults = .standard) {
         advance(to: .firstCaptureCompleted, in: defaults)
     }
@@ -92,7 +92,7 @@ enum OnboardingPresentationPolicy {
         let state = resolvedState(in: defaults)
         guard state.hasCompletedCurrentCoreFlow else {
             // Window tools are an optional, independent path. Using them first
-            // must not pretend that the user has already completed an Inbox
+            // must not pretend that the user has already created a Todo
             // capture, which is the core-flow completion gate.
             markEntrySeen(in: defaults)
             return
@@ -170,8 +170,8 @@ struct OnboardingView: View {
 
             OnboardingActionRow(
                 icon: "square.and.pencil",
-                title: hotkeyService.activeShortcut(for: .quickCapture).map { "按 \($0.displayLabel)" } ?? "打开面板中的随手记",
-                detail: "直接写下内容并按 Return，先存入随手箱"
+                title: hotkeyService.activeShortcut(for: .quickCapture).map { "按 \($0.displayLabel)" } ?? "打开面板中的 Todo",
+                detail: "直接写下内容并按 Return，创建 Todo"
             )
         }
         .accessibilityElement(children: .contain)
@@ -230,14 +230,14 @@ struct OnboardingView: View {
             Spacer()
 
             Button(action: onOpenAssistant) {
-                Label("打开随手箱", systemImage: "tray.and.arrow.down.fill")
+                Label("打开 Todo", systemImage: "checklist")
                     .font(.narcBody)
                     .padding(.horizontal, NarcSpacing.md)
                     .padding(.vertical, NarcSpacing.xs)
             }
             .buttonStyle(.borderedProminent)
             .keyboardShortcut(.defaultAction)
-            .accessibilityLabel("关闭使用指南并打开随手箱")
+            .accessibilityLabel("关闭使用指南并打开 Todo")
         }
     }
 }

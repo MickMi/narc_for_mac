@@ -187,11 +187,25 @@ class HotkeyService: ObservableObject {
     /// Callback invoked when the current-window Pin toggle (⌃⌥⇧P) is pressed.
     var onToggleCurrentWindowPinHotkeyPressed: (() -> Void)?
 
+    /// Zero-based Pin position, resolved against the latest Pin order at press time.
+    var onPinnedWindowSlotHotkeyPressed: ((Int) -> Void)?
+
+    @Published private(set) var pinnedWindowSlotCount = 0
+
     /// Callback invoked when the Summon Widget hotkey (⌃⌥N) is pressed.
     var onSummonWidgetHotkeyPressed: (() -> Void)?
 
     /// Callback invoked when the Quick Capture hotkey (⌃⌥Q) is pressed.
     var onQuickCaptureHotkeyPressed: (() -> Void)?
+
+    /// Callback invoked when the Ask AI hotkey (⌃⌥⇧D) is pressed.
+    var onAskAIHotkeyPressed: (() -> Void)?
+
+    /// Callback invoked when the Bing Search hotkey (⌃⌥B) is pressed.
+    var onWebSearchHotkeyPressed: (() -> Void)?
+
+    /// Callback invoked when the Google Search hotkey (⌃⌥G) is pressed.
+    var onGoogleSearchHotkeyPressed: (() -> Void)?
 
     /// Callback invoked once per physical press of the selected-text Todo
     /// shortcut. Key-repeat presses are ignored until Carbon sends a release.
@@ -291,6 +305,12 @@ class HotkeyService: ObservableObject {
     private static let toggleCurrentWindowPinReplacementSlot: UInt32 = 107
     private static let summonWidgetReplacementSlot: UInt32 = 118
     private static let quickCaptureReplacementSlot: UInt32 = 119
+    private static let askAIHotkeyID: UInt32 = 120
+    private static let webSearchHotkeyID: UInt32 = 121
+    private static let askAIReplacementSlot: UInt32 = 122
+    private static let webSearchReplacementSlot: UInt32 = 123
+    private static let googleSearchHotkeyID: UInt32 = 124
+    private static let googleSearchReplacementSlot: UInt32 = 125
     static let selectedTextTodoShortcutDefaultsKey = "narc.selectedTextTodoShortcut"
 
     static let pinnedWindowSwitcherHotkey = BuiltInHotkeyDefinition(
@@ -427,7 +447,12 @@ class HotkeyService: ObservableObject {
         registeredActionScope = Set(ConfigurableHotkeyAction.allCases.filter {
             !noAX || !$0.requiresAccessibility
         })
-        for action in ConfigurableHotkeyAction.allCases {
+        // Existing actions claim their saved chords before newly introduced
+        // Pin-slot defaults. A new default must never displace an older choice.
+        let orderedActions = ConfigurableHotkeyAction.allCases.filter {
+            $0.pinnedWindowSlotIndex == nil
+        } + ConfigurableHotkeyAction.pinnedWindowSlotActions
+        for action in orderedActions {
             if !isEnabled(for: action) {
                 configurableHotkeyStates[action] = .disabled(shortcut(for: action))
             } else if registeredActionScope?.contains(action) == true {
@@ -437,6 +462,47 @@ class HotkeyService: ObservableObject {
                     requested: shortcut(for: action),
                     reason: .unavailableInCurrentRuntime
                 )
+            }
+        }
+    }
+
+    /// Keep only occupied numeric slots registered. Empty slots must not
+    /// intercept another application's shortcut.
+    func updatePinnedWindowSlotCount(_ count: Int) {
+        let newCount = min(max(count, 0), ConfigurableHotkeyAction.pinnedWindowSlotActions.count)
+        guard newCount != pinnedWindowSlotCount else { return }
+        let previousCount = pinnedWindowSlotCount
+        pinnedWindowSlotCount = newCount
+
+        for (index, action) in ConfigurableHotkeyAction.pinnedWindowSlotActions.enumerated() {
+            if index >= previousCount, index < newCount {
+                if registeredActionScope?.contains(action) == true {
+                    _ = activateConfigurableShortcut(shortcut(for: action), for: action)
+                } else if registeredActionScope != nil {
+                    configurableHotkeyStates[action] = .unavailable(
+                        requested: shortcut(for: action),
+                        reason: .unavailableInCurrentRuntime
+                    )
+                } else {
+                    configurableHotkeyStates[action] = .notRegistered
+                }
+            } else if index < previousCount, index >= newCount {
+                if let registration = configurableRegistrations[action] {
+                    let status = registration.unregister()
+                    if status != noErr {
+                        configurableHotkeyStates[action] = .rejected(
+                            active: shortcut(for: action),
+                            requested: shortcut(for: action),
+                            reason: .couldNotUnregisterExisting(status)
+                        )
+                        continue
+                    }
+                    configurableRegistrations[action] = nil
+                    configurableActiveSlotIDs[action] = nil
+                }
+                configurableRegistrationGenerations[action, default: 0] &+= 1
+                configurableHotkeysPressed.remove(action)
+                configurableHotkeyStates[action] = .disabled(shortcut(for: action))
             }
         }
     }
@@ -495,7 +561,10 @@ class HotkeyService: ObservableObject {
     }
 
     func isEnabled(for action: ConfigurableHotkeyAction) -> Bool {
-        action.supportsEnabledToggle
+        if let index = action.pinnedWindowSlotIndex {
+            return index < pinnedWindowSlotCount
+        }
+        return action.supportsEnabledToggle
             ? (configurableHotkeyEnabled[action] ?? true)
             : true
     }
@@ -662,6 +731,17 @@ class HotkeyService: ObservableObject {
             if let layout = action.layout { onLayoutHotkeyPressed?(layout) }
         case .toggleCurrentWindowPin:
             onToggleCurrentWindowPinHotkeyPressed?()
+        case .pinnedWindowSlot1, .pinnedWindowSlot2, .pinnedWindowSlot3,
+             .pinnedWindowSlot4, .pinnedWindowSlot5, .pinnedWindowSlot6,
+             .pinnedWindowSlot7, .pinnedWindowSlot8, .pinnedWindowSlot9:
+            guard let index = action.pinnedWindowSlotIndex else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      index < self.pinnedWindowSlotCount,
+                      self.configurableActiveSlotIDs[action] == slotID,
+                      self.configurableRegistrationGenerations[action] == generation else { return }
+                self.onPinnedWindowSlotHotkeyPressed?(index)
+            }
         case .selectedTextTodo:
             onSelectedTextTodoHotkeyPressed?()
         case .pinnedWindowSwitcher:
@@ -684,6 +764,27 @@ class HotkeyService: ObservableObject {
                       self.configurableActiveSlotIDs[action] == slotID,
                       self.configurableRegistrationGenerations[action] == generation else { return }
                 self.onQuickCaptureHotkeyPressed?()
+            }
+        case .askAI:
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.configurableActiveSlotIDs[action] == slotID,
+                      self.configurableRegistrationGenerations[action] == generation else { return }
+                self.onAskAIHotkeyPressed?()
+            }
+        case .webSearch:
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.configurableActiveSlotIDs[action] == slotID,
+                      self.configurableRegistrationGenerations[action] == generation else { return }
+                self.onWebSearchHotkeyPressed?()
+            }
+        case .googleSearch:
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.configurableActiveSlotIDs[action] == slotID,
+                      self.configurableRegistrationGenerations[action] == generation else { return }
+                self.onGoogleSearchHotkeyPressed?()
             }
         }
     }
@@ -821,7 +922,35 @@ class HotkeyService: ObservableObject {
     ) -> String? {
         return ConfigurableHotkeyAction.allCases.first(where: {
             $0 != action && isEnabled(for: $0) && shortcut(for: $0) == requested
+                && !isUnclaimedNewDefault($0, whileActivating: action)
         })?.title
+    }
+
+    /// A newly introduced default must not invalidate an older saved action
+    /// before it has ever registered or been customized. The older action is
+    /// allowed to bind first; the new action then reports the normal conflict.
+    private func isUnclaimedNewDefault(
+        _ candidate: ConfigurableHotkeyAction,
+        whileActivating action: ConfigurableHotkeyAction
+    ) -> Bool {
+        // Google is newer than the existing AI/Bing actions, so their saved
+        // shortcuts must also take precedence over its unclaimed default.
+        if candidate == .googleSearch, action != .googleSearch,
+           configurableRegistrations[candidate] == nil,
+           defaults.data(forKey: candidate.defaultsKey) == nil {
+            return shortcut(for: candidate) == candidate.defaultShortcut
+        }
+        if candidate.pinnedWindowSlotIndex != nil,
+           action.pinnedWindowSlotIndex == nil,
+           configurableRegistrations[candidate] == nil,
+           defaults.data(forKey: candidate.defaultsKey) == nil {
+            return shortcut(for: candidate) == candidate.defaultShortcut
+        }
+        guard ![.askAI, .webSearch, .googleSearch].contains(action),
+              [.askAI, .webSearch, .googleSearch].contains(candidate),
+              configurableRegistrations[candidate] == nil,
+              defaults.data(forKey: candidate.defaultsKey) == nil else { return false }
+        return shortcut(for: candidate) == candidate.defaultShortcut
     }
 
     private func legacySelectedTextState(
@@ -918,12 +1047,23 @@ class HotkeyService: ObservableObject {
             return [pinnedWindowSwitcherHotkeyID, pinnedWindowSwitcherReplacementSlot]
         case .toggleCurrentWindowPin:
             return [toggleCurrentWindowPinHotkeyID, toggleCurrentWindowPinReplacementSlot]
+        case .pinnedWindowSlot1, .pinnedWindowSlot2, .pinnedWindowSlot3,
+             .pinnedWindowSlot4, .pinnedWindowSlot5, .pinnedWindowSlot6,
+             .pinnedWindowSlot7, .pinnedWindowSlot8, .pinnedWindowSlot9:
+            let index = UInt32(action.pinnedWindowSlotIndex ?? 0)
+            return [130 + index, 140 + index]
         case .summonWidget:
             return [summonWidgetHotkeyID, summonWidgetReplacementSlot]
         case .quickCapture:
             return [quickCaptureHotkeyID, quickCaptureReplacementSlot]
         case .selectedTextTodo:
             return [selectedTextTodoHotkeySlotA, selectedTextTodoHotkeySlotB]
+        case .askAI:
+            return [askAIHotkeyID, askAIReplacementSlot]
+        case .webSearch:
+            return [webSearchHotkeyID, webSearchReplacementSlot]
+        case .googleSearch:
+            return [googleSearchHotkeyID, googleSearchReplacementSlot]
         }
     }
 
@@ -956,7 +1096,18 @@ class HotkeyService: ObservableObject {
             }
             let candidate: ConfigurableShortcut
             if let decoded, decoded.isValid {
-                candidate = decoded
+                let previousAskAIDefault = ConfigurableShortcut(
+                    keyCode: 2,
+                    modifiers: UInt32(controlKey | optionKey)
+                )
+                // Initial registration persisted defaults as if they were user
+                // choices. Migrate only that exact old default; every other
+                // custom combination remains unchanged.
+                if action == .askAI, decoded == previousAskAIDefault {
+                    candidate = action.defaultShortcut
+                } else {
+                    candidate = decoded
+                }
             } else if action == .selectedTextTodo {
                 candidate = selectedTextShortcut
             } else {
@@ -976,7 +1127,10 @@ class HotkeyService: ObservableObject {
     /// can unexpectedly reject combinations that previously worked.
     static func registrationOptions(for action: ConfigurableHotkeyAction) -> OptionBits {
         switch action {
-        case .pinnedWindowSwitcher, .toggleCurrentWindowPin:
+        case .pinnedWindowSwitcher, .toggleCurrentWindowPin,
+             .pinnedWindowSlot1, .pinnedWindowSlot2, .pinnedWindowSlot3,
+             .pinnedWindowSlot4, .pinnedWindowSlot5, .pinnedWindowSlot6,
+             .pinnedWindowSlot7, .pinnedWindowSlot8, .pinnedWindowSlot9:
             return OptionBits(kEventHotKeyExclusive)
         default:
             return 0

@@ -4,6 +4,7 @@ import Testing
 @Test
 func onlyNotificationsSupportsLegacyPanelItemNavigation() {
     #expect(!PanelKeyboardRoute.inbox.supportsItemNavigation)
+    #expect(!PanelKeyboardRoute.codexReplies.supportsItemNavigation)
     #expect(PanelKeyboardRoute.notifications.supportsItemNavigation)
     #expect(!PanelKeyboardRoute.windows.supportsItemNavigation)
 }
@@ -12,7 +13,7 @@ func onlyNotificationsSupportsLegacyPanelItemNavigation() {
 func inboxAndWindowsPassEditingAndNavigationKeysThrough() {
     let routedKeys: [UInt16] = [36, 126, 125, 48, 18]
 
-    for route in [PanelKeyboardRoute.inbox, .windows] {
+    for route in [PanelKeyboardRoute.inbox, .codexReplies, .windows] {
         for keyCode in routedKeys {
             #expect(
                 route.decision(for: keyCode, isTextEditing: false) == .passThrough
@@ -36,7 +37,7 @@ func inboxAndWindowsPassEditingAndNavigationKeysThrough() {
 
 @Test
 func escapeDismissesEveryPanelRouteEvenWhileEditing() {
-    for route in [PanelKeyboardRoute.inbox, .notifications, .windows] {
+    for route in [PanelKeyboardRoute.inbox, .codexReplies, .notifications, .windows] {
         #expect(
             route.decision(for: 53, isTextEditing: true) == .dismissPanel
         )

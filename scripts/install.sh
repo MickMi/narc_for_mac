@@ -143,7 +143,7 @@ if [ "$INSTALL_MODE" = "restore-legacy" ]; then
     IDENTITY_ARGS=(--restore-legacy-signer --installed-app "$TARGET_APP")
 fi
 if ! SIGN_IDENTITY="$(bash "${SCRIPT_DIR}/ensure-local-signing-identity.sh" "${IDENTITY_ARGS[@]}")"; then
-    fail "本地签名身份不可用；为保护现有辅助功能授权，安装已停止且不会回退到 ad-hoc。" 4
+    fail "本机自签身份选择或预检失败；未开始构建或替换应用。请保留上方错误；安装不会自动更换身份或降级签名。" 4
 fi
 
 if ! [[ "$SIGN_IDENTITY" =~ ^[0-9A-F]{40}$ ]]; then
@@ -244,7 +244,7 @@ if ! NARC_SIGNING_MODE=local \
     printf '\n构建日志：\n' >&2
     cat "$BUILD_LOG" >&2
     rm -f "$BUILD_LOG"
-    fail "构建或本地签名失败；请确认登录钥匙串已解锁，再重试或在 GitHub 提交 Issue。" 4
+    fail "编译、组装、签名或验签失败；现有安装未替换。请按上方日志中的失败步骤排查，不能仅凭此错误判断钥匙串未解锁。" 4
 fi
 rm -f "$BUILD_LOG"
 

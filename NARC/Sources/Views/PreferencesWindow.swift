@@ -10,8 +10,11 @@ import SwiftUI
 /// keeps the pattern consistent with DashboardWindow / PanelWindow.
 final class PreferencesWindow: NSWindow {
 
-    convenience init() {
-        let initialFrame = NSRect(x: 0, y: 0, width: 560, height: 460)
+    convenience init(
+        contentSize: NSSize = NSSize(width: 560, height: 460),
+        minimumContentSize: NSSize? = nil
+    ) {
+        let initialFrame = NSRect(origin: .zero, size: contentSize)
         self.init(
             contentRect: initialFrame,
             styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
@@ -23,6 +26,9 @@ final class PreferencesWindow: NSWindow {
         self.titleVisibility = .visible
         self.isReleasedWhenClosed = false
         self.collectionBehavior = [.fullScreenAuxiliary, .moveToActiveSpace]
+        if let minimumContentSize {
+            self.contentMinSize = minimumContentSize
+        }
         self.center()
     }
 

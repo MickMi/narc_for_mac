@@ -14,6 +14,9 @@ readonly OPENSSL_BIN="/usr/bin/openssl"
 readonly MKTEMP_BIN="/usr/bin/mktemp"
 readonly PLIST_BUDDY_BIN="/usr/libexec/PlistBuddy"
 
+# shellcheck source=lib/local-signing-preflight.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/local-signing-preflight.sh"
+
 TEMP_DIR=""
 LOGIN_KEYCHAIN=""
 MARKER_DIR=""
@@ -665,6 +668,11 @@ create_identity() {
     fi
 }
 
+verify_signing_identity() {
+    narc_verify_local_signing "$1" "$LOGIN_KEYCHAIN" "$TEMP_DIR" "$CODESIGN_BIN" \
+        || fail "本机自签身份未通过实际签名检查；不会切换身份或提交新的指纹标记。"
+}
+
 main() {
     require_runtime
     parse_arguments "$@"
@@ -697,6 +705,7 @@ main() {
         restore_confirmation="$(printf '%s' "$restore_confirmation" | tr '[:lower:]' '[:upper:]')"
         [ "$restore_confirmation" = "$POLICY_FINGERPRINT" ] \
             || fail "旧签名指纹确认不匹配；没有修改 App 或指纹标记。"
+        verify_signing_identity "$POLICY_FINGERPRINT"
         printf '%s\n' "$POLICY_FINGERPRINT"
         return 0
     fi
@@ -711,6 +720,7 @@ main() {
             "$INSTALLED_APP_STATE" "$INSTALLED_APP_LEAF_FINGERPRINT" \
             "${#LOCAL_CERTIFICATE_FINGERPRINTS[@]}" \
             || fail "$POLICY_ERROR"
+        verify_signing_identity "$POLICY_FINGERPRINT"
         note "✅ 复用指纹已锁定的 NARC 本地代码签名身份（${POLICY_IDENTITY_NAME}）。"
         printf '%s\n' "$POLICY_FINGERPRINT"
         return 0
@@ -724,6 +734,7 @@ main() {
         || fail "$POLICY_ERROR"
 
     if [ "$POLICY_ACTION" = "adopt-installed" ]; then
+        verify_signing_identity "$POLICY_FINGERPRINT"
         write_fingerprint_marker "$POLICY_FINGERPRINT"
         STATE_COMMITTED=1
         note "✅ 已沿用现有 NARC.app 的稳定本地签名（${POLICY_IDENTITY_NAME}）。"
@@ -743,6 +754,7 @@ main() {
         reuse_confirmation="$(printf '%s' "$reuse_confirmation" | tr '[:lower:]' '[:upper:]')"
         [ "$reuse_confirmation" = "$POLICY_FINGERPRINT" ] \
             || fail "指纹确认不匹配；没有采用既有身份。"
+        verify_signing_identity "$POLICY_FINGERPRINT"
         write_fingerprint_marker "$POLICY_FINGERPRINT"
         STATE_COMMITTED=1
         note "✅ 已按明确指纹确认复用既有 NARC 本地身份。"
@@ -761,6 +773,7 @@ main() {
     SELECTED_IDENTITY_FINGERPRINT="$NAME_MATCH_FINGERPRINT"
     [ "$SELECTED_IDENTITY_FINGERPRINT" = "$CREATED_IDENTITY_FINGERPRINT" ] \
         || fail "验证到的唯一身份不是本轮生成的证书；已停止并回滚本轮随机指纹。"
+    verify_signing_identity "$SELECTED_IDENTITY_FINGERPRINT"
     write_fingerprint_marker "$SELECTED_IDENTITY_FINGERPRINT"
     STATE_COMMITTED=1
 

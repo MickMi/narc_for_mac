@@ -7,6 +7,7 @@ import SwiftUI
 /// SwiftUI instead of routing them through that hidden list.
 enum PanelKeyboardRoute: Equatable {
     case inbox
+    case codexReplies
     case notifications
     case windows
 

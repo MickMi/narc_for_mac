@@ -33,9 +33,13 @@ jobs:
       - name: Test signing migration policy
         run: |
           bash scripts/tests/signing-migration-policy-tests.sh
+          bash scripts/tests/local-signing-preflight-tests.sh
           bash scripts/tests/install-transaction-tests.sh
       - name: Show Swift version
         run: swift --version
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - name: Run tests
         # AppKit/Carbon tests share process-global framework state.
         run: swift test --no-parallel
@@ -46,9 +50,6 @@ jobs:
             [ -f "$report" ] || continue
             cat "$report"
           done
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
       - name: Test reply reminders and UI structure
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 scripts/tests/codex-hook-tests.py
@@ -69,6 +70,8 @@ jobs:
           bash -n scripts/ensure-local-signing-identity.sh
           bash -n scripts/install.sh
           bash -n scripts/lib/install-transaction.sh
+          bash -n scripts/lib/local-signing-preflight.sh
+          bash -n scripts/tests/local-signing-preflight-tests.sh
           bash -n scripts/tests/install-transaction-tests.sh
           bash -n scripts/tests/signing-migration-policy-tests.sh
           bash -n scripts/dev-run-no-ax.sh

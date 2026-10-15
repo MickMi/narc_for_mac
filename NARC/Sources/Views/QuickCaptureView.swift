@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Shared draft and feedback for every Inbox entry point.
+/// Shared Todo draft and feedback for every capture entry point.
 ///
 /// AppDelegate owns one instance for the lifetime of the process. Reopening the
 /// floating panel, Quick Capture, or Assistant therefore never discards text
@@ -43,20 +43,15 @@ final class InboxCaptureState: ObservableObject {
     func submit() -> Bool {
         submit(
             save: { [store] content in
-                store.captureInbox(content)
+                store.createTodo(title: content)
             },
-            success: "已存入随手箱"
+            success: "已创建 Todo"
         )
     }
 
     @discardableResult
     func submitTodo() -> Bool {
-        submit(
-            save: { [store] content in
-                store.createTodo(title: content)
-            },
-            success: "已创建 Todo"
-        )
+        submit()
     }
 
     private func submit(
@@ -86,38 +81,13 @@ final class InboxCaptureState: ObservableObject {
         return true
     }
 
-    @discardableResult
-    func convert(_ item: InboxItem, to kind: CaptureKind) -> Bool {
-        validationMessage = nil
-        successMessage = nil
-        guard store.convertInbox(id: item.id, to: kind) else {
-            validationMessage = store.lastError?.errorDescription ?? "转换失败，请稍后重试。"
-            return false
-        }
-
-        successMessage = kind == .todo ? "已转为 Todo" : "已转为 Note"
-        return true
-    }
-
-    @discardableResult
-    func delete(_ item: InboxItem) -> Bool {
-        validationMessage = nil
-        successMessage = nil
-        guard store.deleteInbox(id: item.id) else {
-            validationMessage = store.lastError?.errorDescription ?? "删除失败，请稍后重试。"
-            return false
-        }
-        return true
-    }
-
     private var trimmedDraft: String {
         draft.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
-/// The shared Inbox surface used by the floating panel, global capture window,
-/// and full Assistant. Capture is intentionally classification-free: users
-/// save first, then explicitly convert an item to Todo or Note.
+/// The shared Todo surface used by the floating panel, global capture window,
+/// and full Assistant.
 struct QuickCaptureView: View {
     @ObservedObject var store: AssistantStore
     @ObservedObject var captureState: InboxCaptureState
@@ -127,7 +97,6 @@ struct QuickCaptureView: View {
     var onOpenAssistant: (() -> Void)?
 
     @FocusState private var isInputFocused: Bool
-    @State private var isRecentInboxExpanded = false
 
     private var draftBinding: Binding<String> {
         Binding(
@@ -138,10 +107,6 @@ struct QuickCaptureView: View {
 
     private var visibleError: String? {
         captureState.validationMessage ?? store.lastError?.errorDescription
-    }
-
-    private var recentItems: [InboxItem] {
-        Array(store.recentInboxItems.prefix(3))
     }
 
     private var shouldShowOnboardingHint: Bool {
@@ -157,7 +122,7 @@ struct QuickCaptureView: View {
                 regularContent
             }
         }
-        .padding(compact ? NarcSpacing.md : NarcSpacing.xl)
+        .padding(NarcSpacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(compact ? Color.clear : Color.narcBackground)
         .onAppear {
@@ -173,17 +138,14 @@ struct QuickCaptureView: View {
 
     @ViewBuilder
     private var compactContent: some View {
-        // TodoAttentionCardView owns the minute-level availability refresh and
-        // becomes EmptyView when there is no actionable task. Keeping it in the
-        // first structural slot makes the Inbox hierarchy follow real state
-        // without duplicating Todo candidate logic here.
-        TodoAttentionCardView(store: store)
+        header
         inputArea
         feedback
         if shouldShowOnboardingHint {
             compactFirstUseHint
         }
-        compactRecentInbox
+        TodoListView(store: store, compact: true)
+        footer
     }
 
     @ViewBuilder
@@ -194,7 +156,7 @@ struct QuickCaptureView: View {
         }
         inputArea
         feedback
-        recentInbox
+        TodoListView(store: store)
         footer
     }
 
@@ -204,7 +166,7 @@ struct QuickCaptureView: View {
                 .foregroundColor(.narcAccent)
                 .accessibilityHidden(true)
 
-            Text("按 ↵ 先记下；明确是任务时按 ⌘↵。")
+            Text("按 ↵ 记下一件 Todo。")
                 .font(.narcCaption)
                 .foregroundColor(.narcTextMuted)
 
@@ -226,10 +188,10 @@ struct QuickCaptureView: View {
             Image(systemName: "1.circle.fill")
                 .foregroundColor(.narcAccent)
             VStack(alignment: .leading, spacing: NarcSpacing.xxs) {
-                Text("先完成一次随手记")
+                Text("记下第一件 Todo")
                     .font(.narcSubtitle)
                     .foregroundColor(.narcText)
-                Text("Return 存入随手箱；明确是任务时，按 ⌘Return 直接创建 Todo。")
+                Text("输入要做的事，按 Return 保存。")
                     .font(.narcCaption)
                     .foregroundColor(.narcTextMuted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -253,15 +215,15 @@ struct QuickCaptureView: View {
 
     private var header: some View {
         HStack(spacing: NarcSpacing.sm) {
-            Image(systemName: "tray.and.arrow.down.fill")
+            Image(systemName: "checkmark.circle")
                 .font(compact ? .narcSubtitle : .narcTitle)
                 .foregroundColor(.narcAccent)
 
             VStack(alignment: .leading, spacing: NarcSpacing.xxs) {
-                Text("随手箱")
+                Text("Todo")
                     .font(compact ? .narcSubtitle : .narcTitle)
                     .foregroundColor(.narcText)
-                Text("先记下来，之后再决定放到哪里")
+                Text("记下一件事，做完勾掉")
                     .font(.narcCaption)
                     .foregroundColor(.narcTextMuted)
                     .lineLimit(1)
@@ -273,45 +235,35 @@ struct QuickCaptureView: View {
 
     private var inputArea: some View {
         HStack(spacing: NarcSpacing.sm) {
-            TextField("现在想到什么？", text: draftBinding)
+            TextField("记下一件事…", text: draftBinding)
                 .textFieldStyle(.plain)
                 .font(.narcBody)
                 .foregroundColor(.narcText)
                 .focused($isInputFocused)
                 .onSubmit(submit)
-                .accessibilityLabel("随手记内容")
-
-            Button(action: submitTodo) {
-                Label("Todo", systemImage: "checkmark.circle")
-                    .labelStyle(.iconOnly)
-            }
-            .buttonStyle(.bordered)
-            .disabled(!captureState.canSubmit)
-            .keyboardShortcut(.return, modifiers: [.command])
-            .help("直接创建 Todo（⌘Return）")
-            .accessibilityLabel("直接创建 Todo")
+                .accessibilityLabel("Todo 内容")
 
             Button(action: submit) {
                 if captureState.isSaving {
                     ProgressView()
                         .controlSize(.small)
                 } else {
-                    Image(systemName: "arrow.turn.down.left")
+                    Image(systemName: "plus")
                 }
             }
             .buttonStyle(.borderedProminent)
             .disabled(!captureState.canSubmit)
-            .help("按 Return 存入随手箱")
-            .accessibilityLabel("存入随手箱")
+            .help("创建 Todo（Return）")
+            .accessibilityLabel("创建 Todo")
         }
         .padding(.horizontal, NarcSpacing.md)
         .padding(.vertical, NarcSpacing.sm)
-        .background(Color.narcSurface)
-        .clipShape(RoundedRectangle(cornerRadius: NarcRadius.md, style: .continuous))
+        .background(compact ? Color.narcFocusInset : Color.narcSurface)
+        .clipShape(RoundedRectangle(cornerRadius: NarcRadius.sm, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: NarcRadius.md, style: .continuous)
                 .strokeBorder(
-                    visibleError == nil ? Color.narcBorder : Color.narcDanger.opacity(0.65),
+                    visibleError == nil ? (compact ? Color.clear : Color.narcBorder) : Color.narcDanger.opacity(0.65),
                     lineWidth: 1
                 )
         }
@@ -332,107 +284,9 @@ struct QuickCaptureView: View {
         }
     }
 
-    private var recentInbox: some View {
-        VStack(alignment: .leading, spacing: NarcSpacing.sm) {
-            HStack {
-                Text("最近记录")
-                    .font(.narcCaption)
-                    .foregroundColor(.narcTextMuted)
-                Spacer()
-                Text("\(store.inboxItems.count) 条待整理")
-                    .font(.narcMonoTiny)
-                    .foregroundColor(.narcTextFaint)
-            }
-
-            if recentItems.isEmpty {
-                HStack(spacing: NarcSpacing.sm) {
-                    Image(systemName: "tray")
-                    Text("还没有记录。输入后按 Return 即可保存。")
-                }
-                .font(.narcCaption)
-                .foregroundColor(.narcTextMuted)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, NarcSpacing.md)
-            } else {
-                ForEach(recentItems) { item in
-                    InboxItemRow(
-                        item: item,
-                        compact: compact,
-                        onConvert: { kind in
-                            _ = captureState.convert(item, to: kind)
-                            isInputFocused = true
-                        },
-                        onDelete: {
-                            _ = captureState.delete(item)
-                            isInputFocused = true
-                        }
-                    )
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var compactRecentInbox: some View {
-        if !store.inboxItems.isEmpty {
-            VStack(alignment: .leading, spacing: NarcSpacing.sm) {
-                Button {
-                    withAnimation(.narcSnap) {
-                        isRecentInboxExpanded.toggle()
-                    }
-                } label: {
-                    HStack(spacing: NarcSpacing.sm) {
-                        Image(systemName: "tray.full")
-                            .foregroundColor(.narcTextMuted)
-
-                        Text("待整理记录")
-                            .font(.narcCaption)
-                            .foregroundColor(.narcTextMuted)
-
-                        Text("\(store.inboxItems.count)")
-                            .font(.narcMonoTiny)
-                            .foregroundColor(.narcTextFaint)
-                            .padding(.horizontal, NarcSpacing.xs)
-                            .padding(.vertical, NarcSpacing.xxs)
-                            .background(Color.narcSurfaceMuted)
-                            .clipShape(Capsule())
-
-                        Spacer()
-
-                        Image(systemName: "chevron.right")
-                            .font(.narcCaption)
-                            .foregroundColor(.narcTextFaint)
-                            .rotationEffect(.degrees(isRecentInboxExpanded ? 90 : 0))
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("待整理记录，共 \(store.inboxItems.count) 条")
-                .accessibilityValue(isRecentInboxExpanded ? "已展开" : "已折叠")
-
-                if isRecentInboxExpanded {
-                    ForEach(store.recentInboxItems) { item in
-                        InboxItemRow(
-                            item: item,
-                            compact: true,
-                            onConvert: { kind in
-                                _ = captureState.convert(item, to: kind)
-                                isInputFocused = true
-                            },
-                            onDelete: {
-                                _ = captureState.delete(item)
-                                isInputFocused = true
-                            }
-                        )
-                    }
-                }
-            }
-        }
-    }
-
     private var footer: some View {
         HStack(spacing: NarcSpacing.md) {
-            Text("Return 随手箱 · ⌘Return Todo")
+            Text("Return 创建 Todo")
                 .font(.narcMonoTiny)
                 .foregroundColor(.narcTextFaint)
 
@@ -460,62 +314,5 @@ struct QuickCaptureView: View {
         isInputFocused = true
     }
 
-    private func submitTodo() {
-        _ = captureState.submitTodo()
-        isInputFocused = true
-    }
-}
 
-private struct InboxItemRow: View {
-    let item: InboxItem
-    let compact: Bool
-    let onConvert: (CaptureKind) -> Void
-    let onDelete: () -> Void
-
-    var body: some View {
-        HStack(spacing: NarcSpacing.sm) {
-            VStack(alignment: .leading, spacing: NarcSpacing.xxs) {
-                Text(item.content)
-                    .font(.narcBody)
-                    .foregroundColor(.narcText)
-                    .lineLimit(compact ? 1 : 2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text(item.updatedAt, style: .relative)
-                    .font(.narcMonoTiny)
-                    .foregroundColor(.narcTextFaint)
-            }
-
-            Button(action: { onConvert(.todo) }) {
-                Image(systemName: "checkmark.circle")
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(.narcTextMuted)
-            .help("转为 Todo")
-            .accessibilityLabel("把记录转为 Todo")
-
-            Button(action: { onConvert(.note) }) {
-                Image(systemName: "note.text")
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(.narcTextMuted)
-            .help("转为 Note")
-            .accessibilityLabel("把记录转为 Note")
-
-            Button(action: onDelete) {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(.narcTextFaint)
-            .help("删除记录")
-            .accessibilityLabel("删除记录")
-        }
-        .padding(.horizontal, NarcSpacing.md)
-        .padding(.vertical, compact ? NarcSpacing.xs : NarcSpacing.sm)
-        .background(Color.narcSurface)
-        .clipShape(RoundedRectangle(cornerRadius: NarcRadius.sm, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: NarcRadius.sm, style: .continuous)
-                .strokeBorder(Color.narcBorder.opacity(0.7), lineWidth: 0.5)
-        }
-    }
 }

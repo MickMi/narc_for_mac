@@ -188,6 +188,10 @@ struct PinnedWindowRow: View {
     var onTap: () -> Void
     var onTogglePersistence: () -> Void
     var onRemove: () -> Void
+    var onMoveUp: (() -> Void)? = nil
+    var onMoveDown: (() -> Void)? = nil
+    var canMoveUp = false
+    var canMoveDown = false
 
     @State private var isHovering = false
 
@@ -237,6 +241,32 @@ struct PinnedWindowRow: View {
             // Keep both targets present and equally sized in every hover and
             // runtime state. Hover may change emphasis, never target identity.
             HStack(spacing: NarcSpacing.xs) {
+                if let onMoveUp, let onMoveDown {
+                    Button(action: onMoveUp) {
+                        Image(systemName: "arrow.up")
+                            .font(.narcCaption)
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .focusable(false)
+                    .disabled(!canMoveUp)
+                    .help("上移一位")
+                    .accessibilityLabel("上移已标记窗口")
+                    .accessibilityIdentifier("pinned-window.move-up.\(pinned.id)")
+
+                    Button(action: onMoveDown) {
+                        Image(systemName: "arrow.down")
+                            .font(.narcCaption)
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .focusable(false)
+                    .disabled(!canMoveDown)
+                    .help("下移一位")
+                    .accessibilityLabel("下移已标记窗口")
+                    .accessibilityIdentifier("pinned-window.move-down.\(pinned.id)")
+                }
+
                 Button(action: onTogglePersistence) {
                     Image(systemName: pinned.isPersistent ? "pin.fill" : "pin")
                         .font(.narcCaption)

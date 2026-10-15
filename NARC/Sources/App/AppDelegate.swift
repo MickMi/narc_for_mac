@@ -26,9 +26,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var accessibilityReadyShowWorkItem: DispatchWorkItem?
     private var accessibilityReadyHideWorkItem: DispatchWorkItem?
     private var statusBarCancellables = Set<AnyCancellable>()
+    private var pinnedWindowSlotCancellables = Set<AnyCancellable>()
     private var selectedTextTodoCancellables = Set<AnyCancellable>()
     private var todoNudgeCancellables = Set<AnyCancellable>()
+    private var codexReplyCancellables = Set<AnyCancellable>()
+    private let widgetCueHoverState = WidgetCueHoverState()
     private var todoNudgePanel: TodoNudgeWindow?
+    private var todoNudgePresentationID = UUID()
     private let codexCompletionPresenter = CodexCompletionPresenter()
     private var todoNudgeTodoID: UUID?
     private var todoNudgeEarliestPresentationAt = Date.distantFuture
@@ -76,6 +80,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
     }()
+    @MainActor private lazy var instantQuestionCredentials = InstantQuestionCredentialManager()
+    @MainActor private lazy var instantQuestionStore: InstantQuestionStore = {
+        switch DevRuntimeOptions.assistantStorageSelection {
+        case .standard:
+            return InstantQuestionStore()
+        case .temporary(let url):
+            return InstantQuestionStore(
+                storageURL: url.deletingLastPathComponent()
+                    .appendingPathComponent("instant-questions.json")
+            )
+        case .invalidOverride:
+            return InstantQuestionStore(
+                storageURL: URL(fileURLWithPath: "/dev/null/NARC-invalid-instant-questions.json")
+            )
+        }
+    }()
+    @MainActor private lazy var instantQuestionController = InstantQuestionController(
+        credentials: instantQuestionCredentials,
+        store: instantQuestionStore
+    )
     @MainActor private lazy var selectedTextTodoCaptureCoordinator =
         SelectedTextTodoCaptureCoordinator(
             reader: AXSelectedTextReader(),
@@ -83,6 +107,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
     @MainActor private var quickCaptureWindow: QuickCaptureWindow?
     @MainActor private var assistantHubWindow: AssistantHubWindow?
+    @MainActor private var instantQuestionWindow: InstantQuestionWindow?
     @MainActor private var onboardingWindow: OnboardingWindow?
     private let claudeService = ClaudeSessionService.shared
     /// Owned at the app level (not by DashboardView) so that closing the
@@ -159,6 +184,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyService.onToggleCurrentWindowPinHotkeyPressed = { [weak self] in
             self?.handleToggleCurrentWindowPinHotkey()
         }
+        hotkeyService.onPinnedWindowSlotHotkeyPressed = { [weak self] index in
+            self?.recallPinnedWindowInSlot(index)
+        }
         hotkeyService.onSummonWidgetHotkeyPressed = { [weak self] in
             self?.summonFloatingWidgetToMouseScreen()
         }
@@ -167,12 +195,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.showQuickCapture()
             }
         }
+        hotkeyService.onAskAIHotkeyPressed = { [weak self] in
+            Task { @MainActor in
+                self?.showInstantQuestion(mode: .ask)
+            }
+        }
+        hotkeyService.onWebSearchHotkeyPressed = { [weak self] in
+            Task { @MainActor in
+                self?.showInstantQuestion(mode: .bing)
+            }
+        }
+        hotkeyService.onGoogleSearchHotkeyPressed = { [weak self] in
+            Task { @MainActor in
+                self?.showInstantQuestion(mode: .google)
+            }
+        }
         hotkeyService.onSelectedTextTodoHotkeyPressed = { [weak self] in
             self?.handleSelectedTextTodoHotkey()
         }
         hotkeyService.onLayoutHotkeyPressed = { [weak self] layout in
             self?.handleLayoutHotkey(layout)
         }
+        pinnedWindowService.$pinnedWindows
+            .map { min($0.count, ConfigurableHotkeyAction.pinnedWindowSlotActions.count) }
+            .removeDuplicates()
+            .sink { [weak self] count in
+                self?.hotkeyService.updatePinnedWindowSlotCount(count)
+            }
+            .store(in: &pinnedWindowSlotCancellables)
         selectedTextTodoCaptureCoordinator.$state
             .dropFirst()
             .sink { [weak self] state in
@@ -329,6 +379,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         summonItem.target = self
         summonItem.image = NSImage(systemSymbolName: "scope", accessibilityDescription: nil)
         menu.addItem(summonItem)
+
+        let searchItem = NSMenuItem(
+            title: "AI / 网页搜索",
+            action: #selector(openInstantQuestion),
+            keyEquivalent: ""
+        )
+        searchItem.target = self
+        searchItem.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
+        menu.addItem(searchItem)
         menu.addItem(NSMenuItem.separator())
         let guideItem = NSMenuItem(
             title: "User Guide",
@@ -399,7 +458,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let widgetView = FloatingWidgetContainer(
             appMonitor: appMonitor,
             assistantStore: assistantStore,
-            dragState: widgetDragState
+            dragState: widgetDragState,
+            codexCompletionService: codexCompletionPresenter.service,
+            cueHoverState: widgetCueHoverState
         )
 
         // The panel canvas is 128×128 (visible 48pt circle + 40pt of
@@ -471,6 +532,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.onWidgetTapped = { [weak self] in
             self?.togglePanel()
         }
+        window.onCodexCueTapped = { [weak self] in
+            self?.openPanel(tab: .codexReplies)
+        }
+        window.onTodoCueTapped = { [weak self] in
+            self?.openPanel(tab: .inbox)
+        }
+        window.onCueHoverChanged = { [weak self] target in
+            self?.widgetCueHoverState.target = target
+        }
+        codexCompletionPresenter.service.$pendingEvents
+            .receive(on: DispatchQueue.main)
+            .sink { [weak window] events in
+                window?.showsCodexCue = !events.isEmpty
+            }
+            .store(in: &codexReplyCancellables)
+        assistantStore.$todos
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak window] _ in
+                window?.todoCueCount = self?.assistantStore.availableTodos().count ?? 0
+            }
+            .store(in: &codexReplyCancellables)
 
         // Right-click (or Ctrl+left-click) exposes the two durable destinations:
         // Assistant and Preferences.
@@ -663,6 +745,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        let presentationID = UUID()
+        todoNudgePresentationID = presentationID
         let card = TodoNudgeCardView(
             store: assistantStore,
             onActionStarted: { [weak self] in
@@ -690,13 +774,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.showAssistantHub()
                 self?.assistantHubWindow?.selectTodos()
             },
-            isPreview: isPreview
+            isPreview: isPreview,
+            onHeightChange: { [weak self] height in
+                // Hosting can measure during construction. Never re-enter window
+                // creation; a stale callback must not resize a newer presentation.
+                Task { @MainActor [weak self] in
+                    guard let self, self.todoNudgePresentationID == presentationID else { return }
+                    self.repositionTodoNudge(contentHeight: height)
+                }
+            }
         )
         let panel = TodoNudgeWindow(rootView: card)
+        let fittingHeight = panel.contentView?.fittingSize.height ?? TodoNudgeWindow.cardSize.height
+        let cardSize = NSSize(width: TodoNudgeWindow.cardSize.width,
+                              height: min(max(1, ceil(fittingHeight)), screen.visibleFrame.height - 16))
         let frame = TodoNudgePlacement.frame(
             adjacentTo: floatingWindow.frame,
             visibleWidgetSize: floatingWindow.visibleSize,
-            cardSize: TodoNudgeWindow.cardSize,
+            cardSize: cardSize,
             targetVisibleFrame: screen.visibleFrame
         )
         panel.setFrame(frame, display: false)
@@ -715,6 +810,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func dismissTodoNudge() {
+        todoNudgePresentationID = UUID()
         pauseTodoNudgeAutoDismiss()
         todoNudgePanel?.orderOut(nil)
         todoNudgePanel = nil
@@ -739,7 +835,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    private func repositionTodoNudge() {
+    private func repositionTodoNudge(contentHeight: CGFloat? = nil) {
         guard let panel = todoNudgePanel,
               panel.isVisible,
               let floatingWindow,
@@ -747,10 +843,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        var cardSize = panel.frame.size
+        if let height = contentHeight, height.isFinite, height > 0 {
+            cardSize.height = min(ceil(height), screen.visibleFrame.height - 16)
+        }
         let frame = TodoNudgePlacement.frame(
             adjacentTo: floatingWindow.frame,
             visibleWidgetSize: floatingWindow.visibleSize,
-            cardSize: panel.frame.size,
+            cardSize: cardSize,
             targetVisibleFrame: screen.visibleFrame
         )
         panel.setFrame(frame, display: true, animate: false)
@@ -788,9 +888,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Panel
 
-    private let panelWidth: CGFloat = 320
-    private let panelHeight: CGFloat = 420
-
     /// Toggle panel from widget click — panel appears near the widget.
     private func togglePanel() {
         if let panel = panelWindow, panel.isVisible {
@@ -798,6 +895,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             showPanel()
         }
+    }
+
+    private func openPanel(tab: PanelTab) {
+        panelSelection.selectedTab = tab
+        if panelWindow?.isVisible == true {
+            NSApp.activate(ignoringOtherApps: true)
+            panelWindow?.makeKeyAndOrderFront(nil)
+        } else {
+            showPanel(tab: tab)
+        }
+        codexCompletionPresenter.reconcile()
     }
 
     /// Summon the attention anchor to the mouse's display. Unlike a toggle,
@@ -852,7 +960,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return FloatingPanelPlacement.frame(
             adjacentTo: widgetFrame,
             visibleWidgetSize: floatingWindow?.visibleSize ?? FloatingWidgetWindow.widgetSize,
-            panelSize: NSSize(width: panelWidth, height: panelHeight),
             targetVisibleFrame: screen.visibleFrame
         )
     }
@@ -866,10 +973,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Shared keyboard selection state for the panel.
     /// Tracks which item is selected via ↑↓ keys.
     private let keyboardSelection = KeyboardSelectionState()
+    private let panelSelection = PanelSelectionState()
 
     /// Show panel near the floating widget (triggered by widget click).
-    private func showPanel() {
+    private func showPanel(tab: PanelTab = .inbox) {
         guard floatingWindow != nil else { return }
+
+        panelSelection.selectedTab = tab
 
         postponeTodoNudge(for: TodoNudgePolicy.todoChangeSilence)
         hidePinnedWindowSwitcher()
@@ -888,7 +998,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Reset keyboard selection when opening panel.
         // wantsKeyboardNavigation starts false — the user must explicitly signal
         // intent (↑↓/Tab or click in panel) before number keys / Enter work.
-        keyboardSelection.route = .inbox
+        keyboardSelection.route = panelSelection.selectedTab.keyboardRoute
         keyboardSelection.selectedIndex = -1
         keyboardSelection.wantsKeyboardNavigation = false
 
@@ -899,6 +1009,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             hotkeyService: hotkeyService,
             assistantStore: assistantStore,
             inboxCaptureState: inboxCaptureState,
+            codexCompletionService: codexCompletionPresenter.service,
+            panelSelection: panelSelection,
             onClose: { [weak self] in self?.hidePanel() },
             onOpenPreferences: { [weak self] in self?.openPreferences() },
             onEditShortcut: { [weak self] action in
@@ -910,6 +1022,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.showAssistantHub()
                 }
             },
+            onOpenInstantQuestion: { [weak self] in
+                self?.hidePanel()
+                Task { @MainActor in
+                    self?.showInstantQuestion()
+                }
+            },
+            onOpenCodexReply: { [weak self] event, completion in
+                self?.codexCompletionPresenter.open(event) { success in
+                    completion(success)
+                    if success { self?.hidePanel() }
+                }
+            },
             narcScreenProvider: { [weak self] in
                 self?.currentFloatingWidgetScreen()
             },
@@ -917,22 +1041,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         let hostingView = NSHostingView(rootView: panelContentView)
+        hostingView.frame = NSRect(origin: .zero, size: frame.size)
         // Make the hosting view's layer background transparent so SwiftUI material shows through
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = .clear
 
-        let panel = PanelWindow(
-            contentRect: frame,
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
+        let panel = PanelWindow.mainPanel(contentRect: frame)
         panel.contentView = hostingView
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.level = .floating
         panel.hasShadow = true
-        panel.isMovable = false
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
 
         // When the user clicks anywhere in the panel, they've shown intent to
@@ -1132,6 +1251,51 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Direct global number shortcuts resolve a position at press time, so
+    /// moving Pin rows changes the target without changing registrations.
+    @MainActor
+    private func recallPinnedWindowInSlot(_ index: Int) {
+        let pins = pinnedWindowService.pinnedWindows
+        guard pins.indices.contains(index),
+              ConfigurableHotkeyAction.pinnedWindowSlotActions.indices.contains(index) else { return }
+        let action = ConfigurableHotkeyAction.pinnedWindowSlotActions[index]
+        guard hotkeyService.checkAccessibilityPermission(prompt: false) else {
+            presentAccessibilityExplanation(
+                shortcut: hotkeyService.activeShortcut(for: action)?.displayLabel
+                    ?? "窗口直达快捷键（请先到偏好设置启用）"
+            )
+            return
+        }
+
+        let pinned = pins[index]
+        guard pinnedWindowService.exactPinnedWindowExists(pinned) else {
+            showPinFeedback(
+                title: "已标记窗口不可召回",
+                message: "未找到当时标记的窗口；它可能已关闭。请重新标记需要直达的窗口。",
+                systemImage: "macwindow.badge.exclamationmark",
+                accentColor: .narcWarn
+            )
+            return
+        }
+
+        let screens = NSScreen.screens
+        let targetIndex = FloatingWidgetPlacement.targetScreenIndex(
+            containing: NSEvent.mouseLocation,
+            screenFrames: screens.map(\.frame)
+        )
+        guard let targetScreen = targetIndex.map({ screens[$0] }) ?? NSScreen.main else { return }
+        consumeAccessibilityGuidanceForSuccessfulAction()
+        OnboardingPresentationPolicy.markWindowToolsIntroduced()
+        let previousApplication = currentFrontmostExternalApplication()
+        pinnedWindowService.activatePinnedWindow(pinned, summonToScreen: targetScreen) { [weak self] result in
+            guard result != .cancelled else { return }
+            if !result.preservesTargetApplication {
+                self?.restoreApplicationAfterPinnedWindowSwitcher(previousApplication)
+            }
+            self?.showPinnedWindowRecallFailure(result)
+        }
+    }
+
     @MainActor
     private func resizePinnedWindowSwitcher(itemCount: Int) {
         guard let panel = pinnedWindowSwitcherWindow,
@@ -1250,6 +1414,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             )
         }
         assistantHubWindow?.present()
+    }
+
+    @MainActor
+    private func showInstantQuestion(mode: InstantQuestionView.Mode = .ask) {
+        postponeTodoNudge(for: TodoNudgePolicy.todoChangeSilence)
+
+        if instantQuestionWindow == nil {
+            let window = InstantQuestionWindow(
+                controller: instantQuestionController,
+                store: instantQuestionStore,
+                onOpenPreferences: { [weak self] in self?.openInstantQuestionPreferences() }
+            )
+            window.onClose = { [weak self, weak window] in
+                DispatchQueue.main.async {
+                    guard let self, self.instantQuestionWindow === window else { return }
+                    self.instantQuestionWindow = nil
+                }
+            }
+            instantQuestionWindow = window
+        }
+        instantQuestionWindow?.selectMode(mode)
+        instantQuestionWindow?.present(on: currentFloatingWidgetScreen())
     }
 
     // MARK: - Claude Dashboard (standalone window)
@@ -2618,6 +2804,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var preferencesWindow: PreferencesWindow?
     private var shortcutEditorWindow: PreferencesWindow?
+    private let preferencesNavigation = PreferencesNavigation()
 
     /// Reuse a standard window so the narrow panel's keyboard monitors cannot
     /// intercept editor input. Configuration never moves an external window.
@@ -2670,19 +2857,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openPreferences() {
         postponeTodoNudge(for: TodoNudgePolicy.todoChangeSilence)
 
-        if let window = preferencesWindow, window.isVisible {
+        if let window = preferencesWindow {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
 
-        let window = PreferencesWindow()
+        let window = PreferencesWindow(
+            contentSize: PreferencesLayout.contentSize,
+            minimumContentSize: PreferencesLayout.minimumContentSize
+        )
         window.contentView = NSHostingView(
             rootView: PreferencesView(
                 appMonitor: appMonitor,
                 hotkeyService: hotkeyService,
                 reminderSettings: reminderSettings,
                 codexCompletionService: codexCompletionPresenter.service,
+                instantQuestionController: instantQuestionController,
+                navigation: preferencesNavigation,
                 onPreviewReminder: { [weak self] in
                     guard let self else { return }
                     self.preferencesWindow?.orderOut(nil)
@@ -2696,6 +2888,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.preferencesWindow = window
+    }
+
+    @objc private func openInstantQuestion() {
+        Task { @MainActor in
+            showInstantQuestion()
+        }
+    }
+
+    @MainActor
+    private func openInstantQuestionPreferences() {
+        preferencesNavigation.selectedSection = .instantQuestions
+        openPreferences()
     }
 
     @objc private func showAbout() {

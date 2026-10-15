@@ -1,5 +1,63 @@
+import AppKit
+import SwiftUI
 import Testing
 @testable import NARC
+
+@Test @MainActor
+func shortcutSettingsRenderInstantSearchActions() async throws {
+    _ = NSApplication.shared
+    let suite = "shortcut-search-preview-" + UUID().uuidString
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let registrar: HotkeyRegistrar = { _, _, slotID in
+        .success(HotkeyRegistrationToken(slotID: slotID) { noErr })
+    }
+    let service = HotkeyService(
+        accessibilityTrustCheck: { _ in false },
+        defaults: defaults,
+        configurableHotkeyRegistrar: registrar,
+        requiresInstalledEventHandlerForSelectedTextTodo: false,
+        requiresInstalledEventHandlerForConfigurableHotkeys: false
+    )
+    service.registerConfiguredHotkeys(noAX: true)
+    #expect(ConfigurableHotkeyAction.globalActions.contains(.askAI))
+    #expect(ConfigurableHotkeyAction.globalActions.contains(.webSearch))
+    #expect(ConfigurableHotkeyAction.globalActions.contains(.googleSearch))
+
+    var windows: [NSWindow] = []
+    for (name, scheme) in [("light", ColorScheme.light), ("dark", .dark)] {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 760),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+        window.contentView = NSHostingView(
+            rootView: ShortcutsTab(hotkeyService: service)
+                .environment(\.colorScheme, scheme)
+        )
+        let view = try #require(window.contentView)
+        view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(view.bounds.size == NSSize(width: 620, height: 760))
+        if let path = ProcessInfo.processInfo.environment["NARC_SHORTCUT_SNAPSHOT_DIR"],
+           path.hasPrefix("/private/tmp/") {
+            try FileManager.default.createDirectory(
+                at: URL(fileURLWithPath: path),
+                withIntermediateDirectories: true
+            )
+            let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            let png = try #require(bitmap.representation(using: .png, properties: [:]))
+            try png.write(to: URL(fileURLWithPath: path)
+                .appendingPathComponent("search-shortcuts-\(name).png"))
+        }
+        windows.append(window)
+    }
+    windows.forEach { $0.close() }
+}
 
 @Test
 func shortcutSettingsActiveShowsRuntimeChordOnlyOnce() {

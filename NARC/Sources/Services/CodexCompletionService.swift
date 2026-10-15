@@ -1,27 +1,37 @@
 import Foundation
 import Combine
+import SQLite3
 
 struct CodexCompletionEvent: Codable, Equatable {
     let schemaVersion: Int
     let threadID: String
     let turnID: String
     let state: String
-    let title: String
+    var title: String
     let timestamp: TimeInterval
     let isPreview: Bool
     var startedAt: TimeInterval? = nil
+    var roundSummary: String? = nil
+    var nextStep: String? = nil
+    var blocker: String? = nil
 
     var identity: String { threadID + ":" + turnID + (isPreview ? ":preview" : "") }
+    var hasRoundDetails: Bool { roundSummary != nil || nextStep != nil || blocker != nil }
+    func canExpand(eventCount: Int) -> Bool { eventCount > 1 && hasRoundDetails }
     var threadURL: URL? {
         guard UUID(uuidString: threadID) != nil else { return nil }
         return URL(string: "codex://threads/\(threadID)")
     }
 
     func isValid(now: Date) -> Bool {
-        schemaVersion == 1 && UUID(uuidString: threadID) != nil
+        let roundFields = [roundSummary, nextStep, blocker].compactMap { $0 }
+        return schemaVersion == 1 && UUID(uuidString: threadID) != nil
             && UUID(uuidString: turnID) != nil
             && ["replyReady", "running", "interrupted"].contains(state)
             && !title.isEmpty && title.count <= 100
+            && roundFields.allSatisfy {
+                !$0.isEmpty && $0.count <= 160 && $0.rangeOfCharacter(from: .newlines) == nil
+            }
             && timestamp.isFinite && timestamp <= now.timeIntervalSince1970 + 30
             && (startedAt == nil || (startedAt!.isFinite && startedAt! <= timestamp))
             && now.timeIntervalSince1970 - timestamp < 3600
@@ -114,15 +124,18 @@ final class CodexCompletionService: ObservableObject {
     private let key = "codexCompletionAcknowledgedV1"
     private let preferencesKey = "codexReminderPreferencesV2"
     private let eventFolder: URL
+    private let codexFolder: URL
+    private var verifiedThreadIDs: Set<String> = []
     private var timer: Timer?
     private var reading = false
     private let queue = DispatchQueue(label: "com.narc.codex-completion", qos: .utility)
     var onRefresh: (() -> Void)?
 
-    init(defaults: UserDefaults = .standard, eventFolder: URL? = nil) {
+    init(defaults: UserDefaults = .standard, eventFolder: URL? = nil, codexFolder: URL? = nil) {
         self.defaults = defaults
         self.eventFolder = eventFolder ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/NARC/codex-completion")
+        self.codexFolder = codexFolder ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
         state = CodexCompletionState(acknowledged: defaults.stringArray(forKey: key) ?? [])
         if let data = defaults.data(forKey: preferencesKey),
            let saved = try? JSONDecoder().decode(CodexReminderPreferences.self, from: data) {
@@ -151,6 +164,22 @@ final class CodexCompletionService: ObservableObject {
         publish()
     }
 
+    func resolveForOpening(_ event: CodexCompletionEvent, completion: @escaping (CodexCompletionEvent?) -> Void) {
+        let folder = codexFolder
+        queue.async { [weak self] in
+            let metadata = CodexThreadMetadata.read(folder: folder, threadIDs: [event.threadID])
+            DispatchQueue.main.async { [weak self] in
+                guard let self, metadata[event.threadID]?.isInternal == false,
+                      let current = self.pendingEvents.first(where: { $0.identity == event.identity }) else {
+                    completion(nil)
+                    return
+                }
+                // The stable ID selects the conversation, never a fuzzy title match.
+                completion(current)
+            }
+        }
+    }
+
     func setEnabled(_ enabled: Bool, now: Date = Date()) {
         preferences.enabled = enabled
         preferences.enabledAfter = now.timeIntervalSince1970
@@ -177,7 +206,7 @@ final class CodexCompletionService: ObservableObject {
 
     func displayTitle(threadID: String, fallback: String) -> String {
         let name = preferences.names[threadID]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return name.isEmpty ? fallback : name
+        return name.isEmpty ? (preferences.conversations.first { $0.id == threadID }?.title ?? fallback) : name
     }
 
     var conversations: [CodexConversation] {
@@ -230,19 +259,34 @@ final class CodexCompletionService: ObservableObject {
 
     private func publish() {
         for event in state.pendingEvents where !preferences.allows(event) { state.acknowledge(identity: event.identity) }
-        let next = state.pendingEvents.filter { preferences.allows($0) }
+        let next = state.pendingEvents.filter {
+            preferences.allows($0) && ($0.isPreview || verifiedThreadIDs.contains($0.threadID))
+        }
         if pendingEvents != next { pendingEvents = next }
         if defaults.stringArray(forKey: key) != state.acknowledged { defaults.set(state.acknowledged, forKey: key) }
         onRefresh?()
     }
 
-    func ingest(_ events: [CodexCompletionEvent], now: Date = Date()) {
+    func ingest(_ events: [CodexCompletionEvent], now: Date = Date(),
+                metadata: [String: CodexThreadMetadata] = [:]) {
         state.receive(nil, now: now)
+        verifiedThreadIDs = Set(metadata.keys.filter { metadata[$0]?.isInternal == false })
         let oldPreferences = preferences
+        for id in metadata.keys where metadata[id]?.isInternal == true {
+            for event in state.pendingEvents where event.threadID == id { state.acknowledge(identity: event.identity) }
+            preferences.conversations.removeAll { $0.id == id }
+        }
         for event in events.sorted(by: {
             let a = $0.startedAt ?? $0.timestamp, b = $1.startedAt ?? $1.timestamp
             return a == b ? $0.timestamp < $1.timestamp : a < b
         }) where event.isValid(now: now) {
+            guard event.isPreview || metadata[event.threadID]?.isInternal == false else { continue }
+            var event = event
+            if !event.isPreview, let title = metadata[event.threadID]?.title { event.title = title }
+            if event.title == "对话 " + event.threadID.suffix(8),
+               let known = preferences.conversations.first(where: { $0.id == event.threadID })?.title {
+                event.title = known // A transient metadata failure must not erase a resolved title.
+            }
             state.receive(event, now: now)
             if !event.isPreview {
                 let received = Date(timeIntervalSince1970: event.timestamp)
@@ -265,12 +309,14 @@ final class CodexCompletionService: ObservableObject {
         guard !reading else { return }
         reading = true
         let folder = eventFolder
+        let codexFolder = codexFolder
         queue.async { [weak self] in
             let events = Self.readEvents(folder)
+            let metadata = CodexThreadMetadata.read(folder: codexFolder, threadIDs: Set(events.map(\.threadID)))
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.reading = false
-                self.ingest(events)
+                self.ingest(events, metadata: metadata)
             }
         }
     }
@@ -291,7 +337,7 @@ final class CodexCompletionService: ObservableObject {
         return events.filter { !ids.contains($0.identity) } + multi
     }
 
-    nonisolated private static func safePath(_ url: URL) -> Bool {
+    nonisolated static func safePath(_ url: URL) -> Bool {
         var path = url
         while path.path != "/" {
             if (try? path.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true { return false }
@@ -310,5 +356,50 @@ final class CodexCompletionService: ObservableObject {
         defer { try? handle.close() }
         guard let data = try? handle.read(upToCount: 8193) else { return nil }
         return CodexCompletionEvent.decode(data)
+    }
+}
+
+/// Read only bounded titles and source kinds; never query a transcript or prompt.
+struct CodexThreadMetadata {
+    var title: String?
+    var isInternal: Bool
+
+    static func read(folder: URL, threadIDs: Set<String>) -> [String: Self] {
+        guard !threadIDs.isEmpty, CodexCompletionService.safePath(folder),
+              let files = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isSymbolicLinkKey]) else { return [:] }
+        let databases = files.filter { $0.lastPathComponent.hasPrefix("state_") && $0.pathExtension == "sqlite" }
+            .sorted { (Int($0.deletingPathExtension().lastPathComponent.dropFirst(6)) ?? -1) > (Int($1.deletingPathExtension().lastPathComponent.dropFirst(6)) ?? -1) }
+        guard let url = databases.first, CodexCompletionService.safePath(url),
+              (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { return [:] }
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK else {
+            if let db { sqlite3_close(db) }
+            return [:]
+        }
+        defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 100)
+        var statement: OpaquePointer?
+        // Older clients do not have `name`; title/source remain a safe fallback.
+        let queries = ["SELECT substr(COALESCE(NULLIF(name,''),title),1,100), source FROM threads WHERE id = ?",
+                       "SELECT substr(title,1,100), source FROM threads WHERE id = ?"]
+        for query in queries {
+            if sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK { break }
+        }
+        guard let statement else { return [:] }
+        defer { sqlite3_finalize(statement) }
+        var result: [String: Self] = [:]
+        for id in threadIDs.prefix(512) where UUID(uuidString: id) != nil {
+            sqlite3_reset(statement)
+            sqlite3_clear_bindings(statement)
+            let status = id.withCString { sqlite3_bind_text(statement, 1, $0, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
+            guard status == SQLITE_OK, sqlite3_step(statement) == SQLITE_ROW,
+                  let rawSource = sqlite3_column_text(statement, 1) else { continue }
+            let source = String(cString: rawSource)
+            let object = source.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+            let title = sqlite3_column_text(statement, 0).map { String(cString: $0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            result[id] = .init(title: title?.isEmpty == false ? title : nil,
+                              isInternal: source == "subagent" || object?["subagent"] != nil)
+        }
+        return result
     }
 }

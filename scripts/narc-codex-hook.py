@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in Codex metadata adapter. Never reads transcripts or saves message content."""
+"""Opt-in Codex adapter. Saves metadata plus explicit Harness round-card fields only."""
 import argparse
 import fcntl
 import json
@@ -14,10 +14,34 @@ import shlex
 import re
 import hashlib
 import subprocess
+import sqlite3
 
 LIMIT = 1024 * 1024
 EVENT_FILE = re.compile(r"[0-9a-fA-F-]{36}_[0-9a-fA-F-]{36}(?:_preview)?\.json\Z")
 NOTIFY_SCRIPT = re.compile(r"narc-notify-[0-9a-f]{16}\.py")
+ROUND_CARD_FIELDS = {
+    "roundSummary": re.compile(r"^\s*✅\s*本回合\s*[：:]\s*(.+?)\s*$"),
+    "nextStep": re.compile(r"^\s*➡(?:️)?\s*下一步\s*[：:]\s*(.+?)\s*$"),
+    "blocker": re.compile(r"^\s*🚧\s*阻塞\s*[：:]\s*(.+?)\s*$"),
+}
+
+
+def extract_round_card(message):
+    """Copy only Harness' already-produced fixed fields; never summarize free text."""
+    if not isinstance(message, str):
+        return {}
+    extracted = {}
+    for line in message.splitlines():
+        for key, pattern in ROUND_CARD_FIELDS.items():
+            match = pattern.fullmatch(line)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if key == "blocker" and value.rstrip("。.").lower() in {"无", "none", "n/a", "无阻塞"}:
+                continue
+            if value:
+                extracted[key] = value if len(value) <= 160 else value[:159] + "…"
+    return extracted
 
 
 def normalize(data, thread=None, title=None, now=None, preview=False):
@@ -131,6 +155,27 @@ def indexed_title(home, thread):
             except (ValueError, AttributeError):
                 continue
     return None
+
+
+def has_local_session(home, thread):
+    """Require a known user thread; a rollout alone does not establish identity."""
+    databases = sorted((Path(home) / ".codex").glob("state_*.sqlite"),
+                       key=lambda p: int(p.stem[6:]) if p.stem[6:].isdigit() else -1, reverse=True)
+    for database in databases[:1]:
+        if database.is_symlink():
+            return False
+        try:
+            with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=0.1) as db:
+                row = db.execute("SELECT source FROM threads WHERE id = ?", (thread,)).fetchone()
+                if not row or not isinstance(row[0], str) or not row[0]:
+                    return False
+                source = row[0]
+                return source != "subagent" and not (
+                    source.startswith("{") and "subagent" in json.loads(source))
+        except (sqlite3.Error, ValueError, TypeError):
+            # The original callback was already forwarded; unknown IDs stay hidden.
+            return False
+    return indexed_title(home, thread) is not None
 
 
 def is_narc_handler(handler):
@@ -327,6 +372,20 @@ def current_connection(home, command):
     return record
 
 
+def replace_wrapped_connection(home, command, old, new, depth=0):
+    """Replace only NARC's validated inner argv while preserving the client wrapper."""
+    if command == old:
+        return new
+    helper = str(Path(home) / ".codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient")
+    if depth >= 8 or not isinstance(command, list) or len(command) != 4 or command[:3] != [helper, "turn-ended", "--previous-notify"]:
+        raise ValueError("其他程序已调整通知链路，未覆盖，请联系维护者。")
+    nested = json.loads(command[3])
+    if not isinstance(nested, list) or not all(isinstance(x, str) and "\0" not in x for x in nested):
+        raise ValueError("连接信息无法识别，请展开详情联系维护者；无需重复连接。")
+    updated = replace_wrapped_connection(home, nested, old, new, depth + 1)
+    return command[:3] + [json.dumps(updated, ensure_ascii=False, separators=(",", ":"))]
+
+
 def notify_status(home):
     _, _, data = notification_config(home)
     record = current_connection(home, data.get("notify"))
@@ -336,6 +395,27 @@ def notify_status(home):
     seen = json.loads(receipt).get("receivedAt", 0) if receipt else 0
     connected = isinstance(seen, (int, float)) and record["configuredAt"] <= seen <= time.time() + 30
     return {"status": "connected" if connected else "waiting", "receivedAt": seen if connected else None}
+
+
+def upgrade_legacy_adapter(home, source):
+    """Update only our already-referenced helper, leaving hooks and trust untouched."""
+    installed = notify_folder(home) / "narc-codex-hook-v2.py"
+    raw = checked_bytes(Path(home) / ".codex/hooks.json")
+    if raw is None:
+        return
+    try:
+        config = json.loads(raw)
+        hooks = config.get("hooks", {})
+        referenced = any(
+            is_narc_handler(handler) and shlex.split(handler["command"])[1] == str(installed)
+            for groups in hooks.values() if isinstance(groups, list)
+            for group in groups if isinstance(group, dict)
+            for handler in group.get("hooks", []) if isinstance(group.get("hooks"), list)
+        )
+    except (ValueError, AttributeError, TypeError):
+        return
+    if referenced and checked_bytes(installed) is not None:
+        atomic_bytes(installed, source)
 
 
 def install_notify(home, script):
@@ -349,20 +429,21 @@ def install_notify(home, script):
         digest = hashlib.sha256(source).hexdigest()
         existing = current_connection(home, previous)
         if existing:
-            if previous != existing["command"]:
-                # Keep the client's wrapper and the validated immutable adapter.
-                # Replacing the outer callback can create a recursive chain.
-                return notify_status(home)
             if existing["scriptHash"] == digest:
+                upgrade_legacy_adapter(home, source)
                 return notify_status(home)
-            previous = existing["previous"]
+            original_previous = existing["previous"]
         elif previous and any(NOTIFY_SCRIPT.search(x) for x in previous):
             raise ValueError("其他程序已调整通知链路，未覆盖，请联系维护者。")
+        else:
+            original_previous = previous
+        upgrade_legacy_adapter(home, source)
         connection = str(uuid.uuid4())
         installed = folder / ("narc-notify-" + digest[:16] + ".py")
         command = [sys.executable, str(installed), "--notify", connection]
-        candidate = notification_text(raw, data, command)
-        record = dict(id=connection, command=command, previous=previous,
+        configured = replace_wrapped_connection(home, previous, existing["command"], command) if existing else command
+        candidate = notification_text(raw, data, configured)
+        record = dict(id=connection, command=command, previous=original_previous,
                       configuredAt=time.time(), scriptHash=digest)
         # Immutable generations keep callbacks from an older running client safe.
         atomic_bytes(installed, source)
@@ -395,8 +476,9 @@ def receive_notify(home, connection, raw, launch=subprocess.Popen):
     event = normalize(dict(session_id=data.get("thread-id"), turn_id=data.get("turn-id"),
                            hook_event_name="Stop", agent_id=data.get("agent_id"),
                            subagent_id=data.get("subagent_id")))
-    if event:
+    if event and has_local_session(home, event["threadID"]):
         event["source"] = "notify"
+        event.update(extract_round_card(data.get("last-assistant-message")))
         try:
             event["title"] = indexed_title(home, event["threadID"]) or event["title"]
         except OSError:
@@ -433,8 +515,11 @@ def main():
         raw = sys.stdin.buffer.read(LIMIT + 1)
         if len(raw) > LIMIT:
             return 0
-        event = normalize(json.loads(raw), args.thread, args.title, preview=args.preview)
-        if event:
+        payload = json.loads(raw)
+        event = normalize(payload, args.thread, args.title, preview=args.preview)
+        if event and (not args.all or has_local_session(Path.home(), event["threadID"])):
+            event.update(extract_round_card(payload.get("last_assistant_message") or
+                                            payload.get("last-assistant-message")))
             folder = Path.home() / "Library/Application Support/NARC/codex-completion"
             if args.all:
                 try:

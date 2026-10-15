@@ -101,12 +101,12 @@ private struct LayoutGridCell: View {
             }
         }
         .padding(NarcSpacing.sm)
-        .background(Color.narcSurface)
+        .background(Color.narcFocusInset)
         .clipShape(RoundedRectangle(cornerRadius: NarcRadius.sm))
         .overlay(
             RoundedRectangle(cornerRadius: NarcRadius.sm)
                 .stroke(
-                    isHovered ? Color.narcAccent : Color.narcBorder,
+                    isHovered ? Color.narcAccent.opacity(0.4) : Color.clear,
                     lineWidth: 0.5
                 )
         )
@@ -157,8 +157,8 @@ struct WindowGridView: View {
                     Image(systemName: "keyboard")
                         .font(.narcCaption)
                         .foregroundColor(.narcTextMuted)
-                    Text("Window Layouts")
-                        .font(.narcSubtitle)
+                    Text("窗口排列")
+                        .font(.narcBody)
                         .foregroundColor(.narcTextMuted)
                     Spacer()
                 }
@@ -198,15 +198,19 @@ struct WindowGridView: View {
                     .padding(.vertical, NarcSpacing.xs)
 
                 // Tips
-                VStack(alignment: .leading, spacing: NarcSpacing.xs + 2) {
+                DisclosureGroup("使用提示") {
+                  VStack(alignment: .leading, spacing: NarcSpacing.sm) {
                     tipRow(icon: "keyboard", text: "启用的布局快捷键用于移动当前窗口")
                     tipRow(icon: "pencil", text: "点击快捷键或铅笔改键；配置不会移动窗口")
                     tipRow(icon: "hand.draw", text: "拖拽 NARC 圆点可移动位置")
                     tipRow(icon: "pin.fill", text: hotkeyService.activeShortcut(for: .pinnedWindowSwitcher).map { "\($0.displayLabel) 召回已标记窗口" } ?? "召回快捷键未启用，请到偏好设置修改")
                     tipRow(icon: "pin.slash", text: hotkeyService.activeShortcut(for: .toggleCurrentWindowPin).map { "\($0.displayLabel) 标记 / 取消当前窗口" } ?? "标记快捷键未启用，请到偏好设置修改")
+                  }.padding(.top, NarcSpacing.sm)
                 }
+                .font(.narcCaption)
+                .foregroundColor(.narcTextMuted)
             }
-            .padding(NarcSpacing.lg)
+            .padding(NarcSpacing.xl)
         }
         .onChange(of: hotkeyService.configurableHotkeyStates) { oldStates, newStates in
             for action in ConfigurableHotkeyAction.layoutActions where oldStates[action] != newStates[action] {

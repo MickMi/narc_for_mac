@@ -4,6 +4,18 @@ import AppKit
 // MARK: - Color Tokens (semantic, auto light/dark)
 
 extension Color {
+    /// Opaque, softly tinted surfaces for the attention UI. Keep the historical
+    /// dashboard palette untouched; these resolve against the actual appearance.
+    static let narcFocusSurface = Color(NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.14, green: 0.16, blue: 0.19, alpha: 1)
+            : NSColor(srgbRed: 0.98, green: 0.985, blue: 0.995, alpha: 1)
+    })
+    static let narcFocusInset = Color(NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.19, green: 0.22, blue: 0.27, alpha: 1)
+            : NSColor(srgbRed: 0.925, green: 0.947, blue: 0.977, alpha: 1)
+    })
     /// App base background, corresponds to --bg
     static let narcBackground = Color(NSColor.windowBackgroundColor)
     /// Card / panel surface, corresponds to --surface
@@ -28,6 +40,24 @@ extension Color {
 }
 
 // MARK: - Typography
+
+/// The system bordered-prominent style becomes gray in non-key NSPanel windows.
+/// Keep the primary action legible without activating the app or stealing focus.
+/// The existing toast style is a fixed 22pt icon circle, unsuitable for text actions.
+struct NarcFocusPrimaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12, weight: .medium))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .foregroundStyle(isEnabled ? Color.white : Color.narcTextMuted)
+            .background(isEnabled ? Color.narcInfo : Color.narcFocusInset)
+            .clipShape(RoundedRectangle(cornerRadius: NarcRadius.sm, style: .continuous))
+            .opacity(configuration.isPressed ? 0.8 : 1)
+    }
+}
 
 extension Font {
     /// 28pt — splash, empty states
@@ -70,6 +100,7 @@ enum NarcSpacing {
 // SwiftUI: use RoundedRectangle(cornerRadius:style: .continuous)
 
 enum NarcRadius {
+    static let focus: CGFloat = 22
     static let xs: CGFloat = 6       // was 4  → small buttons, icons, status dots
     static let sm: CGFloat = 10      // was 8  → tab rows (core), input fields, small cards
     static let md: CGFloat = 14      // was 10 → panels, inline cards, popovers
@@ -82,8 +113,8 @@ enum NarcRadius {
 
 enum NarcSize {
     static let widgetDiameter: CGFloat = 48
-    static let panelWidth: CGFloat = 320
-    static let panelHeight: CGFloat = 420
+    static let panelWidth: CGFloat = 360
+    static let panelHeight: CGFloat = 480
     static let toastWidth: CGFloat = 380
     static let toastHeight: CGFloat = 56
     static let prefsWidth: CGFloat = 520

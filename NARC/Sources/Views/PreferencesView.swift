@@ -1,7 +1,54 @@
 import SwiftUI
 import Carbon
 
-/// Preferences window with tabbed navigation.
+enum PreferencesSection: Hashable, CaseIterable, Identifiable {
+    case general
+    case widget
+    case shortcuts
+    case notifications
+    case reminders
+    case codexReplies
+    case instantQuestions
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .general: "通用"
+        case .widget: "悬浮球"
+        case .shortcuts: "快捷键"
+        case .notifications: "通知"
+        case .reminders: "提醒"
+        case .codexReplies: "AI 回复"
+        case .instantQuestions: "即时问答"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .general: "gearshape"
+        case .widget: "circle.fill"
+        case .shortcuts: "keyboard"
+        case .notifications: "bell.fill"
+        case .reminders: "clock"
+        case .codexReplies: "bubble.left.and.bubble.right"
+        case .instantQuestions: "sparkles"
+        }
+    }
+}
+
+enum PreferencesLayout {
+    static let contentSize = CGSize(width: 760, height: 520)
+    static let minimumContentSize = CGSize(width: 720, height: 460)
+    static let sidebarWidth: CGFloat = 172
+}
+
+@MainActor
+final class PreferencesNavigation: ObservableObject {
+    @Published var selectedSection: PreferencesSection = .general
+}
+
+/// Preferences window with persistent first-level navigation.
 /// Receives the shared runtime services so Preferences always reflects the
 /// monitoring state and shortcut that are actually active.
 struct PreferencesView: View {
@@ -9,29 +56,102 @@ struct PreferencesView: View {
     @ObservedObject var hotkeyService: HotkeyService
     @ObservedObject var reminderSettings: TodoReminderSettings
     @ObservedObject var codexCompletionService: CodexCompletionService
+    @ObservedObject var instantQuestionController: InstantQuestionController
+    @ObservedObject var navigation: PreferencesNavigation
     var onPreviewReminder: () -> Void
 
     var body: some View {
-        TabView {
-            GeneralTab()
-                .tabItem { Label("通用", systemImage: "gearshape") }
+        HStack(spacing: 0) {
+            PreferencesNavigationSidebar(selection: $navigation.selectedSection)
+                .frame(width: PreferencesLayout.sidebarWidth)
 
-            WidgetTab(appMonitor: appMonitor, hotkeyService: hotkeyService)
-                .tabItem { Label("悬浮球", systemImage: "circle.fill") }
+            Divider()
 
-            ShortcutsTab(hotkeyService: hotkeyService)
-                .tabItem { Label("快捷键", systemImage: "keyboard") }
-
-            NotificationsTab(appMonitor: appMonitor)
-                .tabItem { Label("通知", systemImage: "bell.fill") }
-
-            TodoRemindersTab(settings: reminderSettings, onPreview: onPreviewReminder)
-                .tabItem { Label("提醒", systemImage: "clock") }
-
-            CodexReminderSettingsView(service: codexCompletionService)
-                .tabItem { Label("AI 回复", systemImage: "bubble.left.and.bubble.right") }
+            ZStack {
+                Color.narcBackground
+                    .ignoresSafeArea()
+                selectedSectionContent
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 560, height: 460)
+        .frame(
+            minWidth: PreferencesLayout.minimumContentSize.width,
+            idealWidth: PreferencesLayout.contentSize.width,
+            maxWidth: .infinity,
+            minHeight: PreferencesLayout.minimumContentSize.height,
+            idealHeight: PreferencesLayout.contentSize.height,
+            maxHeight: .infinity
+        )
+        .background(Color.narcBackground)
+    }
+
+    @ViewBuilder
+    private var selectedSectionContent: some View {
+        switch navigation.selectedSection {
+        case .general:
+            GeneralTab()
+        case .widget:
+            WidgetTab(appMonitor: appMonitor, hotkeyService: hotkeyService)
+        case .shortcuts:
+            ShortcutsTab(hotkeyService: hotkeyService)
+        case .notifications:
+            NotificationsTab(appMonitor: appMonitor)
+        case .reminders:
+            TodoRemindersTab(settings: reminderSettings, onPreview: onPreviewReminder)
+        case .codexReplies:
+            CodexReminderSettingsView(service: codexCompletionService)
+        case .instantQuestions:
+            InstantQuestionSettingsView(controller: instantQuestionController)
+        }
+    }
+}
+
+struct PreferencesNavigationSidebar: View {
+    @Binding var selection: PreferencesSection
+    @State private var hoveredSection: PreferencesSection?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: NarcSpacing.xs) {
+            Text("设置")
+                .font(.narcCaption)
+                .foregroundStyle(Color.narcTextMuted)
+                .padding(.horizontal, NarcSpacing.sm)
+                .padding(.bottom, NarcSpacing.xs)
+
+            ForEach(PreferencesSection.allCases) { section in
+                let isSelected = selection == section
+                Button {
+                    selection = section
+                } label: {
+                    HStack(spacing: NarcSpacing.sm) {
+                        Image(systemName: section.systemImage)
+                            .frame(width: 18)
+                        Text(section.title)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .font(.narcBody)
+                    .foregroundStyle(isSelected ? Color.narcAccent : Color.narcText)
+                    .padding(.horizontal, NarcSpacing.sm)
+                    .frame(height: 34)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .softRowBackground(
+                    isSelected: isSelected,
+                    needsAttention: false,
+                    isHovering: hoveredSection == section
+                )
+                .onHover { isHovering in
+                    hoveredSection = isHovering ? section : nil
+                }
+                .accessibilityValue(isSelected ? "已选择" : "")
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(NarcSpacing.md)
+        .background(Color.narcFocusSurface)
     }
 }
 
@@ -47,7 +167,7 @@ struct TodoRemindersTab: View {
                     get: { settings.configuration.isEnabled },
                     set: { _ = settings.update(isEnabled: $0) }
                 ))
-                Text("按本机时间，在悬浮球旁提示下一件事和其他待办，不抢走当前输入焦点。")
+                Text("按本机时间，在悬浮球旁提醒未完成的 Todo，不抢走当前输入焦点。")
                     .font(.narcCaption).foregroundStyle(.secondary)
                 ForEach(settings.configuration.minutes, id: \.self) { minute in
                     HStack {
@@ -82,9 +202,9 @@ struct TodoRemindersTab: View {
                 if let error { Text(error).font(.narcCaption).foregroundStyle(.red) }
             }
             Section("提醒内容") {
-                Text("先展示你指定的下一件事；未指定时按高、普通、低优先级排列，同级截止时间早的优先。其余待办最多预览 3 项。")
+                Text("先展示最近记下的一件事，其余待办最多预览 3 项。")
                     .font(.narcCaption).foregroundStyle(.secondary)
-                Text("在 Todo 的“安排”中调整优先级、截止时间或指定下一件事。无待办不提醒；错过超过 10 分钟不追补。NARC 需保持运行。")
+                Text("无待完成 Todo 时不提醒；错过超过 10 分钟不追补。NARC 需保持运行。")
                     .font(.narcCaption).foregroundStyle(.secondary)
                 Button("预览提醒（不修改待办）", action: onPreview)
             }
@@ -402,6 +522,7 @@ struct ShortcutsTab: View {
     @ObservedObject var hotkeyService: HotkeyService
     @State private var editingAction: ConfigurableHotkeyAction?
     @State private var showsGlobalActions = true
+    @State private var showsPinnedSlots = true
     @State private var showsWindowLayouts = false
     @State private var actionFailureMessages: [ConfigurableHotkeyAction: String] = [:]
 
@@ -417,6 +538,23 @@ struct ShortcutsTab: View {
             }
 
             Section {
+                if hotkeyService.pinnedWindowSlotCount > 0 {
+                    shortcutGroup(
+                        "已标记窗口直达",
+                        actions: Array(ConfigurableHotkeyAction.pinnedWindowSlotActions.prefix(
+                            hotkeyService.pinnedWindowSlotCount
+                        )),
+                        isExpanded: $showsPinnedSlots,
+                        identifier: "shortcut-group-pinned-slots"
+                    )
+                } else {
+                    Text("标记窗口后，这里会显示按顺序对应的数字直达快捷键。")
+                        .font(.narcCaption)
+                        .foregroundColor(.narcTextMuted)
+                }
+            }
+
+            Section {
                 shortcutGroup(
                     "窗口布局",
                     actions: ConfigurableHotkeyAction.layoutActions,
@@ -426,7 +564,7 @@ struct ShortcutsTab: View {
             }
 
             Section {
-                Text("应用后立即生效，无需重启。停用布局会释放该组合，冲突时保留原组合并显示原因；卡片和这里的设置保持同步。")
+                Text("应用后立即生效，无需重启。窗口直达按 Pin 列表顺序生效；停用布局会释放该组合，冲突时保留原组合并显示原因。")
                     .font(.narcCaption)
                     .foregroundColor(.narcTextMuted)
             }

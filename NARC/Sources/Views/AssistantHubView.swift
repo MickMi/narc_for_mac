@@ -10,18 +10,20 @@ struct AssistantHubView: View {
     @ObservedObject var captureState: InboxCaptureState
     @ObservedObject var navigation: AssistantHubNavigation
 
-    @State private var selectedSection: Section = .inbox
+    @State private var selectedSection: Section = .todos
 
-    private enum Section: String, CaseIterable, Identifiable {
-        case inbox = "Inbox"
+    enum Section: String, CaseIterable, Identifiable {
         case todos = "Todo"
         case notes = "Notes"
 
         var id: String { rawValue }
 
+        static func visible(noteCount: Int) -> [Section] {
+            noteCount > 0 ? [.todos, .notes] : [.todos]
+        }
+
         var icon: String {
             switch self {
-            case .inbox: return "tray"
             case .todos: return "checkmark.circle"
             case .notes: return "note.text"
             }
@@ -36,21 +38,13 @@ struct AssistantHubView: View {
 
             Group {
                 switch selectedSection {
-                case .inbox:
+                case .todos:
                     QuickCaptureView(
                         store: store,
                         captureState: captureState
                     )
-                case .todos:
-                    TodoListView(
-                        store: store,
-                        onCreate: { selectedSection = .inbox }
-                    )
                 case .notes:
-                    NotesListView(
-                        store: store,
-                        onCreate: { selectedSection = .inbox }
-                    )
+                    NotesListView(store: store)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -58,6 +52,9 @@ struct AssistantHubView: View {
         .frame(minWidth: 620, minHeight: 440)
         .background(Color.narcBackground)
         .onChange(of: navigation.showTodosRequest) { _, _ in selectedSection = .todos }
+        .onChange(of: store.notes.isEmpty) { _, isEmpty in
+            if isEmpty { selectedSection = .todos }
+        }
     }
 
     private var header: some View {
@@ -78,13 +75,13 @@ struct AssistantHubView: View {
             Spacer()
 
             Button {
-                selectedSection = .inbox
+                selectedSection = .todos
             } label: {
-                Label("随手记", systemImage: "plus")
+                Label("新建 Todo", systemImage: "plus")
                     .font(.narcBody)
             }
             .buttonStyle(.borderedProminent)
-            .accessibilityLabel("打开随手箱")
+            .accessibilityLabel("打开 Todo")
         }
         .padding(.horizontal, NarcSpacing.xl)
         .padding(.vertical, NarcSpacing.lg)
@@ -92,7 +89,7 @@ struct AssistantHubView: View {
 
     private var sectionBar: some View {
         HStack(spacing: NarcSpacing.sm) {
-            ForEach(Section.allCases) { section in
+            ForEach(Section.visible(noteCount: store.notes.count)) { section in
                 Button {
                     withAnimation(.narcSnap) {
                         selectedSection = section
@@ -107,6 +104,8 @@ struct AssistantHubView: View {
                                 selectedSection == section ? .narcAccent : .narcTextFaint
                             )
                     }
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                     .font(.narcBody)
                     .foregroundColor(
                         selectedSection == section ? .narcAccent : .narcTextMuted
@@ -135,8 +134,6 @@ struct AssistantHubView: View {
 
     private func count(for section: Section) -> Int {
         switch section {
-        case .inbox:
-            return store.inboxItems.count
         case .todos:
             return store.incompleteTodos.count
         case .notes:

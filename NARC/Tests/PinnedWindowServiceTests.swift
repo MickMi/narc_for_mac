@@ -99,6 +99,38 @@ func currentWindowPinDecisionReportsCapacityOnlyForANewWindow() {
 }
 
 @Test
+func pinnedWindowReorderingChangesNumericTargetWithoutChangingPinIdentity() {
+    let first = PinnedWindow(bundleID: "com.example.chat", windowTitle: "Main", appDisplayName: "Chat", cgWindowID: 41)
+    let second = PinnedWindow(bundleID: "com.example.chat", windowTitle: "Other", appDisplayName: "Chat", cgWindowID: 42)
+    let third = PinnedWindow(bundleID: "com.example.notes", windowTitle: "Notes", appDisplayName: "Notes", cgWindowID: 43)
+    let original = [first, second, third]
+
+    let reordered = PinnedWindowService.reorderedPins(original, from: 1, by: -1)
+    #expect(reordered?.map(\.id) == [second.id, first.id, third.id])
+    #expect(reordered?.first?.cgWindowID == second.cgWindowID)
+    #expect(PinnedWindowService.reorderedPins(original, from: 0, by: -1) == nil)
+    #expect(PinnedWindowService.reorderedPins(original, from: 2, by: 1) == nil)
+    #expect(PinnedWindowService.reorderedPins(original, from: 1, by: 2) == nil)
+}
+
+@Test
+func persistentPinOrderSurvivesReloadWhileTemporaryPinIsOmitted() throws {
+    let suite = "PinnedWindowOrderTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let temporary = PinnedWindow(bundleID: "com.example.chat", windowTitle: "Temp", appDisplayName: "Chat")
+    let first = PinnedWindow(bundleID: "com.example.chat", windowTitle: "First", appDisplayName: "Chat", isPersistent: true)
+    let second = PinnedWindow(bundleID: "com.example.chat", windowTitle: "Second", appDisplayName: "Chat", isPersistent: true)
+    let service = PinnedWindowService(defaults: defaults, startsPolling: false)
+    service.pinnedWindows = [temporary, first, second]
+
+    #expect(service.movePin(id: second.id, by: -1) == 1)
+    #expect(service.pinnedWindows.map(\.id) == [temporary.id, second.id, first.id])
+    let reloaded = PinnedWindowService(defaults: defaults, startsPolling: false)
+    #expect(reloaded.pinnedWindows.map(\.id) == [second.id, first.id])
+}
+
+@Test
 func exactPinnedWindowIDNeverFallsBackToASimilarlyNamedWindow() {
     let decision = PinnedWindowService.pinnedWindowMatchDecision(
         windowIDs: [41, 42],

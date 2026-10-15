@@ -78,7 +78,7 @@ final class TodoNudgeWindow: NSPanel {
         becomesKeyOnlyIfNeeded = false
         isOpaque = false
         backgroundColor = .clear
-        hasShadow = false
+        hasShadow = true
         hidesOnDeactivate = false
         ignoresMouseEvents = false
         isReleasedWhenClosed = false
@@ -105,6 +105,7 @@ struct TodoNudgeCardView: View {
     let onSnooze: () -> Void
     let onViewAll: () -> Void
     var isPreview = false
+    var onHeightChange: (CGFloat) -> Void = { _ in }
     @State private var error: String?
 
     var body: some View {
@@ -115,24 +116,38 @@ struct TodoNudgeCardView: View {
                 Label(isPreview ? "每日回顾 · 预览" : "每日待办回顾", systemImage: "checklist")
                     .font(.narcCaption).foregroundColor(.narcAccent)
                 Spacer()
-                Button(action: onDismiss) { Image(systemName: "xmark") }
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark").foregroundStyle(.secondary)
+                        .frame(width: 24, height: 24)
+                }
                     .buttonStyle(.plain).accessibilityLabel("收起待办回顾")
             }
             if let todo = summary.featured {
                 VStack(alignment: .leading, spacing: NarcSpacing.xs) {
-                    Text("先做这一件").font(.narcCaption).foregroundStyle(.secondary)
-                    Text(todo.title).font(.narcTitle).lineLimit(3)
+                    Text(todo.title).font(.system(size: 20, weight: .semibold)).lineLimit(3)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    HStack(spacing: NarcSpacing.xs) {
-                        Text(todo.isNext ? "你指定的下一件事" : todo.priority.label)
-                        if let dueAt = todo.dueAt {
-                            Text("· 截止")
-                            Text(dueAt, format: .dateTime.month().day().hour().minute())
-                        }
-                    }
-                    .font(.narcCaption).foregroundStyle(.secondary).lineLimit(1)
                 }
-                Divider()
+                HStack {
+                    Button {
+                        onActionStarted()
+                        if store.setTodoCompleted(id: todo.id, completed: true) {
+                            onSuccessfulAction()
+                        } else {
+                            error = store.lastError?.errorDescription ?? "未能保存，请重试。"
+                            onActionFailed()
+                        }
+                    } label: {
+                        Label("完成", systemImage: "checkmark")
+                    }
+                    .buttonStyle(NarcFocusPrimaryButtonStyle()).disabled(isPreview)
+                    Button("稍后提醒", action: onSnooze)
+                        .buttonStyle(.borderless).foregroundStyle(.secondary).disabled(isPreview)
+                    Spacer(minLength: 0)
+                }
+                .controlSize(.regular)
+                .padding(.vertical, NarcSpacing.xs)
+                if let error { Text(error).font(.narcCaption).foregroundStyle(.red).lineLimit(2) }
+                Divider().opacity(0.5)
                 VStack(alignment: .leading, spacing: NarcSpacing.sm) {
                     Text(summary.remainingCount == 0 ? "完成它，就清空待办了" : "还有 \(summary.remainingCount) 件待办")
                         .font(.narcCaption).foregroundStyle(.secondary)
@@ -142,47 +157,35 @@ struct TodoNudgeCardView: View {
                             Text(item.title).font(.narcBody).lineLimit(1)
                         }
                     }
-                    if summary.deferredCount > 0 {
-                        Text("其中 \(summary.deferredCount) 件已延期，暂不推荐")
-                            .font(.narcCaption).foregroundStyle(.secondary)
-                    }
                 }
-                Spacer(minLength: 0)
-                if let error { Text(error).font(.narcCaption).foregroundStyle(.red).lineLimit(2) }
                 HStack {
-                    Button("完成这一件") {
-                        onActionStarted()
-                        if store.setTodoCompleted(id: todo.id, completed: true) {
-                            onSuccessfulAction()
-                        } else {
-                            error = store.lastError?.errorDescription ?? "未能保存，请重试。"
-                            onActionFailed()
-                        }
-                    }.disabled(isPreview)
-                    Button("1 小时后", action: onSnooze).disabled(isPreview)
                     Spacer(minLength: 0)
-                    Button("查看全部", action: onViewAll)
-                }.buttonStyle(.bordered).controlSize(.small)
+                    Button(action: onViewAll) {
+                        Label("查看全部", systemImage: "chevron.right")
+                    }
+                }.buttonStyle(.borderless).font(.narcCaption)
             } else {
-                Spacer()
-                Text("当前没有可提醒的 Todo").font(.narcSubtitle)
-                Text("已完成或延期中的任务不会主动弹出。")
+                Text("当前没有待完成 Todo").font(.narcSubtitle)
+                Text("记下一件事后，会在这里提醒你。")
                     .font(.narcCaption).foregroundStyle(.secondary)
                 Button("查看 Todo", action: onViewAll)
-                Spacer()
             }
         }
-        .padding(NarcSpacing.lg)
-        .frame(
-            width: TodoNudgeWindow.cardSize.width,
-            height: TodoNudgeWindow.cardSize.height
-        )
-        .background(VisualEffectBackground(material: .hudWindow))
-        .clipShape(RoundedRectangle(cornerRadius: NarcRadius.lg, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: NarcRadius.lg, style: .continuous)
-                .strokeBorder(Color.narcInfo.opacity(0.32), lineWidth: 1)
-        }
-        .shadow(color: Color.narcInfo.opacity(0.16), radius: 18, y: 8)
+        .padding(NarcSpacing.xl)
+        .frame(width: TodoNudgeWindow.cardSize.width)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(GeometryReader { geometry in
+            Color.clear.preference(key: TodoReviewHeight.self, value: geometry.size.height)
+        })
+        .onPreferenceChange(TodoReviewHeight.self, perform: onHeightChange)
+        .background(Color.narcFocusSurface)
+        .clipShape(RoundedRectangle(cornerRadius: NarcRadius.focus, style: .continuous))
+    }
+}
+
+private struct TodoReviewHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }

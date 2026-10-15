@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import Testing
 @testable import NARC
 
@@ -122,4 +123,52 @@ func pinnedSwitcherFrameStaysInsideNegativeCoordinateDisplay() {
     #expect(frame.maxY <= visibleFrame.maxY)
     #expect(frame.width == PinnedWindowSwitcherLayout.width)
     #expect(frame.height == PinnedWindowSwitcherLayout.maximumHeight)
+}
+
+@Test
+@MainActor
+func pinnedSwitcherRendersReorderControlsWithinThePanel() async throws {
+    _ = NSApplication.shared
+    let suite = "PinnedSwitcherPreview.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let pins = PinnedWindowService(defaults: defaults, startsPolling: false)
+    pins.pinnedWindows = [
+        PinnedWindow(bundleID: "com.apple.TextEdit", windowTitle: "ChatGPT 主窗口", appDisplayName: "ChatGPT"),
+        PinnedWindow(bundleID: "com.apple.TextEdit", windowTitle: "微信会话窗口", appDisplayName: "微信"),
+        PinnedWindow(bundleID: "com.apple.TextEdit", windowTitle: "待办窗口", appDisplayName: "待办"),
+    ]
+    let hotkeys = HotkeyService(accessibilityTrustCheck: { _ in false }, defaults: defaults)
+    hotkeys.updatePinnedWindowSlotCount(3)
+    let selection = PinnedWindowSwitcherSelectionState()
+    selection.reset(itemCount: 3)
+    let size = PinnedWindowSwitcherLayout.panelSize(itemCount: 3)
+
+    for (name, scheme) in [("light", ColorScheme.light), ("dark", .dark)] {
+        let content = PinnedWindowSwitcherView(
+            pinnedWindowService: pins,
+            hotkeyService: hotkeys,
+            selection: selection,
+            onActivate: { _ in },
+            onClose: {},
+            onItemCountChanged: { _ in }
+        )
+        let window = TodoNudgeWindow(rootView: content.environment(\.colorScheme, scheme))
+        window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+        window.setContentSize(size)
+        let view = try #require(window.contentView)
+        view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(view.bounds.width == size.width)
+        #expect(view.bounds.height == size.height)
+        if let path = ProcessInfo.processInfo.environment["NARC_PIN_SNAPSHOT_DIR"],
+           path.hasPrefix("/private/tmp/") {
+            let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            let png = try #require(bitmap.representation(using: .png, properties: [:]))
+            try png.write(to: URL(fileURLWithPath: path)
+                .appendingPathComponent("pinned-slots-\(name).png"))
+        }
+        window.close()
+    }
 }

@@ -19,17 +19,42 @@ enum ConfigurableHotkeyAction: String, CaseIterable, Identifiable {
     case layoutBottomRight
     case pinnedWindowSwitcher
     case toggleCurrentWindowPin
+    case pinnedWindowSlot1
+    case pinnedWindowSlot2
+    case pinnedWindowSlot3
+    case pinnedWindowSlot4
+    case pinnedWindowSlot5
+    case pinnedWindowSlot6
+    case pinnedWindowSlot7
+    case pinnedWindowSlot8
+    case pinnedWindowSlot9
     case summonWidget
     case quickCapture
     case selectedTextTodo
+    case askAI
+    case webSearch
+    case googleSearch
 
     static let layoutActions: [ConfigurableHotkeyAction] = WindowLayout.allCases.map(forLayout)
+
+    static let pinnedWindowSlotActions: [ConfigurableHotkeyAction] = [
+        .pinnedWindowSlot1, .pinnedWindowSlot2, .pinnedWindowSlot3,
+        .pinnedWindowSlot4, .pinnedWindowSlot5, .pinnedWindowSlot6,
+        .pinnedWindowSlot7, .pinnedWindowSlot8, .pinnedWindowSlot9,
+    ]
+
+    var pinnedWindowSlotIndex: Int? {
+        Self.pinnedWindowSlotActions.firstIndex(of: self)
+    }
 
     static let globalActions: [ConfigurableHotkeyAction] = [
         .pinnedWindowSwitcher,
         .toggleCurrentWindowPin,
         .summonWidget,
         .quickCapture,
+        .askAI,
+        .webSearch,
+        .googleSearch,
         .selectedTextTodo,
     ]
 
@@ -51,12 +76,22 @@ enum ConfigurableHotkeyAction: String, CaseIterable, Identifiable {
             return "召回已标记窗口"
         case .toggleCurrentWindowPin:
             return "标记 / 取消当前窗口"
+        case .pinnedWindowSlot1, .pinnedWindowSlot2, .pinnedWindowSlot3,
+             .pinnedWindowSlot4, .pinnedWindowSlot5, .pinnedWindowSlot6,
+             .pinnedWindowSlot7, .pinnedWindowSlot8, .pinnedWindowSlot9:
+            return "直达已标记窗口 \((pinnedWindowSlotIndex ?? 0) + 1)"
         case .summonWidget:
             return "召回悬浮球"
         case .quickCapture:
             return "快速记录"
         case .selectedTextTodo:
             return "划词创建 Todo"
+        case .askAI:
+            return "问 AI"
+        case .webSearch:
+            return "Bing 搜索"
+        case .googleSearch:
+            return "Google 搜索"
         }
     }
 
@@ -90,12 +125,29 @@ enum ConfigurableHotkeyAction: String, CaseIterable, Identifiable {
                 keyCode: 35,
                 modifiers: UInt32(controlKey | optionKey | shiftKey)
             )
+        case .pinnedWindowSlot1, .pinnedWindowSlot2, .pinnedWindowSlot3,
+             .pinnedWindowSlot4, .pinnedWindowSlot5, .pinnedWindowSlot6,
+             .pinnedWindowSlot7, .pinnedWindowSlot8, .pinnedWindowSlot9:
+            let keyCodes: [UInt32] = [18, 19, 20, 21, 23, 22, 26, 28, 25]
+            return ConfigurableShortcut(
+                keyCode: keyCodes[pinnedWindowSlotIndex ?? 0],
+                modifiers: controlOption
+            )
         case .summonWidget:
             return ConfigurableShortcut(keyCode: 45, modifiers: controlOption)
         case .quickCapture:
             return ConfigurableShortcut(keyCode: 12, modifiers: controlOption)
         case .selectedTextTodo:
             return ConfigurableShortcut(keyCode: 17, modifiers: controlOption)
+        case .askAI:
+            return ConfigurableShortcut(
+                keyCode: 2,
+                modifiers: UInt32(controlKey | optionKey | shiftKey)
+            )
+        case .webSearch:
+            return ConfigurableShortcut(keyCode: 11, modifiers: controlOption)
+        case .googleSearch:
+            return ConfigurableShortcut(keyCode: 5, modifiers: controlOption)
         }
     }
 
@@ -120,7 +172,10 @@ enum ConfigurableHotkeyAction: String, CaseIterable, Identifiable {
         case .layoutBottomLeft: return .bottomLeft
         case .layoutBottomRight: return .bottomRight
         case .pinnedWindowSwitcher, .toggleCurrentWindowPin, .summonWidget,
-             .quickCapture, .selectedTextTodo:
+             .quickCapture, .selectedTextTodo, .askAI, .webSearch, .googleSearch,
+             .pinnedWindowSlot1, .pinnedWindowSlot2, .pinnedWindowSlot3,
+             .pinnedWindowSlot4, .pinnedWindowSlot5, .pinnedWindowSlot6,
+             .pinnedWindowSlot7, .pinnedWindowSlot8, .pinnedWindowSlot9:
             return nil
         }
     }
@@ -142,12 +197,15 @@ enum ConfigurableHotkeyAction: String, CaseIterable, Identifiable {
 
     var requiresAccessibility: Bool {
         switch self {
-        case .summonWidget, .quickCapture:
+        case .summonWidget, .quickCapture, .askAI, .webSearch, .googleSearch:
             return false
         case .layoutLeftHalf, .layoutRightHalf, .layoutTopHalf, .layoutBottomHalf,
              .layoutFullScreen, .layoutCenter, .layoutTopLeft, .layoutTopRight,
              .layoutBottomLeft, .layoutBottomRight, .pinnedWindowSwitcher,
-             .toggleCurrentWindowPin, .selectedTextTodo:
+             .toggleCurrentWindowPin, .selectedTextTodo,
+             .pinnedWindowSlot1, .pinnedWindowSlot2, .pinnedWindowSlot3,
+             .pinnedWindowSlot4, .pinnedWindowSlot5, .pinnedWindowSlot6,
+             .pinnedWindowSlot7, .pinnedWindowSlot8, .pinnedWindowSlot9:
             return true
         }
     }

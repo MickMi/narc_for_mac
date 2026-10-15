@@ -136,7 +136,10 @@ enum FloatingPanelPlacement {
     static func frame(
         adjacentTo widgetFrame: NSRect,
         visibleWidgetSize: CGFloat,
-        panelSize: NSSize,
+        panelSize: NSSize = NSSize(
+            width: NarcSize.panelWidth,
+            height: NarcSize.panelHeight
+        ),
         targetVisibleFrame: NSRect,
         gap: CGFloat = 8,
         margin: CGFloat = 4
@@ -195,7 +198,40 @@ enum FloatingPanelSummonAction: Equatable {
 }
 
 enum WidgetPointerInteractionPolicy {
+    enum TapTarget: Equatable { case widget, codexReply, todo }
     static let dragThreshold: CGFloat = 5
+    static let codexCueWidth: CGFloat = 32
+    static let codexCueHeight: CGFloat = 19
+    static let codexCueOffsetX: CGFloat = -20
+    static let codexCueOffsetY: CGFloat = -6
+    static let todoCueHeight: CGFloat = 19
+    static func todoCueWidth(count: Int) -> CGFloat {
+        count > 99 ? 46 : (count > 9 ? 39 : 34)
+    }
+
+    static func codexCueRect(canvasSize: CGFloat, visibleSize: CGFloat) -> NSRect {
+        let inset = max(0, (canvasSize - visibleSize) / 2)
+        return NSRect(x: inset + codexCueOffsetX,
+                      y: inset + visibleSize - codexCueOffsetY - codexCueHeight,
+                      width: codexCueWidth, height: codexCueHeight)
+    }
+
+    static func todoCueRect(canvasSize: CGFloat, visibleSize: CGFloat, count: Int) -> NSRect {
+        let inset = max(0, (canvasSize - visibleSize) / 2)
+        return NSRect(x: inset - 6, y: inset - 6,
+                      width: todoCueWidth(count: count), height: todoCueHeight)
+    }
+
+    static func tapTarget(at location: NSPoint, canvasSize: CGFloat,
+                          visibleSize: CGFloat, showsCodexCue: Bool,
+                          todoCueCount: Int = 0) -> TapTarget {
+        if showsCodexCue && codexCueRect(canvasSize: canvasSize, visibleSize: visibleSize)
+            .contains(location) { return .codexReply }
+        if todoCueCount > 0 && todoCueRect(canvasSize: canvasSize,
+                                          visibleSize: visibleSize, count: todoCueCount)
+            .contains(location) { return .todo }
+        return .widget
+    }
 
     /// A press remains a tap regardless of duration until pointer movement
     /// crosses the drag threshold. This keeps deliberate and accessibility-
@@ -207,8 +243,8 @@ enum WidgetPointerInteractionPolicy {
 }
 
 /// A transparent NSView that accepts the first mouse click even when the window is inactive,
-/// AND restricts the window's hit-test region to the visible 48pt circle area in the
-/// center of the panel. The 40pt of transparent padding around the circle (which exists
+/// AND restricts the window's hit-test region to the visible circle and any
+/// Codex reply cue. The 40pt of transparent padding around the circle (which exists
 /// to give SwiftUI's drop shadow room to render — see FloatingWidgetView) must be
 /// click-through, otherwise the "empty space" around the widget would steal clicks
 /// from whatever app is below.
@@ -216,14 +252,41 @@ private final class FirstMouseView: NSView {
     /// Side length of the visible widget in the center of the canvas.
     /// Set by FloatingWidgetWindow when the widget size changes.
     var visibleSize: CGFloat = 48
+    var showsCodexCue = false
+    var todoCueCount = 0
+    var onCueHoverChanged: ((WidgetPointerInteractionPolicy.TapTarget?) -> Void)?
+    private var cueTrackingArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let cueTrackingArea { removeTrackingArea(cueTrackingArea) }
+        let area = NSTrackingArea(rect: .zero,
+                                  options: [.mouseEnteredAndExited, .mouseMoved,
+                                            .activeAlways, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        cueTrackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let target = WidgetPointerInteractionPolicy.tapTarget(
+            at: point, canvasSize: bounds.width, visibleSize: visibleSize,
+            showsCodexCue: showsCodexCue, todoCueCount: todoCueCount
+        )
+        onCueHoverChanged?(target == .widget ? nil : target)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onCueHoverChanged?(nil)
+    }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         return true
     }
 
-    /// Only the central `visibleSize × visibleSize` bbox is hit-testable.
-    /// Clicks in the outer transparent shadow region pass through to the
-    /// window/app below.
+    /// The circle and visible reply cue are hit-testable. Other transparent
+    /// shadow space passes through to the window/app below.
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = superview.map { convert(point, from: $0) } ?? point
         let inset = (bounds.width - visibleSize) / 2
@@ -235,8 +298,20 @@ private final class FirstMouseView: NSView {
             width: bounds.width - effectiveInset * 2,
             height: bounds.height - effectiveInset * 2
         )
+        let cueRect = WidgetPointerInteractionPolicy.codexCueRect(
+            canvasSize: bounds.width, visibleSize: visibleSize
+        )
+        let todoRect = WidgetPointerInteractionPolicy.todoCueRect(
+            canvasSize: bounds.width, visibleSize: visibleSize, count: todoCueCount
+        )
+        if (showsCodexCue && cueRect.contains(local)) ||
+            (todoCueCount > 0 && todoRect.contains(local)) {
+            // SwiftUI's hosting view does not hit-test content overflowing the
+            // circle. Route the visible cue to the AppKit tap handler instead.
+            return self
+        }
         guard visibleRect.contains(local) else { return nil }
-        return super.hitTest(point)
+        return super.hitTest(point) ?? self
     }
 }
 
@@ -288,6 +363,19 @@ final class FloatingWidgetWindow: NSPanel {
     /// This is the primary click handler — it fires reliably even on the first click
     /// when the app is not the frontmost application.
     var onWidgetTapped: (() -> Void)?
+
+    /// Separate target for the unread Codex reply cue; ordinary N taps still toggle the main panel.
+    var onCodexCueTapped: (() -> Void)?
+    var onTodoCueTapped: (() -> Void)?
+    var onCueHoverChanged: ((WidgetPointerInteractionPolicy.TapTarget?) -> Void)? {
+        didSet { (contentView as? FirstMouseView)?.onCueHoverChanged = onCueHoverChanged }
+    }
+    var showsCodexCue = false {
+        didSet { (contentView as? FirstMouseView)?.showsCodexCue = showsCodexCue }
+    }
+    var todoCueCount = 0 {
+        didSet { (contentView as? FirstMouseView)?.todoCueCount = todoCueCount }
+    }
 
     /// Called when the widget is right-clicked (or Ctrl+clicked).
     /// Passes the triggering NSEvent so the handler can position a popup menu
@@ -357,6 +445,9 @@ final class FloatingWidgetWindow: NSPanel {
                 } else {
                     let wrapper = FirstMouseView(frame: newView.frame)
                     wrapper.visibleSize = visibleSize
+                    wrapper.showsCodexCue = showsCodexCue
+                    wrapper.todoCueCount = todoCueCount
+                    wrapper.onCueHoverChanged = onCueHoverChanged
                     wrapper.autoresizesSubviews = true
                     newView.autoresizingMask = [.width, .height]
                     wrapper.addSubview(newView)
@@ -406,7 +497,15 @@ final class FloatingWidgetWindow: NSPanel {
                     distance: distance,
                     isDragging: isDragging
                 ) {
-                    onWidgetTapped?()
+                    switch WidgetPointerInteractionPolicy.tapTarget(
+                        at: upLocation, canvasSize: canvasSize,
+                        visibleSize: visibleSize, showsCodexCue: showsCodexCue,
+                        todoCueCount: todoCueCount
+                    ) {
+                    case .codexReply: onCodexCueTapped?()
+                    case .todo: onTodoCueTapped?()
+                    case .widget: onWidgetTapped?()
+                    }
                 }
             }
             mouseDownTime = nil

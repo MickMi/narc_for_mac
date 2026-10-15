@@ -8,6 +8,20 @@ import Cocoa
 /// accidentally activate a panel item.
 final class PanelWindow: NSPanel {
 
+    /// Creates the interactive main panel. Background dragging is opt-in so
+    /// transient panels that share this subclass keep their anchored behavior.
+    static func mainPanel(contentRect: NSRect) -> PanelWindow {
+        let panel = PanelWindow(
+            contentRect: contentRect,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isMovable = true
+        panel.isMovableByWindowBackground = true
+        return panel
+    }
+
     /// Called on every mouseDown inside this panel (before SwiftUI handles it).
     var onMouseDown: (() -> Void)?
 
