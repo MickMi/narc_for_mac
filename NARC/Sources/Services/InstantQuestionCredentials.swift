@@ -24,11 +24,16 @@ enum InstantQuestionCredentialFailure: LocalizedError, Equatable {
 protocol InstantQuestionSecretStore: Sendable {
     func containsValue(for account: String) throws -> Bool
     func value(for account: String) throws -> String?
+    func valueWithoutInteraction(for account: String) throws -> String?
     func set(_ value: String, for account: String) throws
     func removeValue(for account: String) throws
 }
 
 extension InstantQuestionSecretStore {
+    // Unknown stores must opt in rather than silently showing authentication UI.
+    func valueWithoutInteraction(for account: String) throws -> String? {
+        throw InstantQuestionCredentialFailure.authorizationRequired
+    }
     // Production overrides this with a noninteractive metadata-only query.
     func containsValue(for account: String) throws -> Bool {
         try value(for: account) != nil
@@ -49,7 +54,7 @@ struct KeychainInstantQuestionSecretStore: InstantQuestionSecretStore {
         return true
     }
 
-    static func readQuery(for account: String, secret: Bool) -> [String: Any] {
+    static func readQuery(for account: String, secret: Bool, allowInteraction: Bool = true) -> [String: Any] {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
@@ -60,6 +65,8 @@ struct KeychainInstantQuestionSecretStore: InstantQuestionSecretStore {
             query[kSecReturnData as String] = true
         } else {
             query[kSecReturnAttributes as String] = true
+        }
+        if !secret || !allowInteraction {
             // This app uses the macOS login keychain. A passive status check
             // must fail instead of presenting an authentication sheet.
             let context = LAContext()
@@ -70,7 +77,15 @@ struct KeychainInstantQuestionSecretStore: InstantQuestionSecretStore {
     }
 
     func value(for account: String) throws -> String? {
-        let query = Self.readQuery(for: account, secret: true)
+        try readValue(for: account, allowInteraction: true)
+    }
+
+    func valueWithoutInteraction(for account: String) throws -> String? {
+        try readValue(for: account, allowInteraction: false)
+    }
+
+    private func readValue(for account: String, allowInteraction: Bool) throws -> String? {
+        let query = Self.readQuery(for: account, secret: true, allowInteraction: allowInteraction)
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         if status == errSecItemNotFound { return nil }
@@ -129,9 +144,14 @@ final class InstantQuestionCredentialManager: ObservableObject {
 
     private let secretStore: InstantQuestionSecretStore
     private var cachedDeepSeekKey: String?
+    static let automaticReadConsentKey = "narc.instantQuestion.automaticKeyReadConsented"
+    private let consentDefaults: UserDefaults?
+    private var attemptedAutomaticRead = false
 
-    init(secretStore: InstantQuestionSecretStore = KeychainInstantQuestionSecretStore()) {
+    init(secretStore: InstantQuestionSecretStore = KeychainInstantQuestionSecretStore(), defaults: UserDefaults? = nil) {
         self.secretStore = secretStore
+        // Injected stores never change real preferences during tests/previews.
+        consentDefaults = defaults ?? (secretStore is KeychainInstantQuestionSecretStore ? .standard : nil)
         refreshStatus()
     }
 
@@ -164,9 +184,22 @@ final class InstantQuestionCredentialManager: ObservableObject {
         throw hasDeepSeekKey ? InstantQuestionCredentialFailure.authorizationRequired : .missingDeepSeekKey
     }
 
-    /// Only the explicit settings action may read a persisted secret.
+    /// Restore only previously consented access, once per process, without UI.
+    /// System trust is checked by the actual read; the preference alone is not authorization.
+    func restoreAccessIfConsented() async {
+        guard !isReady, !isAuthorizing, !attemptedAutomaticRead, hasDeepSeekKey,
+              consentDefaults?.bool(forKey: Self.automaticReadConsentKey) == true else { return }
+        attemptedAutomaticRead = true
+        _ = await read(allowInteraction: false)
+    }
+
+    /// Only the explicit settings action may initiate system authentication UI.
     /// Runs away from the main thread while the OS authentication UI waits.
     @discardableResult func authorizeRead() async -> Bool {
+        await read(allowInteraction: true)
+    }
+
+    private func read(allowInteraction: Bool) async -> Bool {
         guard !isAuthorizing else { return false }
         if isReady { return true }
         isAuthorizing = true
@@ -175,7 +208,9 @@ final class InstantQuestionCredentialManager: ObservableObject {
         let account = Self.deepSeekAccount
         let result: Result<String?, Error> = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: Result { try store.value(for: account) })
+                continuation.resume(returning: Result {
+                    try allowInteraction ? store.value(for: account) : store.valueWithoutInteraction(for: account)
+                })
             }
         }
         defer { isAuthorizing = false }
@@ -191,9 +226,11 @@ final class InstantQuestionCredentialManager: ObservableObject {
             cachedDeepSeekKey = value
             hasDeepSeekKey = true
             isAuthorized = true
+            consentDefaults?.set(true, forKey: Self.automaticReadConsentKey)
             return true
         case .failure(let error):
-            lastError = error.localizedDescription
+            lastError = allowInteraction ? error.localizedDescription
+                : "密钥暂时无法自动读取。请在此点击“授权读取密钥”，由系统确认访问。"
             return false
         }
     }
@@ -210,6 +247,7 @@ final class InstantQuestionCredentialManager: ObservableObject {
             cachedDeepSeekKey = normalized
             isAuthorized = true
             hasDeepSeekKey = true
+            consentDefaults?.set(true, forKey: Self.automaticReadConsentKey)
             lastError = nil
             return true
         } catch {
@@ -225,6 +263,7 @@ final class InstantQuestionCredentialManager: ObservableObject {
             cachedDeepSeekKey = nil
             isAuthorized = false
             hasDeepSeekKey = false
+            consentDefaults?.removeObject(forKey: Self.automaticReadConsentKey)
             lastError = nil
             return true
         } catch {

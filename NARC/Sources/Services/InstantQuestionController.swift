@@ -38,11 +38,16 @@ final class InstantQuestionController: ObservableObject {
     @Published private(set) var streamingAnswer = ""
     @Published private(set) var connectionCheckMessage: String?
     @Published private(set) var isCheckingConnection = false
+    @Published var webSearchEnabled: Bool {
+        didSet { preferences.set(webSearchEnabled, forKey: Self.webSearchDefaultsKey) }
+    }
+    static let webSearchDefaultsKey = "narc.instantQuestion.webSearchEnabled"
 
     let credentials: InstantQuestionCredentialManager
     let store: InstantQuestionStore
 
     private let service: InstantQuestionAnswering
+    private let preferences: UserDefaults
     private var requestTask: Task<Void, Never>?
     private var streamFlushTask: Task<Void, Never>?
     private var pendingStreamText = ""
@@ -51,16 +56,22 @@ final class InstantQuestionController: ObservableObject {
     init(
         credentials: InstantQuestionCredentialManager,
         store: InstantQuestionStore,
-        service: InstantQuestionAnswering = DeepSeekQuestionService()
+        service: InstantQuestionAnswering = DeepSeekQuestionService(),
+        webSearchEnabled: Bool? = nil,
+        preferences: UserDefaults = .standard
     ) {
         self.credentials = credentials
         self.store = store
         self.service = service
+        self.preferences = preferences
+        self.webSearchEnabled = webSearchEnabled
+            ?? (preferences.object(forKey: Self.webSearchDefaultsKey) as? Bool ?? true)
     }
 
     var isBusy: Bool { phase == .searching || phase == .answering }
     var canSend: Bool {
-        credentials.isReady && !isBusy && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        credentials.isReady && !isBusy && !(webSearchEnabled && imageAttachment != nil)
+            && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     var canSave: Bool {
         !isBusy && messages.last?.role == .assistant
@@ -72,15 +83,25 @@ final class InstantQuestionController: ObservableObject {
     func sendDraft() {
         let question = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty, !isBusy else { return }
+        guard !webSearchEnabled || imageAttachment == nil else {
+            errorMessage = InstantQuestionServiceFailure.webSearchWithImage.localizedDescription
+            return
+        }
         do {
             let currentCredentials = try credentials.credentials()
             draft = ""
             errorMessage = nil
+            // Keep the interrupted answer in context when the user asks to
+            // continue. It remains unsaved unless they explicitly save later.
+            if phase == .failed, !streamingAnswer.isEmpty {
+                messages.append(InstantQuestionMessage(role: .assistant, content: streamingAnswer))
+            }
             let userMessage = InstantQuestionMessage(role: .user, content: question)
             messages.append(userMessage)
             phase = .answering
             let requestMessages = messages
             let requestAttachment = imageAttachment
+            let requestWebSearch = webSearchEnabled
             let requestID = UUID()
             activeRequestID = requestID
             streamingAnswer = ""
@@ -94,6 +115,10 @@ final class InstantQuestionController: ObservableObject {
                         messages: requestMessages,
                         attachment: requestAttachment,
                         credentials: currentCredentials,
+                        webSearchEnabled: requestWebSearch,
+                        onSearch: { [weak self] in
+                            await self?.receiveSearchStarted(requestID: requestID)
+                        },
                         onChunk: { [weak self] chunk in
                             guard let self else { return }
                             await self.receiveStreamChunk(chunk, requestID: requestID)
@@ -107,7 +132,8 @@ final class InstantQuestionController: ObservableObject {
                         InstantQuestionMessage(
                             role: .assistant,
                             content: reply.answer,
-                            sourceIDs: merged.currentIDs
+                            sourceIDs: merged.currentIDs,
+                            webSearchUsed: reply.webSearchUsed
                         )
                     )
                     // Images belong only to the completed round. Preserve any
@@ -162,6 +188,16 @@ final class InstantQuestionController: ObservableObject {
         guard let latestAnswer else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(latestAnswer, forType: .string)
+    }
+
+    func stopAnswer() {
+        guard let requestID = activeRequestID else { return }
+        requestTask?.cancel()
+        requestTask = nil
+        flushStreamText(for: requestID)
+        activeRequestID = nil
+        phase = .failed
+        errorMessage = "已停止回答，已收到的内容已保留。"
     }
 
     func validateConnection() {
@@ -236,17 +272,31 @@ final class InstantQuestionController: ObservableObject {
         imageAttachment = nil
     }
 
+    func useImageQuestionMode() {
+        guard !isBusy else { return }
+        webSearchEnabled = false
+        errorMessage = nil
+    }
+
     func report(_ error: Error) {
         phase = .failed
         errorMessage = error.localizedDescription
     }
 
+    private func receiveSearchStarted(requestID: UUID) {
+        guard activeRequestID == requestID, isBusy else { return }
+        phase = .searching
+    }
+
     private func receiveStreamChunk(_ chunk: String, requestID: UUID) {
-        guard activeRequestID == requestID, phase == .answering else { return }
+        guard activeRequestID == requestID, isBusy else { return }
+        if phase != .answering { phase = .answering }
         pendingStreamText += chunk
         guard streamFlushTask == nil else { return }
         streamFlushTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(60))
+            let delay = (self?.streamingAnswer.utf8.count ?? 0) > 16_000 ? 250 : 80
+            do { try await Task.sleep(for: .milliseconds(delay)) }
+            catch { return }
             self?.flushStreamText(for: requestID)
         }
     }

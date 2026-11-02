@@ -6,6 +6,11 @@ enum InstantQuestionServiceFailure: LocalizedError, Equatable {
     case rejected(service: String, statusCode: Int)
     case invalidResponse(service: String)
     case emptyAnswer
+    case outputLimit
+    case interruptedResponse
+    case webSearchWithImage
+    case webSearchFailed
+    case webSearchNoAnswer
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +30,16 @@ enum InstantQuestionServiceFailure: LocalizedError, Equatable {
             return "\(service) 返回了无法识别的结果。"
         case .emptyAnswer:
             return "DeepSeek 没有返回可显示的答案，请重试。"
+        case .outputLimit:
+            return "回答已达到本轮长度上限，已收到的内容已保留。可以继续提问“请接着回答”。"
+        case .interruptedResponse:
+            return "回答传输中断，已收到的内容已保留，请稍后重试。"
+        case .webSearchWithImage:
+            return "联网模式暂不支持图片。请切换到图片问答后发送，图片和文字会保留。"
+        case .webSearchFailed:
+            return "本轮未完成网页搜索，无法确认实时信息。已收到的内容已保留，请重试。"
+        case .webSearchNoAnswer:
+            return "网页检索已完成，但 DeepSeek 未生成答案正文。请重试，或换一种问法。"
         }
     }
 }
@@ -35,8 +50,17 @@ protocol InstantQuestionTransport {
 }
 
 struct URLSessionInstantQuestionTransport: InstantQuestionTransport {
+    // An idle timeout is distinct from the overall response lifetime. Long
+    // streams keep running while data arrives, without using a disk cache.
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 120
+        configuration.timeoutIntervalForResource = 900
+        return URLSession(configuration: configuration)
+    }()
+
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await Self.session.data(for: request)
         guard let response = response as? HTTPURLResponse else {
             throw InstantQuestionServiceFailure.network
         }
@@ -44,7 +68,7 @@ struct URLSessionInstantQuestionTransport: InstantQuestionTransport {
     }
 
     func lines(for request: URLRequest) async throws -> (AsyncThrowingStream<String, Error>, HTTPURLResponse) {
-        let (bytes, rawResponse) = try await URLSession.shared.bytes(for: request)
+        let (bytes, rawResponse) = try await Self.session.bytes(for: request)
         guard let response = rawResponse as? HTTPURLResponse else {
             throw InstantQuestionServiceFailure.network
         }
@@ -97,6 +121,15 @@ struct URLSessionInstantQuestionTransport: InstantQuestionTransport {
 }
 
 protocol InstantQuestionAnswering {
+    func streamAnswer(
+        messages: [InstantQuestionMessage],
+        attachment: InstantQuestionImageAttachment?,
+        credentials: InstantQuestionCredentials,
+        webSearchEnabled: Bool,
+        onSearch: @escaping @Sendable () async -> Void,
+        onChunk: @escaping @Sendable (String) async -> Void
+    ) async throws -> InstantQuestionReply
+
     func answer(
         messages: [InstantQuestionMessage],
         attachment: InstantQuestionImageAttachment?,
@@ -112,6 +145,19 @@ protocol InstantQuestionAnswering {
 }
 
 extension InstantQuestionAnswering {
+    func streamAnswer(
+        messages: [InstantQuestionMessage], attachment: InstantQuestionImageAttachment?,
+        credentials: InstantQuestionCredentials, webSearchEnabled: Bool,
+        onSearch: @escaping @Sendable () async -> Void,
+        onChunk: @escaping @Sendable (String) async -> Void
+    ) async throws -> InstantQuestionReply {
+        // An implementation that has no native search must not silently handle
+        // a search-enabled request as an ordinary offline answer.
+        guard !webSearchEnabled else { throw InstantQuestionServiceFailure.webSearchFailed }
+        return try await streamAnswer(messages: messages, attachment: attachment,
+                                      credentials: credentials, onChunk: onChunk)
+    }
+
     func streamAnswer(
         messages: [InstantQuestionMessage],
         attachment: InstantQuestionImageAttachment?,
@@ -131,6 +177,21 @@ struct DeepSeekQuestionService: InstantQuestionAnswering {
 
     init(transport: InstantQuestionTransport = URLSessionInstantQuestionTransport()) {
         self.transport = transport
+    }
+
+    func streamAnswer(
+        messages: [InstantQuestionMessage], attachment: InstantQuestionImageAttachment?,
+        credentials: InstantQuestionCredentials, webSearchEnabled: Bool,
+        onSearch: @escaping @Sendable () async -> Void,
+        onChunk: @escaping @Sendable (String) async -> Void
+    ) async throws -> InstantQuestionReply {
+        if webSearchEnabled {
+            guard attachment == nil else { throw InstantQuestionServiceFailure.webSearchWithImage }
+            return try await DeepSeekWebQuestionService(transport: transport).streamAnswer(
+                messages: messages, credentials: credentials, onSearch: onSearch, onChunk: onChunk)
+        }
+        return try await streamAnswer(messages: messages, attachment: attachment,
+                                      credentials: credentials, onChunk: onChunk)
     }
 
     func answer(
@@ -191,7 +252,18 @@ struct DeepSeekQuestionService: InstantQuestionAnswering {
                 }
                 if finished { break }
             }
-            if !finished, case .done? = try parser.finish() { finished = true }
+            if !finished, let event = try parser.finish() {
+                switch event {
+                case .delta(let content):
+                    answerByteCount += content.utf8.count
+                    guard answerByteCount <= 1_000_000 else {
+                        throw InstantQuestionServiceFailure.invalidResponse(service: "DeepSeek")
+                    }
+                    answer += content
+                    await onChunk(content)
+                case .done: finished = true
+                }
+            }
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as InstantQuestionServiceFailure {
@@ -199,7 +271,8 @@ struct DeepSeekQuestionService: InstantQuestionAnswering {
         } catch {
             throw InstantQuestionServiceFailure.network
         }
-        guard finished else { throw InstantQuestionServiceFailure.invalidResponse(service: "DeepSeek") }
+        if parser.finishReason == "length" { throw InstantQuestionServiceFailure.outputLimit }
+        guard finished else { throw InstantQuestionServiceFailure.interruptedResponse }
         let trimmed = answer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw InstantQuestionServiceFailure.emptyAnswer }
         return InstantQuestionReply(answer: trimmed, sources: [])
@@ -221,6 +294,9 @@ struct DeepSeekQuestionService: InstantQuestionAnswering {
         guard let payload = try? decoder.decode(DeepSeekResponse.self, from: data),
               let rawAnswer = payload.choices.first?.message.content else {
             throw InstantQuestionServiceFailure.invalidResponse(service: "DeepSeek")
+        }
+        if payload.choices.first?.finishReason == "length" {
+            throw InstantQuestionServiceFailure.outputLimit
         }
         let answer = rawAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !answer.isEmpty else { throw InstantQuestionServiceFailure.emptyAnswer }
@@ -256,12 +332,12 @@ struct DeepSeekQuestionService: InstantQuestionAnswering {
             model: "deepseek-flash",
             messages: [DeepSeekRequestMessage(role: "system", content: .text(system))] + history,
             thinking: DeepSeekThinking(type: "disabled"),
-            maxTokens: 2_000,
+            maxTokens: 8_192,
             stream: stream
         )
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 45
+        request.timeoutInterval = 120
         request.httpBody = try encoder.encode(payload)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -372,13 +448,16 @@ enum DeepSeekStreamEvent: Equatable {
 struct DeepSeekEventStreamParser {
     private var dataLines: [String] = []
     private let decoder = JSONDecoder()
+    private(set) var finishReason: String?
+    private var eventByteCount = 0
 
     mutating func consume(_ line: String) throws -> DeepSeekStreamEvent? {
         if line.isEmpty { return try finish() }
         if line.hasPrefix("data:") {
             var value = String(line.dropFirst(5))
             if value.first == " " { value.removeFirst() }
-            guard value.utf8.count <= 262_144 else {
+            eventByteCount += value.utf8.count
+            guard eventByteCount <= 262_144 else {
                 throw InstantQuestionServiceFailure.invalidResponse(service: "DeepSeek")
             }
             dataLines.append(value)
@@ -391,10 +470,12 @@ struct DeepSeekEventStreamParser {
         guard !dataLines.isEmpty else { return nil }
         let payload = dataLines.joined(separator: "\n")
         dataLines.removeAll(keepingCapacity: true)
+        eventByteCount = 0
         if payload == "[DONE]" { return .done }
         guard let chunk = try? decoder.decode(DeepSeekStreamChunk.self, from: Data(payload.utf8)) else {
             throw InstantQuestionServiceFailure.invalidResponse(service: "DeepSeek")
         }
+        if let reason = chunk.choices.first?.finishReason { finishReason = reason }
         guard let content = chunk.choices.first?.delta.content, !content.isEmpty else { return nil }
         return .delta(content)
     }
@@ -405,6 +486,11 @@ private struct DeepSeekStreamChunk: Decodable {
 
     struct Choice: Decodable {
         let delta: Delta
+        let finishReason: String?
+        enum CodingKeys: String, CodingKey {
+            case delta
+            case finishReason = "finish_reason"
+        }
     }
 
     struct Delta: Decodable {
@@ -414,4 +500,9 @@ private struct DeepSeekStreamChunk: Decodable {
 
 private struct DeepSeekChoice: Decodable {
     let message: DeepSeekResponseMessage
+    let finishReason: String?
+    enum CodingKeys: String, CodingKey {
+        case message
+        case finishReason = "finish_reason"
+    }
 }

@@ -121,10 +121,7 @@ enum ConfigurableHotkeyAction: String, CaseIterable, Identifiable {
         case .pinnedWindowSwitcher:
             return ConfigurableShortcut(keyCode: 35, modifiers: controlOption)
         case .toggleCurrentWindowPin:
-            return ConfigurableShortcut(
-                keyCode: 35,
-                modifiers: UInt32(controlKey | optionKey | shiftKey)
-            )
+            return ConfigurableShortcut(keyCode: 46, modifiers: controlOption)
         case .pinnedWindowSlot1, .pinnedWindowSlot2, .pinnedWindowSlot3,
              .pinnedWindowSlot4, .pinnedWindowSlot5, .pinnedWindowSlot6,
              .pinnedWindowSlot7, .pinnedWindowSlot8, .pinnedWindowSlot9:
@@ -140,10 +137,7 @@ enum ConfigurableHotkeyAction: String, CaseIterable, Identifiable {
         case .selectedTextTodo:
             return ConfigurableShortcut(keyCode: 17, modifiers: controlOption)
         case .askAI:
-            return ConfigurableShortcut(
-                keyCode: 2,
-                modifiers: UInt32(controlKey | optionKey | shiftKey)
-            )
+            return ConfigurableShortcut(keyCode: 2, modifiers: controlOption)
         case .webSearch:
             return ConfigurableShortcut(keyCode: 11, modifiers: controlOption)
         case .googleSearch:

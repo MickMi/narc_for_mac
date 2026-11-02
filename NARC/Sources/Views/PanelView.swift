@@ -37,6 +37,8 @@ struct PanelView: View {
     var onEditShortcut: (ConfigurableHotkeyAction) -> Void = { _ in }
     var onOpenAssistant: () -> Void = {}
     var onOpenInstantQuestion: () -> Void = {}
+    var onOpenHelp: () -> Void = {}
+    var onOpenFeatureHelp: (HelpTopic) -> Void = { _ in }
     var onOpenCodexReply: (CodexCompletionEvent, @escaping (Bool) -> Void) -> Void = { _, completion in
         completion(false)
     }
@@ -44,6 +46,7 @@ struct PanelView: View {
     var narcScreenProvider: () -> NSScreen?
     /// Keyboard selection state for ↑↓ navigation.
     @ObservedObject var keyboardSelection: KeyboardSelectionState
+    var onboardingDefaults: UserDefaults = .standard
 
     @StateObject private var codexReplyLayout = CodexCompletionCardLayout()
 
@@ -57,6 +60,12 @@ struct PanelView: View {
             // Tab bar
             tabBar
 
+            if let topic = firstUseTopic {
+                FeatureIntroductionCard(topic: topic, defaults: onboardingDefaults, onOpenHelp: onOpenFeatureHelp)
+                    .id(topic)
+                    .padding(.horizontal, NarcSpacing.xl)
+            }
+
             // Content
             Group {
                 switch selectedTab {
@@ -66,7 +75,8 @@ struct PanelView: View {
                         captureState: inboxCaptureState,
                         compact: true,
                         onDismiss: onClose,
-                        onOpenAssistant: onOpenAssistant
+                        onOpenAssistant: onOpenAssistant,
+                        onboardingDefaults: onboardingDefaults
                     )
                 case .codexReplies:
                     if codexCompletionService.pendingEvents.isEmpty {
@@ -105,7 +115,7 @@ struct PanelView: View {
             .frame(maxHeight: .infinity)
 
             // Footer
-            footerBar
+            if selectedTab != .inbox { footerBar }
         }
         .frame(width: NarcSize.panelWidth, height: NarcSize.panelHeight)
         .background(Color.narcFocusSurface)
@@ -120,6 +130,15 @@ struct PanelView: View {
 
     // MARK: - Title Bar
 
+    private var firstUseTopic: HelpTopic? {
+        switch selectedTab {
+        case .inbox: return nil // Todo retains its successful-first-capture milestone.
+        case .codexReplies: return .replies
+        case .notifications: return .messages
+        case .windows: return .windows
+        }
+    }
+
     private var titleBar: some View {
         HStack(spacing: NarcSpacing.xs) {
             Text("NARC")
@@ -129,43 +148,24 @@ struct PanelView: View {
 
             Spacer()
 
-            Button {
-                panelSelection.selectedTab = .inbox
-            } label: {
-                Image(systemName: "square.and.pencil")
-                    .font(.narcBody)
-                    .foregroundColor(.narcTextMuted)
-                    .frame(width: 26, height: 26)
-            }
-            .buttonStyle(.plain)
-            .help(hotkeyService.activeShortcut(for: .quickCapture).map { "记 Todo（\($0.displayLabel)）" } ?? "记 Todo")
-
             Button(action: onOpenInstantQuestion) {
-                Image(systemName: "sparkles")
+                Label("问 AI", systemImage: "sparkles")
                     .font(.narcBody)
-                    .foregroundColor(.narcTextMuted)
-                    .frame(width: 26, height: 26)
+                    .lineLimit(1).fixedSize(horizontal: true, vertical: false)
             }
             .buttonStyle(.plain)
-            .help("AI / 网页搜索")
+            .foregroundColor(.narcAccent)
+            .help("问 AI，也可以切换 Bing / Google 搜索")
 
-            Button(action: onOpenAssistant) {
-                Image(systemName: "list.bullet.rectangle")
-                    .font(.narcBody)
-                    .foregroundColor(.narcTextMuted)
-                    .frame(width: 26, height: 26)
+            Menu {
+                Button("帮助与指南", systemImage: "questionmark.circle", action: onOpenHelp)
+                Button("设置…", systemImage: "gearshape", action: onOpenPreferences)
+            } label: {
+                Text("更多").font(.narcBody).lineLimit(1)
             }
-            .buttonStyle(.plain)
-            .help("打开 Assistant")
-
-            Button(action: onOpenPreferences) {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.narcBody)
-                    .foregroundColor(.narcTextMuted)
-                    .frame(width: 26, height: 26)
-            }
-            .buttonStyle(.plain)
-            .help("偏好设置")
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("设置与功能说明")
 
             Button(action: onClose) {
                 Image(systemName: "xmark")
@@ -227,27 +227,7 @@ struct PanelView: View {
 
     private var footerBar: some View {
         HStack(spacing: NarcSpacing.xs) {
-            if selectedTab == .inbox {
-                Text("↵")
-                    .font(.narcMonoTiny)
-                    .padding(.horizontal, NarcSpacing.xs)
-                    .padding(.vertical, NarcSpacing.xxs)
-                    .background(Color.narcSurfaceMuted)
-                    .cornerRadius(NarcRadius.xs / 2)
-                Text("记录")
-                    .font(.narcMonoTiny)
-                    .foregroundColor(.narcTextMuted)
-
-                Text("⌘↵")
-                    .font(.narcMonoTiny)
-                    .padding(.horizontal, NarcSpacing.xs)
-                    .padding(.vertical, NarcSpacing.xxs)
-                    .background(Color.narcSurfaceMuted)
-                    .cornerRadius(NarcRadius.xs / 2)
-                Text("Todo")
-                    .font(.narcMonoTiny)
-                    .foregroundColor(.narcTextMuted)
-            } else if selectedTab == .notifications {
+            if selectedTab == .notifications {
                 Group {
                     Text("↑↓")
                         .font(.narcMonoTiny)

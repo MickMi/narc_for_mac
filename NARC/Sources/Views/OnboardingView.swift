@@ -38,6 +38,18 @@ enum OnboardingPresentationPolicy {
     static let stageKey = "narc.onboarding.stage"
     static let legacyCompletionKey = "narc.onboarding.completed.v2"
 
+    static func featureHintKey(_ topic: HelpTopic) -> String {
+        "narc.onboarding.feature.\(topic.rawValue).dismissed"
+    }
+
+    static func shouldShowFeatureHint(_ topic: HelpTopic, defaults: UserDefaults = .standard) -> Bool {
+        !defaults.bool(forKey: featureHintKey(topic))
+    }
+
+    static func dismissFeatureHint(_ topic: HelpTopic, defaults: UserDefaults = .standard) {
+        defaults.set(true, forKey: featureHintKey(topic))
+    }
+
     static func resolvedState(
         storedVersion: Int?,
         storedStageRawValue: Int?,
@@ -270,5 +282,41 @@ private struct OnboardingActionRow: View {
         .background(Color.narcSurfaceMuted.opacity(0.5))
         .clipShape(RoundedRectangle(cornerRadius: NarcRadius.md, style: .continuous))
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// One optional, contextual hint. Reference help remains available after dismissal.
+struct FeatureIntroductionCard: View {
+    let topic: HelpTopic
+    let onOpenHelp: (HelpTopic) -> Void
+    @AppStorage private var dismissed: Bool
+
+    init(topic: HelpTopic, defaults: UserDefaults = .standard, onOpenHelp: @escaping (HelpTopic) -> Void) {
+        self.topic = topic
+        self.onOpenHelp = onOpenHelp
+        _dismissed = AppStorage(wrappedValue: false, OnboardingPresentationPolicy.featureHintKey(topic), store: defaults)
+    }
+
+    var body: some View {
+        if !dismissed {
+            VStack(alignment: .leading, spacing: NarcSpacing.xs) {
+                Text(topic.firstUseHint)
+                    .font(.narcCaption).foregroundStyle(Color.narcTextMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("查看用法") { onOpenHelp(topic) }
+                        .foregroundStyle(Color.narcAccent)
+                    Spacer()
+                    Button("知道了") { dismissed = true }
+                        .foregroundStyle(Color.narcTextMuted)
+                }
+                .font(.narcCaption).buttonStyle(.plain)
+            }
+            .padding(NarcSpacing.sm)
+            .background(Color.narcAccent.opacity(0.045))
+            .clipShape(RoundedRectangle(cornerRadius: NarcRadius.sm))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("\(topic.title)首次提示")
+        }
     }
 }

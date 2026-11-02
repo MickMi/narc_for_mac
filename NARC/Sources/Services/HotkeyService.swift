@@ -184,7 +184,7 @@ class HotkeyService: ObservableObject {
     /// Callback invoked when the pinned-window switcher hotkey (⌃⌥P) is pressed.
     var onPinnedWindowSwitcherHotkeyPressed: (() -> Void)?
 
-    /// Callback invoked when the current-window Pin toggle (⌃⌥⇧P) is pressed.
+    /// Callback invoked when the current-window Pin toggle (⌃⌥M) is pressed.
     var onToggleCurrentWindowPinHotkeyPressed: (() -> Void)?
 
     /// Zero-based Pin position, resolved against the latest Pin order at press time.
@@ -198,7 +198,7 @@ class HotkeyService: ObservableObject {
     /// Callback invoked when the Quick Capture hotkey (⌃⌥Q) is pressed.
     var onQuickCaptureHotkeyPressed: (() -> Void)?
 
-    /// Callback invoked when the Ask AI hotkey (⌃⌥⇧D) is pressed.
+    /// Callback invoked when the Ask AI hotkey (⌃⌥D) is pressed.
     var onAskAIHotkeyPressed: (() -> Void)?
 
     /// Callback invoked when the Bing Search hotkey (⌃⌥B) is pressed.
@@ -323,7 +323,7 @@ class HotkeyService: ObservableObject {
         keyCode: ConfigurableHotkeyAction.toggleCurrentWindowPin.defaultShortcut.keyCode,
         modifiers: ConfigurableHotkeyAction.toggleCurrentWindowPin.defaultShortcut.modifiers,
         id: toggleCurrentWindowPinHotkeyID,
-        label: "Toggle Current Window Pin ⌃⌥⇧P"
+        label: "Toggle Current Window Pin ⌃⌥M"
     )
 
     // MARK: - Accessibility Permission
@@ -1090,20 +1090,20 @@ class HotkeyService: ObservableObject {
             ?? legacySelectedTextShortcut.configurableShortcut
 
         var restored: [ConfigurableHotkeyAction: ConfigurableShortcut] = [:]
+        let previousShiftDefaults: [ConfigurableHotkeyAction: ConfigurableShortcut] = [
+            .askAI: ConfigurableShortcut(keyCode: 2, modifiers: UInt32(controlKey | optionKey | shiftKey)),
+            .toggleCurrentWindowPin: ConfigurableShortcut(keyCode: 35, modifiers: UInt32(controlKey | optionKey | shiftKey)),
+        ]
         for action in ConfigurableHotkeyAction.allCases {
             let decoded = defaults.data(forKey: action.defaultsKey).flatMap {
                 try? JSONDecoder().decode(ConfigurableShortcut.self, from: $0)
             }
             let candidate: ConfigurableShortcut
             if let decoded, decoded.isValid {
-                let previousAskAIDefault = ConfigurableShortcut(
-                    keyCode: 2,
-                    modifiers: UInt32(controlKey | optionKey)
-                )
                 // Initial registration persisted defaults as if they were user
-                // choices. Migrate only that exact old default; every other
+                // choices. Migrate only the exact retired Shift defaults; other
                 // custom combination remains unchanged.
-                if action == .askAI, decoded == previousAskAIDefault {
+                if let previous = previousShiftDefaults[action], decoded == previous {
                     candidate = action.defaultShortcut
                 } else {
                     candidate = decoded

@@ -20,7 +20,7 @@ let package = Package(
             ],
             path: "NARC/Sources",
             resources: [
-                .process("../Resources")
+                .process("Resources")
             ]
         ),
         .testTarget(

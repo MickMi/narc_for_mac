@@ -11,7 +11,7 @@ It has no Dock icon by default. Click the menu-bar or floating **N** for the pan
 | What you need | What NARC does |
 |---|---|
 | Remember something | Summon capture and press Return to create a Todo |
-| Ask a question or explain a screenshot | Ask DeepSeek, with follow-ups, streaming answers, and Markdown |
+| Ask about current information or explain a screenshot | DeepSeek web Q&A by default; switch web search off for images, with follow-ups, streaming, and Markdown |
 | Find current information | Search embedded Bing / Google; open results in your default browser |
 | Stop watching an AI task | Get a Codex reply reminder and return to the conversation |
 | Find a window among many | Mark it and recall it by number; arrange windows with shortcuts |
@@ -34,10 +34,10 @@ Skip this step if the tools are installed.
 
 ### 2. Download and install
 
-Paste this line into Terminal:
+This installs the v2 preview described here. Paste it into Terminal:
 
 ```bash
-git clone https://github.com/MickMi/narc_for_mac.git && cd narc_for_mac && bash scripts/install.sh
+git clone --branch feat/ai-search-preview --single-branch https://github.com/MickMi/narc_for_mac.git && cd narc_for_mac && bash scripts/install.sh
 ```
 
 The script builds on your Mac, prepares a local signing identity, installs to `~/Applications/NARC.app`, and launches NARC. You can close Terminal afterward.
@@ -49,7 +49,8 @@ NARC is source-only: no DMG, PKG, or prebuilt App download. A new installation c
 ### 3. Find NARC
 
 - Click the menu-bar or floating desktop **N** to open the panel. You can drag the widget.
-- Right-click **N** for Preferences or the User Guide.
+- Right-click **N**, or use **More (更多)** in the panel, to open **Help & Guides (帮助与指南)**. Each feature has steps and direct links to its tools or setup. Settings are also in More.
+- Features introduce themselves when first opened. View instructions opens the matching chapter; Got it remembers dismissal for that feature. You do not have to complete every guide at once.
 - Cannot find it? Search for **NARC** in Spotlight, or run `open ~/Applications/NARC.app`. No Dock icon is expected.
 
 ## Get started
@@ -61,12 +62,12 @@ These are defaults. Edit them under **Preferences → Shortcuts (快捷键)**. E
 | Shortcut | Action |
 |---|---|
 | `⌃⌥Q` | Capture a Todo |
-| `⌃⌥⇧D` | Ask AI |
+| `⌃⌥D` | Ask AI |
 | `⌃⌥B` | Bing search |
 | `⌃⌥G` | Google search |
 | `⌃⌥N` | Summon the widget and panel to the display under your pointer |
 | `⌃⌥T` | Create a Todo from text selected in another app |
-| `⌃⌥⇧P` | Mark / unmark the current window |
+| `⌃⌥M` | Mark / unmark the current window |
 | `⌃⌥P` | Open the marked-window switcher |
 | `⌃⌥1–9` | Recall marked windows 1–9 directly |
 
@@ -80,25 +81,28 @@ Set daily review times under **Preferences → Reminders (提醒)**. NARC must r
 
 ### Ask AI or search the web: one window, three separate modes
 
-Press `⌃⌥⇧D`, or click the sparkle button at the top of the floating panel, to open **NARC Search**. Switch between DeepSeek, Bing, and Google without going through Assistant.
+Press `⌃⌥D`, or click **Ask AI (问 AI)** at the top of the floating panel, to open **NARC Search**. Switch between DeepSeek, Bing, and Google without going through Assistant.
 
 **Set up AI first:**
 
 1. Open **Preferences → Instant Questions (即时问答)**, enter your own DeepSeek API Key, and save it.
 2. If the status says the key has not been authorized for reading, click **Authorize Key Reading (授权读取密钥)**. macOS presents a Keychain prompt only when needed. Authorization sends no AI request.
-3. Once the key is ready, ask a question or use **Verify Connection (验证连接)**. Verification sends a real request and may consume your DeepSeek quota.
+3. Once the key is ready, ask a question or use **Verify Connection (验证连接)**. Verification sends one basic Flash request and may consume quota; test web search by asking a question in the Q&A window.
 
-AI requests use your DeepSeek account and are billed by the provider. The current source requests `deepseek-flash`; availability of text and image requests also depends on the provider and your account.
+AI requests use your DeepSeek account and are billed by the provider. With web search enabled, NARC uses `deepseek-v4-pro` and native `web_search`, with model and search charges. With it disabled, NARC uses `deepseek-flash` for text and images. Both use the same Key; no separate search Key is needed.
 
 **In everyday use:**
 
 - Summon AI and type immediately. Press `⌘Return` or click Send. Answers appear incrementally, render Markdown, and support follow-up questions.
+- Click **Stop (停止)** during a long answer to keep the text received so far. If an answer reaches its per-round limit, ask it to continue.
+- The **Web Search (联网)** switch starts on, is shared with Preferences, and remembers your choice. Enabled requests require native search. **Searched the Web (已搜索网页)** appears only after the server confirms search completion; returned source links are displayed and saved. Search failures preserve partial text and never silently fall back to ordinary Q&A.
 - Paste clipboard images with `⌘V` in the input, or use the paperclip inside it to choose a file. Click a thumbnail to enlarge it; Esc or Done returns to the composer.
+- Pro currently does not support images. Choose **Switch to Image Q&A (切换到图片问答)** to explicitly turn web search off and use Flash; your draft and attachment remain. You can turn web search back on afterward.
 - An image belongs to one round only: successful completion removes it; failure preserves it for retry. Later text questions retain conversation context but do not resend that image. Add it again to analyze it again.
 - **Save This Conversation (保存本次对话)** saves all text turns. **Copy This Answer (复制本轮回答)** copies only the latest AI answer. Images are not saved with the conversation.
 - **Clear Current (清空当前)** clears the current session, not saved records. Closing the search window also clears unsaved questions and answers. Save explicitly before closing if you need them.
 
-**AI Q&A is not web-enabled search.** NARC currently does not connect DeepSeek to web retrieval. For current news, web pages, or sources, switch to Bing / Google or press `⌃⌥B` / `⌃⌥G`. Search pages are embedded; result links open in the system default browser. Refresh reloads the current page. No search API Key is required, and search results are not automatically sent to DeepSeek.
+**Bing / Google remain independent.** Switch tabs or press `⌃⌥B` / `⌃⌥G` to browse directly. Search pages are embedded; result links open in the system default browser. Refresh reloads the current page. These two search modes use no search API and do not automatically send results to DeepSeek.
 
 ### AI reply reminders: work elsewhere while you wait
 
@@ -110,18 +114,26 @@ These are **Codex task reminders**, not ordinary GPT chat notifications or DeepS
 
 ### Windows and unread activity: less searching, less switching
 
-Focus a window and press `⌃⌥⇧P` to mark it. Recall it with `⌃⌥1–9`, or open `⌃⌥P` and select using a number, arrow keys + Return, or the mouse. Esc cancels.
+Focus a window and press `⌃⌥M` to mark it. Recall it with `⌃⌥1–9`, or open `⌃⌥P` and select using a number, arrow keys + Return, or the mouse. Esc cancels.
 
-Numbers follow the marked-window list and change when you reorder it. Up to 10 windows can be marked; the tenth is available through the switcher. A mark identifies a specific window, not an entire app. Closed windows may need re-marking, and cross-Space recovery depends on macOS and the target app.
+Use the up/down arrows to reorder windows and their numbers. Click the pin to keep a mark across restarts; temporary marks clear when NARC quits. Focus the original window and press `⌃⌥M` again to remove its mark. Up to 10 windows can be marked; the tenth is available through the switcher. A mark identifies a specific window, not an entire app. Closed windows may need re-marking, and cross-Space recovery depends on macOS and the target app.
 
 Layout defaults are `⌃⌥←/→/↑/↓` for left/right/top/bottom halves, `⌃⌥U/I/J/K` for corners, `⌃⌥Return` to fill the screen, and `⌃⌥C` to center. Repeating a directional layout can attempt a move to an adjacent display. Enable, disable, or edit layout bindings in the panel's Windows tab.
 
 The Messages tab also shows unread badges that apps such as WeChat, WeCom, and Lark expose to macOS. This does not read chat messages or identify an individual conversation. Counts depend on the source app; unknown state is shown as `?`.
 
+## Find instructions whenever you need them
+
+Open **Panel → More → Help & Guides**, or right-click **N**. There are eight independent chapters: Todos, Ask AI, Web Search, Mark & Recall, Window Layouts, Codex Replies, App Unread Counts, and Shortcuts.
+
+Follow each step alongside an image of the real interface; click images to enlarge them. Mark & Recall teaches marking first, then recalling, with direct recall and persistence details available to expand. Shortcut labels follow your active settings, and action buttons open the corresponding tool.
+
+![NARC guide: mark a window, then recall it](docs/images/help-windows.png)
+
 ## Permissions and data
 
 - **Accessibility:** Required for selected-text Todo and window marking, recall, and arrangement. Follow the prompt to **System Settings → Privacy & Security → Accessibility**, enable NARC, then retry in the target app. Manual Todo, AI Q&A, and web search do not need this permission.
-- **API Key:** Persisted in macOS Keychain, then cached in the current process after explicit reading. After restarting, authorize from Preferences if the key is not ready. macOS decides whether a password prompt is necessary. Always Allow is not a guarantee of prompt-free updates: Keychain or signing-identity changes may require authorization again.
+- **API Key:** Persisted in macOS Keychain, then cached only in the current process. Saving or explicitly authorizing records consent to automatic reading. Later AI opens attempt one noninteractive read; first use, upgrades without recorded consent, or invalidated trust require explicit authorization in Preferences. macOS decides whether a password prompt is necessary. Always Allow is not a guarantee of prompt-free updates: Keychain or signing-identity changes may require authorization again.
 - **Local records:** Todos and existing Notes are in `~/Library/Application Support/NARC/assistant-v1.json`. Explicitly saved conversations are in `instant-questions-v1.json` in the same directory. There is no cloud sync.
 - **External requests:** Sending an AI question sends the question, recent text context, and this round's image to DeepSeek. Web queries go to the chosen search engine. Not saving locally does not imply the provider keeps no records; its policies govern external data handling.
 - **Reply reminders:** Locally process conversation identifiers, titles, state, and limited round-summary / next-step / blocker excerpts extracted from existing replies, not full conversation bodies. Existing notification programs may still receive original events. Disabling or muting reminders stops display, not necessarily event reception.
@@ -154,7 +166,7 @@ Run these from the repository root. They are not additional installation steps f
 
 ```bash
 swift build
-swift test --disable-sandbox
+swift test --no-parallel --disable-sandbox
 bash scripts/verify-source-only-distribution.sh
 ```
 

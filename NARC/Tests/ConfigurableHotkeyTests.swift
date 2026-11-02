@@ -64,11 +64,11 @@ func configurableHotkeyActionsKeepStableDefaultsAndStorageKeys() {
         .googleSearch,
     ])
     #expect(ConfigurableHotkeyAction.pinnedWindowSwitcher.defaultShortcut.displayLabel == "⌃⌥P")
-    #expect(ConfigurableHotkeyAction.toggleCurrentWindowPin.defaultShortcut.displayLabel == "⌃⌥⇧P")
+    #expect(ConfigurableHotkeyAction.toggleCurrentWindowPin.defaultShortcut.displayLabel == "⌃⌥M")
     #expect(ConfigurableHotkeyAction.pinnedWindowSlotActions.map(\.defaultShortcut.displayLabel) == [
         "⌃⌥1", "⌃⌥2", "⌃⌥3", "⌃⌥4", "⌃⌥5", "⌃⌥6", "⌃⌥7", "⌃⌥8", "⌃⌥9",
     ])
-    #expect(ConfigurableHotkeyAction.askAI.defaultShortcut.displayLabel == "⌃⌥⇧D")
+    #expect(ConfigurableHotkeyAction.askAI.defaultShortcut.displayLabel == "⌃⌥D")
     #expect(ConfigurableHotkeyAction.webSearch.defaultShortcut.displayLabel == "⌃⌥B")
     #expect(ConfigurableHotkeyAction.googleSearch.defaultShortcut.displayLabel == "⌃⌥G")
     #expect(
@@ -125,7 +125,11 @@ func newSearchDefaultDoesNotDisplaceAnOlderSavedShortcut() {
         service.activeShortcut(for: .selectedTextTodo)
             == SelectedTextTodoShortcut.controlOptionD.configurableShortcut
     )
-    #expect(service.activeShortcut(for: .askAI) == ConfigurableHotkeyAction.askAI.defaultShortcut)
+    #expect(service.activeShortcut(for: .askAI) == nil)
+    #expect(service.hotkeyState(for: .askAI) == .unavailable(
+        requested: ConfigurableHotkeyAction.askAI.defaultShortcut,
+        reason: .conflictsWithNARC("划词创建 Todo")))
+    #expect(defaults.data(forKey: ConfigurableHotkeyAction.askAI.defaultsKey) == nil)
 }
 
 @Test @MainActor
@@ -170,7 +174,7 @@ func googleSearchCustomizationPersistsAndUsesReplacementSlot() async throws {
 func oldAskAIDefaultMigratesWithoutRewritingCustomShortcuts() throws {
     let (defaults, suiteName) = isolatedConfigurableHotkeyDefaults()
     defer { defaults.removePersistentDomain(forName: suiteName) }
-    let oldDefault = ConfigurableShortcut(keyCode: 2, modifiers: UInt32(controlKey | optionKey))
+    let oldDefault = ConfigurableShortcut(keyCode: 2, modifiers: UInt32(controlKey | optionKey | shiftKey))
     defaults.set(try JSONEncoder().encode(oldDefault), forKey: ConfigurableHotkeyAction.askAI.defaultsKey)
     let registrar = RecordingConfigurableHotkeyRegistrar(defaults: defaults)
     let service = makeConfigurableHotkeyService(defaults: defaults, registrar: registrar)
@@ -187,6 +191,32 @@ func oldAskAIDefaultMigratesWithoutRewritingCustomShortcuts() throws {
     defaults.set(try JSONEncoder().encode(custom), forKey: ConfigurableHotkeyAction.askAI.defaultsKey)
     let restored = makeConfigurableHotkeyService(defaults: defaults, registrar: registrar)
     #expect(restored.shortcut(for: .askAI) == custom)
+}
+
+@Test func everyDefaultUsesControlOptionWithoutDuplicateChords() {
+    let defaults = ConfigurableHotkeyAction.allCases.map(\.defaultShortcut)
+    #expect(defaults.allSatisfy { $0.modifiers == UInt32(controlKey | optionKey) })
+    let chords = defaults.map { "\($0.modifiers):\($0.keyCode)" }
+    #expect(Set(chords).count == chords.count)
+}
+
+@Test @MainActor func retiredShiftPinDefaultMigratesButCustomBindingsRemain() throws {
+    let (defaults, suiteName) = isolatedConfigurableHotkeyDefaults()
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let action = ConfigurableHotkeyAction.toggleCurrentWindowPin
+    let retired = ConfigurableShortcut(keyCode: 35, modifiers: UInt32(controlKey | optionKey | shiftKey))
+    defaults.set(try JSONEncoder().encode(retired), forKey: action.defaultsKey)
+    let registrar = RecordingConfigurableHotkeyRegistrar(defaults: defaults)
+    let service = makeConfigurableHotkeyService(defaults: defaults, registrar: registrar)
+    #expect(service.shortcut(for: action) == action.defaultShortcut)
+    service.registerConfiguredHotkeys(noAX: false)
+    #expect(service.activeShortcut(for: action) == action.defaultShortcut)
+    let stored = try #require(defaults.data(forKey: action.defaultsKey))
+    #expect(try JSONDecoder().decode(ConfigurableShortcut.self, from: stored) == action.defaultShortcut)
+    let custom = ConfigurableShortcut(keyCode: 0, modifiers: UInt32(controlKey | cmdKey))
+    defaults.set(try JSONEncoder().encode(custom), forKey: action.defaultsKey)
+    let restored = makeConfigurableHotkeyService(defaults: defaults, registrar: registrar)
+    #expect(restored.shortcut(for: action) == custom)
 }
 
 @Test

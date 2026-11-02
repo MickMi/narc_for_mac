@@ -32,6 +32,8 @@ struct InstantQuestionView: View {
     @ObservedObject var store: InstantQuestionStore
     @ObservedObject private var credentials: InstantQuestionCredentialManager
     let onOpenPreferences: () -> Void
+    let onOpenHelp: (HelpTopic) -> Void
+    let onboardingDefaults: UserDefaults
 
     @StateObject private var modeSelection: InstantQuestionModeSelection
     @State private var expandedRecordID: UUID?
@@ -49,9 +51,13 @@ struct InstantQuestionView: View {
         store: InstantQuestionStore,
         onOpenPreferences: @escaping () -> Void,
         initialMode: Mode = .ask,
-        modeSelection: InstantQuestionModeSelection? = nil
+        modeSelection: InstantQuestionModeSelection? = nil,
+        onboardingDefaults: UserDefaults = .standard,
+        onOpenHelp: @escaping (HelpTopic) -> Void = { _ in }
     ) {
         self.controller = controller
+        self.onOpenHelp = onOpenHelp
+        self.onboardingDefaults = onboardingDefaults
         self.store = store
         self.onOpenPreferences = onOpenPreferences
         _credentials = ObservedObject(wrappedValue: controller.credentials)
@@ -100,6 +106,12 @@ struct InstantQuestionView: View {
             }
             .padding(.top, NarcSpacing.lg)
 
+            if mode != .ask || controller.messages.isEmpty {
+                FeatureIntroductionCard(topic: mode == .ask ? .ai : .web,
+                                        defaults: onboardingDefaults, onOpenHelp: onOpenHelp)
+                    .id(mode == .ask ? HelpTopic.ai : .web)
+            }
+
             if mode == .ask {
                 askView
             } else if mode == .bing {
@@ -115,6 +127,9 @@ struct InstantQuestionView: View {
         .padding(.horizontal, NarcSpacing.xl)
         .padding(.bottom, NarcSpacing.xl)
         .background(Color.narcBackground)
+        .task(id: mode) {
+            if mode == .ask { await credentials.restoreAccessIfConsented() }
+        }
         .onChange(of: modeSelection.mode) { _, mode in
             if mode == .ask { modeSelection.requestInputFocus() }
         }
@@ -158,7 +173,10 @@ struct InstantQuestionView: View {
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: NarcSpacing.md) {
+                    // A streaming row can be much taller than the viewport.
+                    // Eager measurement avoids LazyVStack's estimate/prefetch
+                    // feedback while that row grows and the tail is revealed.
+                    VStack(alignment: .leading, spacing: NarcSpacing.md) {
                         if controller.messages.isEmpty {
                             emptyState
                         } else {
@@ -166,6 +184,10 @@ struct InstantQuestionView: View {
                                 VStack(alignment: .leading, spacing: NarcSpacing.sm) {
                                     messageBubble(message)
                                     if message.role == .assistant {
+                                        if message.webSearchUsed == true {
+                                            Label("已搜索网页", systemImage: "globe")
+                                                .font(.narcCaption).foregroundStyle(Color.narcTextMuted)
+                                        }
                                         let messageSources = sources(
                                             with: message.sourceIDs,
                                             from: controller.sources
@@ -177,29 +199,29 @@ struct InstantQuestionView: View {
                             }
                             if !controller.streamingAnswer.isEmpty {
                                 messageBubble(content: controller.streamingAnswer, role: .assistant)
-                                    .id("streaming-answer")
                             }
                             if controller.isBusy {
                                 progressRow
                             }
-                            if let error = controller.errorMessage {
-                                errorCard(error)
-                            }
                         }
+                        // Scroll to a fixed-size target, never to a growing
+                        // Markdown bubble whose bounds are still being measured.
+                        Color.clear.frame(height: 1).id("conversation-end")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, NarcSpacing.sm)
                 }
                 .onChange(of: controller.messages.count) { _, _ in
-                    if let last = controller.messages.last {
-                        withAnimation(.narcSnap) { proxy.scrollTo(last.id, anchor: .bottom) }
-                    }
+                    proxy.scrollTo("conversation-end", anchor: .bottom)
                 }
                 .onChange(of: controller.streamingAnswer) { _, answer in
-                    if !answer.isEmpty { proxy.scrollTo("streaming-answer", anchor: .bottom) }
+                    if !answer.isEmpty { proxy.scrollTo("conversation-end", anchor: .bottom) }
                 }
             }
 
+            if let error = controller.errorMessage {
+                errorCard(error)
+            }
             if controller.canSave {
                 answerActions
             }
@@ -234,7 +256,7 @@ struct InstantQuestionView: View {
             Label("直接问，也可以添加截图", systemImage: "sparkles")
                 .font(.narcSubtitle)
                 .foregroundStyle(Color.narcText)
-            Text("DeepSeek 负责文字和图片理解，不会读取 Bing 搜索结果。只有你点击保存，问答文字才会写入本地。")
+            Text("默认联网提问，使用 DeepSeek 原生搜索核实最新信息；关闭联网可使用 Flash 和图片问答。只有点击保存，问答文字才会写入本地。")
                 .font(.narcBody)
                 .foregroundStyle(Color.narcTextMuted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -261,7 +283,7 @@ struct InstantQuestionView: View {
             if role == .user { Spacer(minLength: 72) }
             Group {
                 if role == .assistant {
-                    InstantQuestionMarkdownView(content: content)
+                    InstantQuestionMarkdownView(content: content).equatable()
                 } else {
                     Text(content)
                 }
@@ -284,7 +306,8 @@ struct InstantQuestionView: View {
     private var progressRow: some View {
         HStack(spacing: NarcSpacing.sm) {
             ProgressView().controlSize(.small)
-            Text(controller.imageAttachment == nil ? "DeepSeek 正在回答…" : "正在上传图片并识别…")
+            Text(controller.phase == .searching ? "DeepSeek 正在搜索网页…"
+                 : (controller.imageAttachment == nil ? "DeepSeek 正在回答…" : "正在上传图片并识别…"))
                 .font(.narcCaption)
                 .foregroundStyle(Color.narcTextMuted)
         }
@@ -293,7 +316,7 @@ struct InstantQuestionView: View {
 
     private func sourcesCard(_ sources: [InstantQuestionSource]) -> some View {
         VStack(alignment: .leading, spacing: NarcSpacing.sm) {
-            Label("历史来源", systemImage: "link")
+            Label("来源", systemImage: "link")
                 .font(.narcSubtitle)
                 .foregroundStyle(Color.narcText)
             ForEach(Array(sources.enumerated()), id: \.element.id) { index, source in
@@ -401,6 +424,17 @@ struct InstantQuestionView: View {
                 .padding(.horizontal, NarcSpacing.sm)
             }
 
+            if controller.webSearchEnabled && controller.imageAttachment != nil {
+                HStack(spacing: NarcSpacing.sm) {
+                    Text("联网模式暂不支持图片，切换后使用 Flash 识图。")
+                        .font(.narcCaption).foregroundStyle(Color.narcTextMuted)
+                    Spacer(minLength: 0)
+                    Button("切换到图片问答", action: controller.useImageQuestionMode)
+                        .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+                        .disabled(controller.isBusy)
+                }
+            }
+
             VStack(spacing: 0) {
                 InstantQuestionTextEditor(
                     text: $controller.draft,
@@ -416,15 +450,34 @@ struct InstantQuestionView: View {
 
                 HStack(spacing: NarcSpacing.sm) {
                     attachmentMenu
-                    Spacer(minLength: 0)
-                    Button(action: controller.sendDraft) {
-                        Label("发送", systemImage: "arrow.up")
-                            .lineLimit(1)
+                    Toggle(isOn: $controller.webSearchEnabled) {
+                        Label("联网", systemImage: "globe").lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
                     }
-                    .buttonStyle(NarcFocusPrimaryButtonStyle())
-                    .disabled(!controller.canSend)
-                    .keyboardShortcut(.return, modifiers: .command)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .fixedSize()
+                    .disabled(controller.isBusy)
+                    .help("开启：Pro 原生搜索；关闭：Flash 文字和图片问答")
+                    .accessibilityLabel("联网搜索")
+                    Spacer(minLength: 0)
+                    if controller.isBusy {
+                        Button(action: controller.stopAnswer) {
+                            Label("停止", systemImage: "stop.fill")
+                                .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("停止回答")
+                    } else {
+                        Button(action: controller.sendDraft) {
+                            Label("发送", systemImage: "arrow.up")
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                        .buttonStyle(NarcFocusPrimaryButtonStyle())
+                        .disabled(!controller.canSend)
+                        .keyboardShortcut(.return, modifiers: .command)
+                    }
                 }
                 .padding(.horizontal, 10)
                 .padding(.bottom, 10)
@@ -745,7 +798,7 @@ enum InstantQuestionMarkdown {
     }
 }
 
-private struct InstantQuestionMarkdownView: View {
+private struct InstantQuestionMarkdownView: View, Equatable {
     let content: String
 
     var body: some View {

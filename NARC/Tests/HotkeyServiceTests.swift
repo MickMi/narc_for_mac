@@ -28,10 +28,11 @@ func pinnedWindowRecallAndToggleUseDistinctStableChords() {
     #expect(recall.id == 100)
     #expect(toggle.id == 102)
     #expect(recall.keyCode == 35)
-    #expect(toggle.keyCode == 35)
-    #expect(recall.modifiers != toggle.modifiers)
+    #expect(toggle.keyCode == 46)
+    #expect(recall.modifiers == toggle.modifiers)
+    #expect(recall.keyCode != toggle.keyCode)
     #expect(recall.label.contains("⌃⌥P"))
-    #expect(toggle.label.contains("⌃⌥⇧P"))
+    #expect(toggle.label.contains("⌃⌥M"))
 }
 
 @Test

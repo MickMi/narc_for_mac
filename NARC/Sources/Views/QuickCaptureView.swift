@@ -95,6 +95,7 @@ struct QuickCaptureView: View {
     var compact = false
     var onDismiss: (() -> Void)?
     var onOpenAssistant: (() -> Void)?
+    var onboardingDefaults: UserDefaults = .standard
 
     @FocusState private var isInputFocused: Bool
 
@@ -111,7 +112,7 @@ struct QuickCaptureView: View {
 
     private var shouldShowOnboardingHint: Bool {
         !captureState.isOnboardingHintHidden
-            && OnboardingPresentationPolicy.shouldPresent()
+            && OnboardingPresentationPolicy.shouldPresent(defaults: onboardingDefaults)
     }
 
     var body: some View {
@@ -126,7 +127,7 @@ struct QuickCaptureView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(compact ? Color.clear : Color.narcBackground)
         .onAppear {
-            OnboardingPresentationPolicy.markEntrySeen()
+            OnboardingPresentationPolicy.markEntrySeen(in: onboardingDefaults)
             // The hosting view can appear before its NSPanel becomes key.
             // Defer one main-loop turn so a freshly opened capture surface is
             // immediately ready for typing without requiring an extra click.
@@ -138,7 +139,6 @@ struct QuickCaptureView: View {
 
     @ViewBuilder
     private var compactContent: some View {
-        header
         inputArea
         feedback
         if shouldShowOnboardingHint {
@@ -286,20 +286,22 @@ struct QuickCaptureView: View {
 
     private var footer: some View {
         HStack(spacing: NarcSpacing.md) {
-            Text("Return 创建 Todo")
-                .font(.narcMonoTiny)
-                .foregroundColor(.narcTextFaint)
+            if !compact || !shouldShowOnboardingHint {
+                Text("↵ 添加待办")
+                    .font(.narcCaption)
+                    .foregroundColor(.narcTextMuted)
+            }
 
             Spacer()
 
             if let onOpenAssistant {
-                Button("完整 Assistant", action: onOpenAssistant)
+                Button("全部待办", action: onOpenAssistant)
                     .buttonStyle(.plain)
                     .font(.narcCaption)
                     .foregroundColor(.narcAccent)
             }
 
-            if let onDismiss {
+            if !compact, let onDismiss {
                 Button("关闭", action: onDismiss)
                     .buttonStyle(.plain)
                     .font(.narcCaption)

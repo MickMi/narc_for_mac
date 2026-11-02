@@ -11,19 +11,23 @@ struct InstantQuestionMessage: Identifiable, Codable, Equatable {
     let content: String
     let createdAt: Date
     let sourceIDs: [UUID]
+    /// nil for legacy / offline answers; only server search events set true.
+    let webSearchUsed: Bool?
 
     init(
         id: UUID = UUID(),
         role: InstantQuestionRole,
         content: String,
         createdAt: Date = Date(),
-        sourceIDs: [UUID] = []
+        sourceIDs: [UUID] = [],
+        webSearchUsed: Bool? = nil
     ) {
         self.id = id
         self.role = role
         self.content = content
         self.createdAt = createdAt
         self.sourceIDs = sourceIDs
+        self.webSearchUsed = webSearchUsed
     }
 }
 
@@ -88,6 +92,7 @@ struct InstantQuestionCredentials: Equatable {
 struct InstantQuestionReply: Equatable {
     let answer: String
     let sources: [InstantQuestionSource]
+    var webSearchUsed: Bool? = nil
 }
 
 struct InstantQuestionImageAttachment: Equatable {

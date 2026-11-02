@@ -5,13 +5,17 @@ import SwiftUI
 final class InstantQuestionWindow: NSWindow, NSWindowDelegate {
     private let controller: InstantQuestionController
     private let modeSelection = InstantQuestionModeSelection()
+    private var activationObserver: NSObjectProtocol?
+    private var awaitingActivation = false
     var onClose: (() -> Void)?
     var selectedMode: InstantQuestionView.Mode { modeSelection.mode }
 
     init(
         controller: InstantQuestionController,
         store: InstantQuestionStore,
-        onOpenPreferences: @escaping () -> Void
+        onOpenPreferences: @escaping () -> Void,
+        onboardingDefaults: UserDefaults = .standard,
+        onOpenHelp: @escaping (HelpTopic) -> Void = { _ in }
     ) {
         self.controller = controller
         super.init(
@@ -34,23 +38,46 @@ final class InstantQuestionWindow: NSWindow, NSWindowDelegate {
                 controller: controller,
                 store: store,
                 onOpenPreferences: onOpenPreferences,
-                modeSelection: modeSelection
+                modeSelection: modeSelection,
+                onboardingDefaults: onboardingDefaults,
+                onOpenHelp: onOpenHelp
             )
         )
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: NSApp, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.finishPresentation() }
+        }
+    }
+
+    deinit {
+        if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
     }
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
     func windowWillClose(_ notification: Notification) {
+        awaitingActivation = false
         controller.clearCurrent()
         onClose?()
     }
 
     func present(on preferredScreen: NSScreen? = nil) {
         position(on: preferredScreen ?? screenUnderMouse() ?? NSScreen.main)
-        makeKeyAndOrderFront(nil)
+        awaitingActivation = true
         NSApp.activate(ignoringOtherApps: true)
+        makeKeyAndOrderFront(nil)
+        if selectedMode == .ask { modeSelection.requestInputFocus() }
+        // LSUIElement activation may finish after the Carbon hotkey callback.
+        // Reassert focus once at the activation boundary, never on normal redraw.
+        DispatchQueue.main.async { [weak self] in self?.finishPresentation() }
+    }
+
+    private func finishPresentation() {
+        guard awaitingActivation, isVisible, NSApp.isActive else { return }
+        awaitingActivation = false
+        makeKeyAndOrderFront(nil)
         if selectedMode == .ask { modeSelection.requestInputFocus() }
     }
 

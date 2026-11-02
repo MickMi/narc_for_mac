@@ -109,6 +109,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor private var assistantHubWindow: AssistantHubWindow?
     @MainActor private var instantQuestionWindow: InstantQuestionWindow?
     @MainActor private var onboardingWindow: OnboardingWindow?
+    @MainActor private var helpCenterWindow: PreferencesWindow?
+    private let helpCenterNavigation = HelpCenterNavigation()
     private let claudeService = ClaudeSessionService.shared
     /// Owned at the app level (not by DashboardView) so that closing the
     /// dashboard window doesn't tear down running terminals. The user can
@@ -390,7 +392,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(searchItem)
         menu.addItem(NSMenuItem.separator())
         let guideItem = NSMenuItem(
-            title: "User Guide",
+            title: "帮助与指南",
             action: #selector(showUserGuide),
             keyEquivalent: ""
         )
@@ -1028,6 +1030,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.showInstantQuestion()
                 }
             },
+            onOpenHelp: { [weak self] in self?.showHelpCenter() },
+            onOpenFeatureHelp: { [weak self] topic in self?.showHelpCenter(topic: topic) },
             onOpenCodexReply: { [weak self] event, completion in
                 self?.codexCompletionPresenter.open(event) { success in
                     completion(success)
@@ -1424,7 +1428,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let window = InstantQuestionWindow(
                 controller: instantQuestionController,
                 store: instantQuestionStore,
-                onOpenPreferences: { [weak self] in self?.openInstantQuestionPreferences() }
+                onOpenPreferences: { [weak self] in self?.openInstantQuestionPreferences() },
+                onOpenHelp: { [weak self] topic in self?.showHelpCenter(topic: topic) }
             )
             window.onClose = { [weak self, weak window] in
                 DispatchQueue.main.async {
@@ -1893,7 +1898,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(assistantItem)
 
         let guideItem = NSMenuItem(
-            title: "使用指南",
+            title: "帮助与指南",
             action: #selector(widgetMenuOpenUserGuide),
             keyEquivalent: ""
         )
@@ -1931,7 +1936,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func widgetMenuOpenUserGuide() {
         Task { @MainActor in
-            showOnboarding(force: true)
+            showHelpCenter()
         }
     }
 
@@ -2230,7 +2235,49 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showUserGuide() {
         Task { @MainActor in
-            showOnboarding(force: true)
+            showHelpCenter()
+        }
+    }
+
+    @MainActor
+    private func showHelpCenter(topic: HelpTopic? = nil) {
+        hidePanel()
+        if let topic { helpCenterNavigation.selectedTopic = topic }
+        if helpCenterWindow == nil {
+            let window = PreferencesWindow(contentSize: NSSize(width: 960, height: 720),
+                                           minimumContentSize: NSSize(width: 800, height: 560))
+            window.title = "NARC 帮助与指南"
+            window.contentView = NSHostingView(rootView: HelpCenterView(navigation: helpCenterNavigation, hotkeyService: hotkeyService) { [weak self] destination in
+                self?.openHelpDestination(destination)
+            })
+            helpCenterWindow = window
+        }
+        helpCenterWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @MainActor
+    private func openHelpDestination(_ destination: HelpDestination) {
+        helpCenterWindow?.orderOut(nil)
+        switch destination {
+        case .todo: showQuickCapture()
+        case .ai: showInstantQuestion(mode: .ask)
+        case .bing: showInstantQuestion(mode: .bing)
+        case .windowPicker: showPinnedWindowSwitcher()
+        case .windows, .replies, .messages:
+            switch destination {
+            case .windows: panelSelection.selectedTab = .windows
+            case .replies: panelSelection.selectedTab = .codexReplies
+            default: panelSelection.selectedTab = .notifications
+            }
+            summonFloatingWidgetToMouseScreen()
+        case .shortcuts:
+            preferencesNavigation.selectedSection = .shortcuts
+            openPreferences()
+        case .aiSettings: openInstantQuestionPreferences()
+        case .repliesSettings:
+            preferencesNavigation.selectedSection = .codexReplies
+            openPreferences()
         }
     }
 

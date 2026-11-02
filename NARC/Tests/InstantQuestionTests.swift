@@ -114,7 +114,7 @@ func instantQuestionSettingsRetriesAStartupKeychainFailureWhenShown() async thro
     let controller = InstantQuestionController(
         credentials: credentials,
         store: InstantQuestionStore(storageURL: storageURL),
-        service: FixedInstantQuestionAnswering()
+        service: FixedInstantQuestionAnswering(), webSearchEnabled: false
     )
     let window = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 560, height: 460),
@@ -153,7 +153,7 @@ func instantQuestionSettingsRetriesAStartupKeychainFailureWhenShown() async thro
     let controller = InstantQuestionController(credentials: manager,
         store: InstantQuestionStore(storageURL: FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString).appendingPathComponent("questions.json")),
-        service: FixedInstantQuestionAnswering())
+        service: FixedInstantQuestionAnswering(), webSearchEnabled: false)
     controller.draft = "问题和图片都要保留"
     try controller.attachImage(name: "fixture.png", mediaType: "image/png", data: Data([1, 2]))
     controller.sendDraft()
@@ -189,7 +189,7 @@ func instantQuestionSettingsRetriesAStartupKeychainFailureWhenShown() async thro
     let controller = InstantQuestionController(credentials: manager,
         store: InstantQuestionStore(storageURL: FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString).appendingPathComponent("questions.json")),
-        service: FixedInstantQuestionAnswering())
+        service: FixedInstantQuestionAnswering(), webSearchEnabled: false)
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 590, height: 650),
                           styleMask: [.titled], backing: .buffered, defer: false)
     window.isReleasedWhenClosed = false
@@ -218,7 +218,7 @@ func instantQuestionSettingsRetriesAStartupKeychainFailureWhenShown() async thro
             if state == "ready" { #expect(await manager.authorizeRead()) }
             let store = InstantQuestionStore(storageURL: FileManager.default.temporaryDirectory
                 .appendingPathComponent(UUID().uuidString).appendingPathComponent("questions.json"))
-            let controller = InstantQuestionController(credentials: manager, store: store, service: FixedInstantQuestionAnswering())
+            let controller = InstantQuestionController(credentials: manager, store: store, service: FixedInstantQuestionAnswering(), webSearchEnabled: false)
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 588, height: 520),
                                   styleMask: [.titled], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
@@ -418,7 +418,7 @@ func deepSeekStreamRejectsTruncatedAnswerWithoutDone() async throws {
     let service = DeepSeekQuestionService(
         transport: RecordingInstantQuestionTransport(responses: [(Data(sse.utf8), 200)])
     )
-    await #expect(throws: InstantQuestionServiceFailure.invalidResponse(service: "DeepSeek")) {
+    await #expect(throws: InstantQuestionServiceFailure.interruptedResponse) {
         _ = try await service.streamAnswer(
             messages: [InstantQuestionMessage(role: .user, content: "question")],
             attachment: nil,
@@ -426,6 +426,251 @@ func deepSeekStreamRejectsTruncatedAnswerWithoutDone() async throws {
             onChunk: { _ in }
         )
     }
+}
+
+@Test(arguments: [false, true])
+func deepSeekLengthLimitPreservesLastDeltaAndReportsTruncation(unterminated: Bool) async throws {
+    let last = "data: {\"choices\":[{\"delta\":{\"content\":\"末段中文🎵\"},\"finish_reason\":\"length\"}]}"
+    let sse = last + (unterminated ? "" : "\n\ndata: [DONE]\n\n")
+    let transport = RecordingInstantQuestionTransport(responses: [(Data(sse.utf8), 200)])
+    let collector = InstantQuestionChunkCollector()
+    await #expect(throws: InstantQuestionServiceFailure.outputLimit) {
+        _ = try await DeepSeekQuestionService(transport: transport).streamAnswer(
+            messages: [InstantQuestionMessage(role: .user, content: "详细解释")], attachment: nil,
+            credentials: InstantQuestionCredentials(deepSeekAPIKey: "fixture"),
+            onChunk: { await collector.append($0) })
+    }
+    #expect(await collector.chunks == ["末段中文🎵"])
+    let request = try #require(await transport.requests.first)
+    let data = try #require(request.httpBody)
+    let object = try JSONSerialization.jsonObject(with: data)
+    let body = try #require(object as? [String: Any])
+    #expect(body["max_tokens"] as? Int == 8192)
+    #expect(request.timeoutInterval == 120)
+}
+
+@Test func deepSeekLongStreamPreservesEveryChunkAndCompletion() async throws {
+    let text = "长回答内容与 **Markdown**，🎵。\n"
+    let delta = try JSONSerialization.data(withJSONObject: ["choices": [["delta": ["content": text]]]])
+    let sse = String(repeating: "data: " + String(decoding: delta, as: UTF8.self) + "\n\n", count: 1800)
+        + "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+    let transport = RecordingInstantQuestionTransport(responses: [(Data(sse.utf8), 200)])
+    let collector = InstantQuestionChunkCollector()
+    let reply = try await DeepSeekQuestionService(transport: transport).streamAnswer(
+        messages: [InstantQuestionMessage(role: .user, content: "长回答")], attachment: nil,
+        credentials: InstantQuestionCredentials(deepSeekAPIKey: "fixture"),
+        onChunk: { await collector.append($0) })
+    #expect(reply.answer == String(repeating: text, count: 1800).trimmingCharacters(in: .whitespacesAndNewlines))
+    #expect(await collector.chunks.count == 1800)
+}
+
+@Test func deepSeekParserBoundsEntireMultilineEvent() throws {
+    var parser = DeepSeekEventStreamParser()
+    _ = try parser.consume("data: " + String(repeating: "a", count: 150_000))
+    #expect(throws: InstantQuestionServiceFailure.invalidResponse(service: "DeepSeek")) {
+        _ = try parser.consume("data: " + String(repeating: "b", count: 150_000))
+    }
+}
+
+/// Unlike the transport and static snapshot tests, keep the production window
+/// alive while a tall answer grows and finishes.
+/// Run this test with an external timeout: a layout loop also blocks MainActor timers.
+@Test @MainActor func instantQuestionLiveLongAnswerKeepsWindowResponsive() async throws {
+    _ = NSApplication.shared
+    let secrets = MemoryInstantQuestionSecretStore()
+    try secrets.set("fixture", for: InstantQuestionCredentialManager.deepSeekAccount)
+    let (chunks, continuation) = AsyncThrowingStream<String, Error>.makeStream()
+    defer { continuation.finish() }
+    let controller = InstantQuestionController(
+        credentials: await authorizedQuestionTestCredentials(secrets),
+        store: InstantQuestionStore(storageURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathComponent("questions.json")),
+        service: ManualStreamingInstantQuestionAnswering(chunks: chunks), webSearchEnabled: false)
+    let window = InstantQuestionWindow(controller: controller, store: controller.store, onOpenPreferences: {})
+    defer { window.close() }
+    window.setContentSize(NSSize(width: 760, height: 620))
+    window.present()
+    let host = try #require(window.contentView)
+    host.layoutSubtreeIfNeeded()
+    controller.draft = "请详细解释，并列出具体步骤"
+    controller.sendDraft()
+    var expected = ""
+    for index in 1...32 {
+        let chunk = "\n\n## 第 \(index) 部分\n\n**核心结论**：先写清楚，再写简洁。\n- 依据和条件要明确，长回答需要能够持续阅读。\n- 保留当前内容，不阻塞输入与停止操作。\n> 这是一段引用，包含可以换行的中文说明。\n"
+        expected += chunk
+        continuation.yield(chunk)
+        try await Task.sleep(for: .milliseconds(110))
+        host.layoutSubtreeIfNeeded()
+        // Resize halfway through, exercising wrapping and automatic tail scroll.
+        if index == 16 { window.setContentSize(NSSize(width: 680, height: 520)) }
+        if index % 8 == 0 {
+            FileHandle.standardError.write(Data("long-answer heartbeat \(index)\n".utf8))
+        }
+    }
+    try await Task.sleep(for: .milliseconds(350))
+    #expect(controller.streamingAnswer == expected)
+    #expect(controller.isBusy)
+    if let path = ProcessInfo.processInfo.environment["NARC_INSTANT_QA_SNAPSHOT_DIR"], path.hasPrefix("/private/tmp/") {
+        let directory = URL(fileURLWithPath: path)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        let png = try #require(bitmap.representation(using: .png, properties: [:]))
+        try png.write(to: directory.appendingPathComponent("live-long-answer.png"))
+    }
+    continuation.finish()
+    for _ in 0..<100 where controller.isBusy { try await Task.sleep(for: .milliseconds(10)) }
+    host.layoutSubtreeIfNeeded()
+    #expect(controller.latestAnswer == expected)
+    #expect(!controller.isBusy)
+    #expect(controller.messages.count == 2)
+    #expect(controller.store.records.isEmpty)
+}
+
+@Test(arguments: [680.0, 1040.0]) @MainActor
+func instantQuestionMultipleLongRoundsKeepLayoutResponsive(width: Double) async throws {
+    _ = NSApplication.shared
+    let secrets = MemoryInstantQuestionSecretStore()
+    try secrets.set("fixture", for: InstantQuestionCredentialManager.deepSeekAccount)
+    let controller = InstantQuestionController(
+        credentials: await authorizedQuestionTestCredentials(secrets),
+        store: InstantQuestionStore(storageURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathComponent("questions.json")),
+        service: PacedLongQuestionAnswering(), webSearchEnabled: false)
+    let window = InstantQuestionWindow(controller: controller, store: controller.store, onOpenPreferences: {})
+    defer { window.close() }
+    window.setContentSize(NSSize(width: width, height: 620))
+    window.present()
+    let host = try #require(window.contentView)
+    // Cross the API's recent-12-message context boundary while retaining all
+    // displayed history. The window must not need closing between rounds.
+    let roundCount = width == 680 ? 8 : 4
+    for round in 1...roundCount {
+        controller.draft = String(repeating: "第\(round)轮的问题比较长，需要完整解释，并且最后给出结论。", count: 8)
+        controller.sendDraft()
+        for _ in 0..<800 where controller.isBusy {
+            try await Task.sleep(for: .milliseconds(10))
+            host.layoutSubtreeIfNeeded()
+        }
+        #expect(!controller.isBusy)
+        #expect(controller.errorMessage == nil)
+        #expect(controller.messages.count == round * 2)
+        #expect(controller.latestAnswer?.hasSuffix("本轮结束。") == true)
+        // Exercise hide/show without clearing the in-memory conversation.
+        window.orderOut(nil)
+        window.present()
+        host.layoutSubtreeIfNeeded()
+        FileHandle.standardError.write(Data("long-answer width=\(width) round=\(round)\n".utf8))
+    }
+    #expect(controller.store.records.isEmpty)
+    controller.clearCurrent()
+    try await Task.sleep(for: .milliseconds(150))
+    host.layoutSubtreeIfNeeded()
+    #expect(controller.messages.isEmpty && controller.streamingAnswer.isEmpty)
+}
+
+@Test @MainActor func instantQuestionStopPreservesPartialAndContinuationContext() async throws {
+    _ = NSApplication.shared
+    let secrets = MemoryInstantQuestionSecretStore()
+    try secrets.set("fixture", for: InstantQuestionCredentialManager.deepSeekAccount)
+    let (chunks, continuation) = AsyncThrowingStream<String, Error>.makeStream()
+    defer { continuation.finish() }
+    let controller = InstantQuestionController(credentials: await authorizedQuestionTestCredentials(secrets),
+        store: InstantQuestionStore(storageURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathComponent("questions.json")),
+        service: ManualStreamingInstantQuestionAnswering(chunks: chunks), webSearchEnabled: false)
+    controller.draft = "详细说明"
+    controller.sendDraft()
+    continuation.yield("已经回答的前半段")
+    for _ in 0..<40 where controller.streamingAnswer.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+    if let path = ProcessInfo.processInfo.environment["NARC_INSTANT_QA_SNAPSHOT_DIR"], path.hasPrefix("/private/tmp/") {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 520),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: InstantQuestionView(controller: controller,
+            store: controller.store, onOpenPreferences: {}))
+        let view = try #require(window.contentView)
+        view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(150))
+        view.layoutSubtreeIfNeeded()
+        let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        let png = try #require(bitmap.representation(using: .png, properties: [:]))
+        try png.write(to: URL(fileURLWithPath: path).appendingPathComponent("streaming-stop.png"))
+        window.close()
+    }
+    controller.stopAnswer()
+    #expect(!controller.isBusy)
+    #expect(controller.streamingAnswer == "已经回答的前半段")
+    #expect(controller.errorMessage?.contains("已停止") == true)
+    #expect(controller.store.records.isEmpty)
+    controller.draft = "请继续"
+    controller.sendDraft()
+    #expect(controller.messages.map(\.role) == [.user, .assistant, .user])
+    #expect(controller.messages[1].content == "已经回答的前半段")
+    #expect(controller.messages[2].content == "请继续")
+    controller.clearCurrent()
+    try await Task.sleep(for: .milliseconds(150))
+    #expect(controller.messages.isEmpty && controller.streamingAnswer.isEmpty)
+    #expect(controller.phase == .idle)
+}
+
+@Test @MainActor func instantQuestionLengthLimitContinuesWithPartialAnswerInRealRequest() async throws {
+    let secrets = MemoryInstantQuestionSecretStore()
+    try secrets.set("fixture", for: InstantQuestionCredentialManager.deepSeekAccount)
+    let partial = "## 长回答\n\n" + String(repeating: "- **要点**：这里是已收到的内容。\n", count: 90)
+    let event = try JSONSerialization.data(withJSONObject: ["choices": [[
+        "delta": ["content": partial], "finish_reason": "length",
+    ]]])
+    let first = Data(("data: " + String(decoding: event, as: UTF8.self) + "\n\ndata: [DONE]\n\n").utf8)
+    let second = Data("data: {\"choices\":[{\"delta\":{\"content\":\"接着上一段回答。\"}}]}\n\ndata: [DONE]\n\n".utf8)
+    let transport = RecordingInstantQuestionTransport(responses: [(first, 200), (second, 200)])
+    let controller = InstantQuestionController(credentials: await authorizedQuestionTestCredentials(secrets),
+        store: InstantQuestionStore(storageURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathComponent("questions.json")),
+        service: DeepSeekQuestionService(transport: transport), webSearchEnabled: false)
+    controller.draft = "详细说明"
+    controller.sendDraft()
+    for _ in 0..<100 where controller.phase != .failed { try await Task.sleep(for: .milliseconds(10)) }
+    #expect(controller.phase == .failed)
+    #expect(controller.streamingAnswer == partial)
+    #expect(controller.errorMessage == InstantQuestionServiceFailure.outputLimit.localizedDescription)
+    #expect(!controller.canSave && !controller.isBusy)
+    for (name, scheme) in [("light", ColorScheme.light), ("dark", ColorScheme.dark)] {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 620),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+        window.contentView = NSHostingView(rootView: InstantQuestionView(controller: controller,
+            store: controller.store, onOpenPreferences: {}).environment(\.colorScheme, scheme))
+        let view = try #require(window.contentView)
+        view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(200))
+        view.layoutSubtreeIfNeeded()
+        if let path = ProcessInfo.processInfo.environment["NARC_INSTANT_QA_SNAPSHOT_DIR"], path.hasPrefix("/private/tmp/") {
+            let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            let png = try #require(bitmap.representation(using: .png, properties: [:]))
+            try png.write(to: URL(fileURLWithPath: path).appendingPathComponent("long-answer-\(name).png"))
+        }
+        window.close()
+    }
+    controller.draft = "请继续"
+    controller.sendDraft()
+    for _ in 0..<100 where controller.isBusy { try await Task.sleep(for: .milliseconds(10)) }
+    #expect(controller.phase == .idle)
+    #expect(controller.latestAnswer == "接着上一段回答。")
+    #expect(controller.messages.map(\.role) == [.user, .assistant, .user, .assistant])
+    let request = try #require(await transport.requests.last)
+    let data = try #require(request.httpBody)
+    let object = try JSONSerialization.jsonObject(with: data)
+    let body = try #require(object as? [String: Any])
+    let messages = try #require(body["messages"] as? [[String: Any]])
+    #expect(messages.count == 4) // System + first question + partial answer + continuation.
+    #expect(messages[2]["content"] as? String == partial)
+    #expect(messages[3]["content"] as? String == "请继续")
+    #expect(controller.store.records.isEmpty)
+    controller.clearCurrent()
 }
 
 @Test
@@ -504,7 +749,7 @@ func instantQuestionStaysEphemeralUntilSaveAndCloseClearsCurrentScreen() async t
     let controller = InstantQuestionController(
         credentials: credentials,
         store: questionStore,
-        service: FixedInstantQuestionAnswering()
+        service: FixedInstantQuestionAnswering(), webSearchEnabled: false
     )
     try controller.attachImage(
         name: "private-screen.png",
@@ -560,7 +805,7 @@ func instantQuestionShowsStreamBeforeCompletionAndSavesOnlyFinalAnswer(
     let controller = InstantQuestionController(
         credentials: await authorizedQuestionTestCredentials(secrets),
         store: InstantQuestionStore(storageURL: storageURL),
-        service: ManualStreamingInstantQuestionAnswering(chunks: chunks)
+        service: ManualStreamingInstantQuestionAnswering(chunks: chunks), webSearchEnabled: false
     )
     try controller.attachImage(name: "current-round.png", mediaType: "image/png", data: Data([1, 2, 3]))
     controller.draft = "什么是 Afro House？"
@@ -605,7 +850,7 @@ func instantQuestionKeepsInterruptedStreamOutOfSavedAnswers() async throws {
         credentials: await authorizedQuestionTestCredentials(secrets),
         store: InstantQuestionStore(storageURL: FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString).appendingPathComponent("questions.json")),
-        service: ManualStreamingInstantQuestionAnswering(chunks: chunks)
+        service: ManualStreamingInstantQuestionAnswering(chunks: chunks), webSearchEnabled: false
     )
     try controller.attachImage(name: "retry.png", mediaType: "image/png", data: Data([1, 2, 3]))
     controller.draft = "测试中断"
@@ -635,7 +880,7 @@ func instantQuestionSendsImageOnlyForItsOwnRound() async throws {
     let controller = InstantQuestionController(
         credentials: await authorizedQuestionTestCredentials(secrets),
         store: InstantQuestionStore(storageURL: storageURL),
-        service: DeepSeekQuestionService(transport: transport)
+        service: DeepSeekQuestionService(transport: transport), webSearchEnabled: false
     )
     try controller.attachImage(name: "one-round.png", mediaType: "image/png", data: Data([1, 2, 3]))
     controller.draft = "解释这张图片"
@@ -675,7 +920,7 @@ func clearingQuestionIgnoresLateStreamChunks() async throws {
         credentials: await authorizedQuestionTestCredentials(secrets),
         store: InstantQuestionStore(storageURL: FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString).appendingPathComponent("questions.json")),
-        service: ManualStreamingInstantQuestionAnswering(chunks: chunks)
+        service: ManualStreamingInstantQuestionAnswering(chunks: chunks), webSearchEnabled: false
     )
     controller.draft = "将被清空的问题"
     controller.sendDraft()
@@ -704,7 +949,7 @@ func clearingCurrentQuestionDoesNotDeleteSavedRecords() async throws {
     let controller = InstantQuestionController(
         credentials: await authorizedQuestionTestCredentials(secrets),
         store: store,
-        service: FixedInstantQuestionAnswering()
+        service: FixedInstantQuestionAnswering(), webSearchEnabled: false
     )
     controller.draft = "需要保留的问答"
     controller.sendDraft()
@@ -732,7 +977,7 @@ func savingCurrentConversationIncludesEveryTurnAndLatestAnswerIsOneRound() async
     let controller = InstantQuestionController(
         credentials: await authorizedQuestionTestCredentials(secrets),
         store: store,
-        service: TurnCountingInstantQuestionAnswering()
+        service: TurnCountingInstantQuestionAnswering(), webSearchEnabled: false
     )
 
     controller.draft = "第一轮问题"
@@ -803,6 +1048,9 @@ func instantQuestionProductionViewRendersInBothAppearances() async throws {
     _ = NSApplication.shared
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let suite = "narc-question-render-" + UUID().uuidString
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
     let secrets = MemoryInstantQuestionSecretStore()
     try secrets.set("deepseek", for: InstantQuestionCredentialManager.deepSeekAccount)
     let credentials = InstantQuestionCredentialManager(secretStore: secrets)
@@ -811,7 +1059,7 @@ func instantQuestionProductionViewRendersInBothAppearances() async throws {
     let controller = InstantQuestionController(
         credentials: credentials,
         store: store,
-        service: FixedInstantQuestionAnswering()
+        service: FixedInstantQuestionAnswering(), webSearchEnabled: false, preferences: defaults
     )
     controller.draft = "NARC 最近有什么新进展？"
     controller.sendDraft()
@@ -827,11 +1075,12 @@ func instantQuestionProductionViewRendersInBothAppearances() async throws {
                 controller: controller,
                 store: store,
                 onOpenPreferences: {},
-                initialMode: mode
+                initialMode: mode,
+                onboardingDefaults: defaults
             )
             .environment(\.colorScheme, scheme)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 680, height: 430),
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 620),
             styleMask: [.titled],
             backing: .buffered,
             defer: false
@@ -845,8 +1094,10 @@ func instantQuestionProductionViewRendersInBothAppearances() async throws {
         try await Task.sleep(for: .milliseconds(200))
         view.layoutSubtreeIfNeeded()
         view.displayIfNeeded()
-        #expect(view.bounds.width == 680)
-        #expect(view.bounds.height == 430)
+        #expect(view.bounds.width == 760)
+        #expect(view.fittingSize.width <= 760)
+        #expect(view.bounds.height == 620)
+        #expect(view.fittingSize.height <= 620)
         if let path = ProcessInfo.processInfo.environment["NARC_INSTANT_QA_SNAPSHOT_DIR"],
            path.hasPrefix("/private/tmp/") {
             try FileManager.default.createDirectory(
@@ -877,7 +1128,7 @@ func instantQuestionProductionViewRendersInBothAppearances() async throws {
     let credentials = InstantQuestionCredentialManager(secretStore: MemoryInstantQuestionSecretStore())
     let store = InstantQuestionStore(storageURL: FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString).appendingPathComponent("questions.json"))
-    let controller = InstantQuestionController(credentials: credentials, store: store, service: FixedInstantQuestionAnswering())
+    let controller = InstantQuestionController(credentials: credentials, store: store, service: FixedInstantQuestionAnswering(), webSearchEnabled: false)
     let window = InstantQuestionWindow(controller: controller, store: store, onOpenPreferences: {})
     defer { window.close() }
     func editor(in view: NSView) -> InstantQuestionPasteAwareTextView? {
@@ -913,6 +1164,13 @@ func instantQuestionProductionViewRendersInBothAppearances() async throws {
     #expect(window.firstResponder === returned)
     #expect(controller.draft == "保留输入，不因普通重绘抢焦点")
     #expect(!credentials.isReady)
+    window.orderOut(nil)
+    window.present()
+    try await Task.sleep(for: .milliseconds(150))
+    let reopened = try #require(editor(in: host))
+    #expect(window.isVisible)
+    #expect(window.firstResponder === reopened)
+    #expect(reopened.selectedRange().location == (controller.draft as NSString).length)
 }
 
 @MainActor private func composerFixturePNG() throws -> Data {
@@ -951,7 +1209,7 @@ func instantQuestionProductionViewRendersInBothAppearances() async throws {
     #expect(credentials.saveDeepSeekKey("fixture-only"))
     let store = InstantQuestionStore(storageURL: FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString).appendingPathComponent("questions.json"))
-    let controller = InstantQuestionController(credentials: credentials, store: store, service: FixedInstantQuestionAnswering())
+    let controller = InstantQuestionController(credentials: credentials, store: store, service: FixedInstantQuestionAnswering(), webSearchEnabled: false)
     let pasteboard = NSPasteboard.withUniqueName()
     defer { pasteboard.clearContents() }
     let imageData = try composerFixturePNG()
@@ -1040,10 +1298,12 @@ private final class RecoveringInstantQuestionSecretStore: InstantQuestionSecretS
 
 private actor RecordingInstantQuestionTransport: InstantQuestionTransport {
     private var responses: [(Data, Int)]
+    private let streamedLines: AsyncThrowingStream<String, Error>?
     private(set) var requests: [URLRequest] = []
 
-    init(responses: [(Data, Int)]) {
+    init(responses: [(Data, Int)], streamedLines: AsyncThrowingStream<String, Error>? = nil) {
         self.responses = responses
+        self.streamedLines = streamedLines
     }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
@@ -1061,6 +1321,7 @@ private actor RecordingInstantQuestionTransport: InstantQuestionTransport {
 
     func lines(for request: URLRequest) async throws -> (AsyncThrowingStream<String, Error>, HTTPURLResponse) {
         let (data, response) = try await data(for: request)
+        if let streamedLines { return (streamedLines, response) }
         let bytes = AsyncStream<UInt8> { continuation in
             for byte in data { continuation.yield(byte) }
             continuation.finish()
@@ -1072,6 +1333,354 @@ private actor RecordingInstantQuestionTransport: InstantQuestionTransport {
 private actor InstantQuestionChunkCollector {
     private(set) var chunks: [String] = []
     func append(_ chunk: String) { chunks.append(chunk) }
+}
+
+private func nativeWebEvent(_ type: String, _ fields: [String: Any] = [:], trailingBlank: Bool = true) throws -> String {
+    var value = fields
+    value["type"] = type
+    return "event: \(type)\ndata: " + String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+        + (trailingBlank ? "\n\n" : "")
+}
+
+private func nativeWebResponse(_ answer: String, searched: Bool = true) -> [String: Any] {
+    var output: [[String: Any]] = searched ? [["type": "web_search_call", "status": "completed"]] : []
+    output.append(["type": "message", "role": "assistant", "content": [[
+        "type": "output_text", "text": answer,
+        "annotations": [["type": "url_citation", "url": "https://example.com/latest", "title": "官方赛程"]],
+    ]]])
+    return ["status": "completed", "output": output]
+}
+
+@Test(arguments: ["response.output_text.done", "response.content_part.done", "response.output_item.done"])
+func nativeWebReadsDoneTextWhenTerminalOmitsIt(kind: String) async throws {
+    let text = "搜索后的完整正文🎵"
+    var fields: [String: Any] = ["output_index": 1, "content_index": 0]
+    if kind == "response.output_text.done" { fields["text"] = text }
+    if kind == "response.content_part.done" {
+        fields["part"] = ["type": "output_text", "text": text,
+            "annotations": [["type": "url_citation", "url": "https://example.com/done", "title": "来源"]]]
+    }
+    if kind == "response.output_item.done" {
+        fields["item"] = ["type": "message", "content": [["type": "output_text", "text": text]]]
+    }
+    let sse = try nativeWebEvent("response.web_search_call.completed")
+        + nativeWebEvent(kind, fields)
+        + nativeWebEvent("response.completed", ["response": ["status": "completed"]])
+    let transport = RecordingInstantQuestionTransport(responses: [(Data(sse.utf8), 200)])
+    let chunks = InstantQuestionChunkCollector()
+    let reply = try await DeepSeekQuestionService(transport: transport).streamAnswer(
+        messages: [.init(role: .user, content: "最新赛程")], attachment: nil,
+        credentials: .init(deepSeekAPIKey: "fixture"), webSearchEnabled: true,
+        onSearch: {}, onChunk: { await chunks.append($0) })
+    #expect(reply.answer == text)
+    #expect(await chunks.chunks == [text])
+    if kind == "response.content_part.done" { #expect(reply.sources.first?.url.absoluteString == "https://example.com/done") }
+}
+
+private func nativeSearchOnlyResponse() throws -> String {
+    let search: [String: Any] = ["type": "web_search_call", "id": "search_fixture", "status": "completed",
+        "action": ["type": "search", "query": "最新赛程", "sources": [["url": "https://example.com/schedule", "title": "赛程"]]],
+        "search_results": [["title": "赛程", "url": "https://example.com/schedule", "content": "fixture search result"]]]
+    return try nativeWebEvent("response.output_item.done", ["item": search])
+        + nativeWebEvent("response.completed", ["response": ["status": "completed", "output": [search]]])
+}
+
+@Test func nativeWebContinuesSearchOnlyTurnOnce() async throws {
+    let first = try nativeSearchOnlyResponse()
+    let second = try nativeWebEvent("response.output_text.delta", ["delta": "根据刚才的搜索结果回答。"])
+        + nativeWebEvent("response.completed", ["response": nativeWebResponse("根据刚才的搜索结果回答。", searched: false)])
+    let transport = RecordingInstantQuestionTransport(responses: [(Data(first.utf8), 200), (Data(second.utf8), 200)])
+    let reply = try await DeepSeekQuestionService(transport: transport).streamAnswer(
+        messages: [.init(role: .user, content: "最新赛程")], attachment: nil,
+        credentials: .init(deepSeekAPIKey: "fixture"), webSearchEnabled: true, onSearch: {}, onChunk: { _ in })
+    #expect(reply.answer == "根据刚才的搜索结果回答。" && reply.webSearchUsed == true)
+    let requests = await transport.requests
+    #expect(requests.count == 2)
+    let data = try #require(requests.last?.httpBody)
+    let object = try JSONSerialization.jsonObject(with: data)
+    let body = try #require(object as? [String: Any])
+    #expect(body["model"] as? String == "deepseek-v4-pro")
+    #expect(body["tool_choice"] as? String == "none")
+    let input = try #require(body["input"] as? [[String: Any]])
+    #expect(input.last?["id"] as? String == "search_fixture")
+    #expect(input.last?["search_results"] != nil)
+    #expect(reply.sources.contains { $0.url.absoluteString == "https://example.com/schedule" })
+}
+
+@Test func nativeWebSearchOnlyContinuationIsBounded() async throws {
+    let sse = try nativeSearchOnlyResponse()
+    let transport = RecordingInstantQuestionTransport(responses: [(Data(sse.utf8), 200), (Data(sse.utf8), 200), (Data(sse.utf8), 200)])
+    await #expect(throws: InstantQuestionServiceFailure.webSearchNoAnswer) {
+        _ = try await DeepSeekQuestionService(transport: transport).streamAnswer(
+            messages: [.init(role: .user, content: "最新赛程")], attachment: nil,
+            credentials: .init(deepSeekAPIKey: "fixture"), webSearchEnabled: true, onSearch: {}, onChunk: { _ in })
+    }
+    #expect(await transport.requests.count == 2)
+}
+
+@Test func nativeWebReplayPreservesToolIdentityAndDiagnosticsExcludeContent() throws {
+    var parser = DeepSeekResponsesStreamParser()
+    let initial: [String: Any] = ["type": "web_search_call", "id": "tool_fixture", "status": "completed", "search_results": "private-result-marker"]
+    let terminal: [String: Any] = ["type": "web_search_call", "id": "tool_fixture", "status": "completed", "extra": "updated"]
+    let sse = try nativeWebEvent("response.output_item.done", ["item": initial])
+        + nativeWebEvent("response.completed", ["response": ["status": "completed", "output": [terminal]]])
+    for line in sse.components(separatedBy: "\n") { _ = try parser.consume(line) }
+    #expect(parser.searchOutputs.count == 1)
+    let raw = try #require(parser.searchOutputs.first)
+    let decoded = try JSONSerialization.jsonObject(with: raw)
+    let item = try #require(decoded as? [String: Any])
+    #expect(item["search_results"] as? String == "private-result-marker")
+    #expect(item["extra"] as? String == "updated")
+    #expect(!parser.diagnosticSummary.contains("private-result-marker"))
+    #expect(!parser.diagnosticSummary.contains("tool_fixture"))
+    #expect(parser.diagnosticSummary.contains("search_items=1"))
+}
+
+@Test @MainActor func nativeWebSearchProgressStreamingStopAndModeCapture() async throws {
+    let suite = "narc.web.stream.test." + UUID().uuidString
+    let prefs = try #require(UserDefaults(suiteName: suite))
+    defer { prefs.removePersistentDomain(forName: suite) }
+    let credentials = InstantQuestionCredentialManager(secretStore: MemoryInstantQuestionSecretStore())
+    #expect(credentials.saveDeepSeekKey("fixture"))
+    let (lines, continuation) = AsyncThrowingStream<String, Error>.makeStream()
+    defer { continuation.finish() }
+    let transport = RecordingInstantQuestionTransport(responses: [(Data(), 200)], streamedLines: lines)
+    let store = InstantQuestionStore(storageURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("questions.json"))
+    let controller = InstantQuestionController(credentials: credentials, store: store,
+        service: DeepSeekQuestionService(transport: transport), preferences: prefs)
+    controller.draft = "查询最近赛程"
+    controller.sendDraft()
+    // The request captures its mode even if a later preference changes.
+    controller.webSearchEnabled = false
+    for line in try nativeWebEvent("response.web_search_call.searching").components(separatedBy: "\n") { continuation.yield(line) }
+    for _ in 0..<100 where controller.phase != .searching { try await Task.sleep(for: .milliseconds(10)) }
+    #expect(controller.phase == .searching && controller.isBusy)
+    for line in try nativeWebEvent("response.output_text.delta", ["delta": "已查到的前半段"]).components(separatedBy: "\n") { continuation.yield(line) }
+    for _ in 0..<100 where controller.streamingAnswer.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+    #expect(controller.streamingAnswer == "已查到的前半段")
+    #expect(controller.phase == .answering)
+    controller.stopAnswer()
+    for line in try nativeWebEvent("response.completed", ["response": nativeWebResponse("迟到回答")]).components(separatedBy: "\n") { continuation.yield(line) }
+    continuation.finish()
+    try await Task.sleep(for: .milliseconds(150))
+    #expect(controller.phase == .failed && !controller.isBusy)
+    #expect(controller.streamingAnswer == "已查到的前半段")
+    #expect(controller.messages.count == 1 && !controller.canSave)
+    #expect(store.records.isEmpty)
+    let requests = await transport.requests
+    #expect(requests.count == 1 && requests.first?.url?.path == "/responses")
+}
+
+@Test func nativeWebLongStreamPreservesAllVisibleChunks() async throws {
+    let text = "中文🎵 **完整内容**\n"
+    let delta = try nativeWebEvent("response.output_text.delta", ["delta": text])
+    let answer = String(repeating: text, count: 400)
+    let sse = try nativeWebEvent("response.web_search_call.completed")
+        + String(repeating: delta, count: 400)
+        + nativeWebEvent("response.completed", ["response": nativeWebResponse(answer)], trailingBlank: false)
+    let transport = RecordingInstantQuestionTransport(responses: [(Data(sse.utf8), 200)])
+    let chunks = InstantQuestionChunkCollector()
+    let reply = try await DeepSeekQuestionService(transport: transport).streamAnswer(
+        messages: [.init(role: .user, content: "长回答")], attachment: nil,
+        credentials: .init(deepSeekAPIKey: "fixture"), webSearchEnabled: true,
+        onSearch: {}, onChunk: { await chunks.append($0) })
+    #expect(reply.answer == answer.trimmingCharacters(in: .whitespacesAndNewlines))
+    #expect(await chunks.chunks.count == 400)
+    #expect(reply.webSearchUsed == true)
+}
+
+@Test(arguments: [401, 429]) func nativeWebHTTPFailureDoesNotRetryOrFallBack(status: Int) async throws {
+    let transport = RecordingInstantQuestionTransport(responses: [(Data(), status)])
+    await #expect(throws: InstantQuestionServiceFailure.rejected(service: "DeepSeek", statusCode: status)) {
+        _ = try await DeepSeekQuestionService(transport: transport).streamAnswer(
+            messages: [.init(role: .user, content: "最近新闻")], attachment: nil,
+            credentials: .init(deepSeekAPIKey: "fixture"), webSearchEnabled: true, onSearch: {}, onChunk: { _ in })
+    }
+    #expect(await transport.requests.count == 1)
+}
+
+@Test func nativeWebUsesProAutomaticSearchAndSameKey() async throws {
+    let sse = try nativeWebEvent("response.web_search_call.searching")
+        + nativeWebEvent("response.reasoning_text.delta", ["delta": "不应该展示的推理"])
+        + nativeWebEvent("response.output_text.delta", ["delta": "**最新结果**"])
+        + nativeWebEvent("response.completed", ["response": nativeWebResponse("**最新结果**。")])
+    let transport = RecordingInstantQuestionTransport(responses: [(Data(sse.utf8), 200)])
+    let chunks = InstantQuestionChunkCollector()
+    let searches = InstantQuestionChunkCollector()
+    let reply = try await DeepSeekQuestionService(transport: transport).streamAnswer(
+        messages: (0..<16).map { InstantQuestionMessage(role: $0 % 2 == 0 ? .user : .assistant, content: "第\($0)条") },
+        attachment: nil, credentials: .init(deepSeekAPIKey: "fixture-only"), webSearchEnabled: true,
+        onSearch: { await searches.append("search") }, onChunk: { await chunks.append($0) })
+    #expect(reply.answer == "**最新结果**。")
+    #expect(await chunks.chunks == ["**最新结果**", "。"])
+    #expect(await searches.chunks == ["search"])
+    #expect(reply.webSearchUsed == true && reply.sources.count == 1)
+    let requests = await transport.requests
+    #expect(requests.count == 1)
+    let request = try #require(requests.first)
+    #expect(request.url?.absoluteString == "https://api.deepseek.com/responses")
+    #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-only")
+    let data = try #require(request.httpBody)
+    let object = try JSONSerialization.jsonObject(with: data)
+    let body = try #require(object as? [String: Any])
+    #expect(body["model"] as? String == "deepseek-v4-pro")
+    #expect(body["tool_choice"] as? String == "auto")
+    #expect((body["tools"] as? [[String: String]]) == [["type": "web_search"]])
+    #expect((body["input"] as? [[String: String]])?.count == 12)
+    #expect(body["stream"] as? Bool == true)
+    #expect(body["max_output_tokens"] as? Int == 8192)
+    #expect(body["previous_response_id"] == nil)
+}
+
+@Test(arguments: ["response.incomplete", "response.failed", "missing-terminal", "missing-search"])
+func nativeWebFailureKeepsPartialWithoutOfflineFallback(kind: String) async throws {
+    let partial = "已经收到的中文🎵"
+    var sse = try nativeWebEvent("response.output_text.delta", ["delta": partial])
+    let expected: InstantQuestionServiceFailure
+    switch kind {
+    case "response.incomplete":
+        sse += try nativeWebEvent(kind, ["response": ["status": "incomplete", "incomplete_details": ["reason": "max_output_tokens"]]], trailingBlank: false)
+        expected = .outputLimit
+    case "response.failed":
+        sse += try nativeWebEvent(kind, ["response": ["status": "failed", "error": ["code": "tool_error", "message": "failed"]]])
+        expected = .webSearchFailed
+    case "missing-search":
+        sse += try nativeWebEvent("response.completed", ["response": nativeWebResponse(partial, searched: false)])
+        expected = .webSearchFailed
+    default: expected = .interruptedResponse
+    }
+    let transport = RecordingInstantQuestionTransport(responses: [(Data(sse.utf8), 200)])
+    let chunks = InstantQuestionChunkCollector()
+    await #expect(throws: expected) {
+        _ = try await DeepSeekQuestionService(transport: transport).streamAnswer(
+            messages: [.init(role: .user, content: "最新消息")], attachment: nil,
+            credentials: .init(deepSeekAPIKey: "fixture"), webSearchEnabled: true,
+            onSearch: {}, onChunk: { await chunks.append($0) })
+    }
+    #expect(await chunks.chunks == [partial])
+    #expect(await transport.requests.count == 1)
+}
+
+@Test func nativeWebRejectsImageBeforeAnyRequestAndBoundsEvents() async throws {
+    let transport = RecordingInstantQuestionTransport(responses: [])
+    await #expect(throws: InstantQuestionServiceFailure.webSearchWithImage) {
+        _ = try await DeepSeekQuestionService(transport: transport).streamAnswer(
+            messages: [.init(role: .user, content: "看图")],
+            attachment: .init(name: "image.png", mediaType: "image/png", data: Data([1])),
+            credentials: .init(deepSeekAPIKey: "fixture"), webSearchEnabled: true, onSearch: {}, onChunk: { _ in })
+    }
+    #expect(await transport.requests.isEmpty)
+    var parser = DeepSeekResponsesStreamParser()
+    _ = try parser.consume("data: " + String(repeating: "a", count: 150_000))
+    #expect(throws: InstantQuestionServiceFailure.invalidResponse(service: "DeepSeek")) {
+        _ = try parser.consume("data: " + String(repeating: "b", count: 150_000))
+    }
+}
+
+@Test func nativeWebSourcesAreDeduplicatedSafeAndTextIsNotDuplicated() throws {
+    var parser = DeepSeekResponsesStreamParser()
+    let citations: [[String: Any]] = [
+        ["type": "url_citation", "url": "https://example.com/a", "title": "A"],
+        ["type": "url_citation", "url_citation": ["url": "https://example.com/a", "title": "重复"]],
+        ["type": "url_citation", "url": "javascript:alert(1)"],
+        ["type": "url_citation", "url": "https://secret@example.com"],
+    ]
+    let item: [String: Any] = ["type": "message", "content": [["type": "output_text", "text": "答案", "annotations": citations]]]
+    let sse = try nativeWebEvent("response.output_text.delta", ["delta": "答案"])
+        + nativeWebEvent("response.output_item.done", ["item": item])
+        + nativeWebEvent("response.completed", ["response": ["status": "completed", "output": [item]]])
+    var visible = ""
+    for line in sse.components(separatedBy: "\n") { visible += try parser.consume(line)?.delta ?? "" }
+    #expect(parser.sources.count == 1)
+    #expect(parser.sources.first?.url.absoluteString == "https://example.com/a")
+    #expect(visible == "答案" && parser.answer == "答案")
+    #expect(!parser.webSearchUsed) // URLs in text are not proof of a search.
+}
+
+@Test @MainActor func nativeWebDefaultsOnRemembersChoiceAndImageSwitchIsExplicit() async throws {
+    let suite = "narc.web.test." + UUID().uuidString
+    let prefs = try #require(UserDefaults(suiteName: suite))
+    defer { prefs.removePersistentDomain(forName: suite) }
+    let secrets = MemoryInstantQuestionSecretStore()
+    let credentials = InstantQuestionCredentialManager(secretStore: secrets)
+    #expect(credentials.saveDeepSeekKey("fixture"))
+    let offline = Data("data: {\"choices\":[{\"delta\":{\"content\":\"识图完成\"}}]}\n\ndata: [DONE]\n\n".utf8)
+    let transport = RecordingInstantQuestionTransport(responses: [(offline, 200)])
+    let store = InstantQuestionStore(storageURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("questions.json"))
+    let controller = InstantQuestionController(credentials: credentials, store: store,
+        service: DeepSeekQuestionService(transport: transport), preferences: prefs)
+    #expect(controller.webSearchEnabled)
+    controller.draft = "解释图片"
+    try controller.attachImage(name: "image.png", mediaType: "image/png", data: Data([1]))
+    #expect(!controller.canSend)
+    controller.sendDraft()
+    #expect(controller.draft == "解释图片" && controller.imageAttachment != nil)
+    #expect(controller.messages.isEmpty)
+    #expect(await transport.requests.isEmpty)
+    controller.useImageQuestionMode()
+    #expect(!controller.webSearchEnabled && controller.canSend)
+    controller.sendDraft()
+    for _ in 0..<100 where controller.isBusy { try await Task.sleep(for: .milliseconds(10)) }
+    #expect(controller.latestAnswer == "识图完成" && controller.imageAttachment == nil)
+    #expect(controller.messages.last?.webSearchUsed == nil)
+    controller.clearCurrent()
+    let recreated = InstantQuestionController(credentials: credentials, store: store, preferences: prefs)
+    #expect(!recreated.webSearchEnabled)
+    recreated.webSearchEnabled = true
+    let again = InstantQuestionController(credentials: credentials, store: store, preferences: prefs)
+    #expect(again.webSearchEnabled)
+    #expect(store.records.isEmpty)
+}
+
+@Test @MainActor func nativeWebSavesSourcesAndRendersDefaultOnPreview() async throws {
+    _ = NSApplication.shared
+    let secrets = MemoryInstantQuestionSecretStore()
+    let credentials = InstantQuestionCredentialManager(secretStore: secrets)
+    #expect(credentials.saveDeepSeekKey("fixture"))
+    let sse = try nativeWebEvent("response.web_search_call.searching")
+        + nativeWebEvent("response.output_text.delta", ["delta": "## 最新赛程\n\n**已核实**：请以官方赛程的日期和时区为准。"])
+        + nativeWebEvent("response.completed", ["response": nativeWebResponse("## 最新赛程\n\n**已核实**：请以官方赛程的日期和时区为准。")])
+    let transport = RecordingInstantQuestionTransport(responses: [(Data(sse.utf8), 200)])
+    let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("questions.json")
+    let store = InstantQuestionStore(storageURL: file)
+    let controller = InstantQuestionController(credentials: credentials, store: store,
+        service: DeepSeekQuestionService(transport: transport), webSearchEnabled: true)
+    controller.draft = "最近一场 NBA 比赛是什么时候？"
+    controller.sendDraft()
+    for _ in 0..<100 where controller.isBusy { try await Task.sleep(for: .milliseconds(10)) }
+    #expect(controller.messages.last?.webSearchUsed == true)
+    #expect(controller.sources.count == 1)
+    #expect(!FileManager.default.fileExists(atPath: file.path))
+    #expect(controller.saveCurrent())
+    let reloaded = InstantQuestionStore(storageURL: file)
+    #expect(reloaded.records.first?.messages.last?.webSearchUsed == true)
+    #expect(reloaded.records.first?.sources.first?.url.absoluteString == "https://example.com/latest")
+    // Legacy records omit the optional search metadata and continue to decode.
+    let old = Data("{\"id\":\"D8348487-F7EB-4841-B207-BB86892A1BCB\",\"role\":\"assistant\",\"content\":\"旧回答\",\"createdAt\":0,\"sourceIDs\":[]}".utf8)
+    #expect(try JSONDecoder().decode(InstantQuestionMessage.self, from: old).webSearchUsed == nil)
+    for (name, scheme) in [("light", ColorScheme.light), ("dark", .dark)] {
+        for settings in [false, true] {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: settings ? 630 : 680, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+            let content = settings ? AnyView(InstantQuestionSettingsView(controller: controller))
+                : AnyView(InstantQuestionView(controller: controller, store: store, onOpenPreferences: {}))
+            window.contentView = NSHostingView(rootView: content.environment(\.colorScheme, scheme))
+            let host = try #require(window.contentView)
+            host.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(200))
+            host.layoutSubtreeIfNeeded()
+            if let path = ProcessInfo.processInfo.environment["NARC_INSTANT_QA_SNAPSHOT_DIR"], path.hasPrefix("/private/tmp/") {
+                let directory = URL(fileURLWithPath: path)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                let png = try #require(bitmap.representation(using: .png, properties: [:]))
+                try png.write(to: directory.appendingPathComponent("native-web-\(settings ? "settings" : "answer")-\(name).png"))
+            }
+            window.close()
+        }
+    }
 }
 
 private struct FixedInstantQuestionAnswering: InstantQuestionAnswering {
@@ -1101,6 +1710,28 @@ private struct TurnCountingInstantQuestionAnswering: InstantQuestionAnswering {
     ) async throws -> InstantQuestionReply {
         let turn = messages.filter { $0.role == .user }.count
         return InstantQuestionReply(answer: "第 \(turn) 轮回答", sources: [])
+    }
+}
+
+private struct PacedLongQuestionAnswering: InstantQuestionAnswering {
+    func answer(messages: [InstantQuestionMessage], attachment: InstantQuestionImageAttachment?,
+                credentials: InstantQuestionCredentials) async throws -> InstantQuestionReply {
+        throw InstantQuestionServiceFailure.invalidRequest
+    }
+
+    func streamAnswer(messages: [InstantQuestionMessage], attachment: InstantQuestionImageAttachment?,
+                      credentials: InstantQuestionCredentials,
+                      onChunk: @escaping @Sendable (String) async -> Void) async throws -> InstantQuestionReply {
+        var answer = ""
+        for index in 1...24 {
+            try await Task.sleep(for: .milliseconds(95))
+            let chunk = "\n\n## 步骤 \(index)\n\n**结论**：长回答要完整且可读。\n\n1. 先说明依据和边界，再给出可以操作的建议。\n- 中文、emoji 🎵、`代码` 和 **强调内容** 都需要正确换行。\n> 引用应保持内容高度稳定。\n\n```swift\nlet step = \(index)\n```\n"
+            answer += chunk
+            await onChunk(chunk)
+        }
+        answer += "\n本轮结束。"
+        await onChunk("\n本轮结束。")
+        return InstantQuestionReply(answer: answer, sources: [])
     }
 }
 

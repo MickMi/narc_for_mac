@@ -31,7 +31,7 @@ struct InstantQuestionSettingsView: View {
                     }
                 )
                 .disabled(credentials.isAuthorizing || controller.isBusy || controller.isCheckingConnection)
-                Text("即时回答使用 deepseek-flash，支持文字和图片理解。密钥只保存在 macOS 钥匙串。")
+                Text("联网问答使用 Pro 原生搜索；关闭联网时使用 Flash，支持文字和图片理解。两种模式共用此 Key，密钥只保存在 macOS 钥匙串。")
                     .font(.narcCaption)
                     .foregroundStyle(Color.narcTextMuted)
             }
@@ -52,15 +52,17 @@ struct InstantQuestionSettingsView: View {
                 if let message = credentials.lastError {
                     Text(message).font(.narcCaption).foregroundStyle(Color.narcDanger)
                 }
-                Text("点击后尝试读取钥匙串；需要授权时由 macOS 提示。已获授权则直接就绪，不会强制弹密码窗口。此操作不发送 AI 请求，不计费。")
+                Text("保存或授权后，后续打开 AI 会尝试无弹窗读取；系统需要重新确认时才在这里主动授权。密钥只保存在钥匙串，并在本次运行缓存；这一步不发送 AI 请求，不计费。")
                     .font(.narcCaption).foregroundStyle(Color.narcTextMuted)
             }
 
             Section("搜索模式") {
-                Text("DeepSeek 问答与 Bing / Google 网页搜索彼此独立：NARC 不会把网页结果转交给 DeepSeek，也不需要额外的搜索 API Key。")
+                Toggle("联网搜索", isOn: $controller.webSearchEnabled)
+                    .disabled(controller.isBusy)
+                Text("首次默认开启，并记住你的选择。开启时使用 deepseek-v4-pro 和原生网页搜索，模型与搜索费用由 DeepSeek 计费；无需额外搜索 Key。Pro 暂不支持图片，图片提问需要明确关闭联网。")
                     .font(.narcCaption)
                     .foregroundStyle(Color.narcTextMuted)
-                Text("DeepSeek 当前不提供可执行的内建网页搜索，所以 AI 回答不会显示为“已联网”。")
+                Text("Bing / Google 仍是独立网页搜索，结果不会自动发送给 DeepSeek；它们不使用搜索 API。")
                     .font(.narcCaption)
                     .foregroundStyle(Color.narcTextFaint)
             }
@@ -81,7 +83,7 @@ struct InstantQuestionSettingsView: View {
                         .font(.narcCaption)
                         .foregroundStyle(Color.narcTextMuted)
                 }
-                Text("验证会发送一次真实 DeepSeek 请求，可能计入服务额度。Bing / Google 网页搜索不使用 API。")
+                Text("验证只发送一次 Flash 基础问答请求，可能计入服务额度；联网效果请在问答窗口测试。")
                     .font(.narcCaption)
                     .foregroundStyle(Color.narcTextFaint)
             }
